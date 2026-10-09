@@ -1,0 +1,108 @@
+{
+  "_doc": [
+    "Edit freely. delegates[].aa is the Artificial Analysis slug (effort suffix included; the bare slug is the max-effort run).",
+    "pools are ids from quota.py: claude-5h, claude-7d, codex-5h, codex-7d, cursor-auto, cursor-premium.",
+    "prior: hand-set stand-in numbers for models AA does not rate. They are guesses; tune them from experience.",
+    "tasks[].weights apply to intelligence, coding, speed (output tok/s) and price (cheaper scores higher; inside a subscription it approximates how fast a model drains its pool)."
+  ],
+  "min_quota_pct": 10,
+  "orchestrator_pool_penalty": 0.8,
+  "delegates": [
+    {
+      "id": "codex-sol",
+      "agent": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "aa": "gpt-6-1-sol-xhigh",
+      "pools": ["codex-5h", "codex-7d"],
+      "notes": "Proven 2026-10-09 (eu-pd-composers). Follows brief constraints literally: check its dry-run output against real data."
+    },
+    {
+      "id": "codex-astra",
+      "agent": "codex",
+      "model": "gpt-6-astra",
+      "effort": "xhigh",
+      "aa": "gpt-6-astra-xhigh",
+      "pools": ["codex-5h", "codex-7d"],
+      "notes": "Codex config default. AA price is 5x Sol, so expect it to drain the Codex pool faster."
+    },
+    {
+      "id": "codex-terra",
+      "agent": "codex",
+      "model": "gpt-5.6-terra",
+      "effort": "max",
+      "aa": "gpt-5-6-terra",
+      "pools": ["codex-5h", "codex-7d"],
+      "notes": "Faster, cheaper OpenAI option for mechanical work."
+    },
+    {
+      "id": "cursor-auto",
+      "agent": "cursor",
+      "model": "auto",
+      "aa": null,
+      "prior": {"intelligence": 42, "coding": 42, "tps": 100, "price_blended": 2.5},
+      "pools": ["cursor-auto"],
+      "notes": "Cursor routes to a model of its choosing; quality varies per call. Draws on the Auto+Composer pool."
+    },
+    {
+      "id": "cursor-composer",
+      "agent": "cursor",
+      "model": "composer-2.5",
+      "aa": null,
+      "prior": {"intelligence": 42, "coding": 46, "tps": 200, "price_blended": 3.4},
+      "pools": ["cursor-auto"],
+      "notes": "Cursor's in-house agentic coding model, tuned for speed. Draws on the Auto+Composer pool."
+    },
+    {
+      "id": "cursor-grok",
+      "agent": "cursor",
+      "model": "grok-4.7-high",
+      "aa": "grok-4-7-high",
+      "pools": ["cursor-premium"],
+      "notes": "Named models outside Auto/Composer bill to Cursor's premium (API) pool."
+    },
+    {
+      "id": "claude-sonnet",
+      "agent": "claude-subagent",
+      "model": "sonnet",
+      "aa": "claude-sonnet-5-5-high",
+      "pools": ["claude-5h", "claude-7d"],
+      "notes": "Agent tool with model=sonnet. Shares the orchestrator's own Claude quota. Effort level assumed (high)."
+    },
+    {
+      "id": "claude-haiku",
+      "agent": "claude-subagent",
+      "model": "haiku",
+      "aa": "claude-haiku-5-5",
+      "pools": ["claude-5h", "claude-7d"],
+      "notes": "Agent tool with model=haiku. Cheap and fast; shares the orchestrator's Claude quota."
+    }
+  ],
+  "tasks": {
+    "review": {
+      "desc": "read a diff/codebase and report defects",
+      "mode": "read-only",
+      "weights": {"intelligence": 0.45, "coding": 0.45, "speed": 0.05, "price": 0.05}
+    },
+    "refactor": {
+      "desc": "behaviour-preserving code changes",
+      "mode": "write",
+      "weights": {"intelligence": 0.3, "coding": 0.55, "speed": 0.1, "price": 0.05}
+    },
+    "implement": {
+      "desc": "new features or fixes from a brief",
+      "mode": "write",
+      "weights": {"intelligence": 0.4, "coding": 0.5, "speed": 0.05, "price": 0.05}
+    },
+    "research": {
+      "desc": "investigate a question, read docs/data, write findings",
+      "mode": "read-only",
+      "weights": {"intelligence": 0.7, "coding": 0.05, "speed": 0.15, "price": 0.1}
+    },
+    "bulk-label": {
+      "desc": "many small, similar judgements (classify/tag/extract rows)",
+      "mode": "write",
+      "weights": {"intelligence": 0.3, "coding": 0.0, "speed": 0.35, "price": 0.35}
+    }
+  }
+}
