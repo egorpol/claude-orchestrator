@@ -54,6 +54,11 @@ check_prereqs() {
   else
     miss "cursor-agent: curl https://cursor.com/install -fsS | bash (read it first), then 'cursor-agent login'"
   fi
+  if command -v claude >/dev/null && claude plugin list 2>/dev/null | grep -q 'codex@openai-codex'; then
+    ok "codex plugin for Claude Code (/codex:review, /codex:adversarial-review)"
+  else
+    warn "optional: Codex plugin (needs node >= 18.18): claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex"
+  fi
   [ -n "${ARTIFICIAL_ANALYSIS_API_KEY:-}" ] && ok "ARTIFICIAL_ANALYSIS_API_KEY set (official AA coding index)" \
     || warn "ARTIFICIAL_ANALYSIS_API_KEY unset: ratings come from the AA leaderboard page (coding = proxy)"
 }

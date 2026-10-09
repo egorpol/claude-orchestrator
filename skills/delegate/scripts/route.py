@@ -11,7 +11,7 @@ def _ratings(d, aa_models):
         m = aa_models[slug]
         return ({"intelligence": m.get("intelligence"), "coding": m.get("coding"),
                  "speed": m.get("tps"), "price": m.get("price_blended")},
-                "aa*" if m.get("coding_is_proxy") else "aa")
+                ("aa*" if m.get("coding_is_proxy") else "aa") + ("~" if d.get("aa_proxy") else ""))
     p = d.get("prior")
     if p:
         return ({"intelligence": p.get("intelligence"), "coding": p.get("coding"),
@@ -122,7 +122,7 @@ def render(task_name, task, rows):
     out.append("QUAL = weighted AA metrics vs the best candidate (speed^0.5, price^0.35 damped); "
                "SCORE = QUAL x sqrt(quota left) x pace bonus (<=+15%), x0.8 for Claude subagents (shared pool).")
     out.append("SRC: aa = AA API, aa* = AA page (coding = proxy from Terminal-Bench 4.0 + SciCode), "
-               "prior = hand-set guess in catalog.json.")
+               "~ = rating of a stand-in model (aa_proxy), prior = hand-set guess in catalog.json.")
     top = next((r for r in rows if not r["excluded"]), None)
     if top:
         d = top["delegate"]
