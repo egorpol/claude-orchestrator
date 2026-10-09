@@ -70,10 +70,14 @@ These are interactive supervisors, mostly GUI or tmux based, where a human watch
 
 [hesreallyhim/awesome-claude-code](https://github.com/hesreallyhim/awesome-claude-code) (55k★) · [VoltAgent/awesome-claude-code-subagents](https://github.com/VoltAgent/awesome-claude-code-subagents) (25.6k★) · [andyrewlee/awesome-agent-orchestrators](https://github.com/andyrewlee/awesome-agent-orchestrators) (2.1k★) · [bradAGI/awesome-cli-coding-agents](https://github.com/bradAGI/awesome-cli-coding-agents) (1.3k★) · [anthropics/skills](https://github.com/anthropics/skills) (180k★, official)
 
-## Candidate improvements for `delegate`, drawn from the above
+## Improvements drawn from the above
 
-1. **`delegate followup NAME --brief fixes.md`:** resume the same agent session in the same worktree with review findings (`codex exec resume <id>`, `cursor-agent --resume <chatId>`), following superpowers' fix-round policy.
-2. **Cross-vendor review step:** after a write delegate finishes, run a read-only review on a different vendor (Codex reviews Cursor's work, and the other way round) before Claude's own review.
-3. **`--verify CMD`:** the launcher runs the project's checks after the agent exits and records the result, so "done" means the checks passed (claw-orchestrator's idea).
-4. **Brief template:** the Codex plugin's XML contract tags in `SKILL.md`'s brief guidance.
-5. **Read-only reviews with `--output-schema`:** structured findings Claude can parse.
+Done on 2026-10-09:
+1. `delegate followup NAME --brief F | --from-review N [--fresh --model M]`: the next round runs in the same worktree and resumes the agent session (superpowers' fix-round policy; `--fresh` is the escalation path).
+2. `delegate review NAME`: a read-only, cross-vendor review that checks against every round's brief, records a verdict, findings and spec compliance, and keeps before/after diff digests that prove it did not modify anything.
+3. `--verify CMD` on launch and followup, plus `delegate verify NAME`. Checks run after the agent exits, so "done" means the checks passed (claw-orchestrator's idea).
+4. The brief guidance in SKILL.md now includes the Codex plugin's tagged-contract advice.
+5. `openai/codex-plugin-cc` is installed (user scope); the review gate is left off.
+
+Still open:
+- Machine-readable reviews via `codex exec --output-schema` (the plugin ships `review-output.schema.json`).

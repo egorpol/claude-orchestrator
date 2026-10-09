@@ -5,6 +5,9 @@
   delegate ratings [--refresh]        AA ratings for catalog models
   delegate route <task>               rank delegates for a task type
   delegate launch codex|cursor ...    worktree + brief + background run
+  delegate review RUN [--agent ...]   read-only review of a run's changes (other vendor by default)
+  delegate followup RUN --brief F     next round in the same worktree, resuming the agent session
+  delegate verify RUN [--cmd C]       re-run the run's check command in its worktree
   delegate status [RUN]               runs overview / one run in detail
   delegate diff RUN                   diff stat + changes.patch
   delegate apply RUN [--check]        apply the reviewed patch to the main checkout
@@ -111,7 +114,7 @@ def main():
     s = sub.add_parser("launch", help="start a delegate in its own worktree")
     s.add_argument("agent", choices=["codex", "cursor"])
     s.add_argument("--brief", required=True, help="markdown brief file")
-    s.add_argument("--model", help="codex default gpt-6.1-sol (@xhigh); cursor default composer-2.5")
+    s.add_argument("--model", help="codex default gpt-6.1-sol (@xhigh); cursor default auto")
     s.add_argument("--effort", help="codex reasoning effort (low..xhigh, max)")
     s.add_argument("--name", help="run name (default <agent>-<timestamp>); branch is delegate/<name>")
     s.add_argument("--repo", help="repo path (default: cwd)")
@@ -124,8 +127,39 @@ def main():
                    help="cursor only: --sandbox disabled --force (needed for network, e.g. installs); ask the user first")
     s.add_argument("--detach", action="store_true",
                    help="return immediately (default: block until done; run it with run_in_background)")
+    s.add_argument("--verify", metavar="CMD",
+                   help="shell command run in the worktree after the agent exits (e.g. the test suite); "
+                        "result in verify.log / verify_code")
     s.add_argument("--dry-run", action="store_true", help="print run.sh and prompt, create nothing")
     s.set_defaults(fn=runs.launch)
+
+    s = sub.add_parser("followup", help="next round in the same worktree (resumes the agent session)")
+    s.add_argument("run")
+    s.add_argument("--brief", help="markdown file with what to change next")
+    s.add_argument("--from-review", type=int, metavar="N", help="append review N's findings to the brief")
+    s.add_argument("--fresh", action="store_true",
+                   help="new session instead of resuming (e.g. with a stronger --model after repeated failures)")
+    s.add_argument("--model")
+    s.add_argument("--effort")
+    s.add_argument("--verify", metavar="CMD", help="override the run's verify command")
+    s.add_argument("--detach", action="store_true")
+    s.add_argument("--dry-run", action="store_true", help="show what would run; archive nothing")
+    s.set_defaults(fn=runs.followup)
+
+    s = sub.add_parser("review", help="read-only review of a run's changes, by default by the other vendor")
+    s.add_argument("run")
+    s.add_argument("--agent", choices=["codex", "cursor"], help="default: the vendor that did NOT write the code")
+    s.add_argument("--model", help="codex default gpt-6.1-sol (@xhigh); cursor default auto")
+    s.add_argument("--effort")
+    s.add_argument("--focus", help="extra review focus, e.g. 'race conditions in the cache'")
+    s.add_argument("--detach", action="store_true")
+    s.add_argument("--dry-run", action="store_true", help="print the review prompt; start nothing")
+    s.set_defaults(fn=runs.review)
+
+    s = sub.add_parser("verify", help="re-run the run's check command in its worktree")
+    s.add_argument("run")
+    s.add_argument("--cmd", help="command to run instead of the stored one")
+    s.set_defaults(fn=runs.verify)
 
     s = sub.add_parser("status", help="list runs, or details for given runs")
     s.add_argument("runs", nargs="*", help="run name or directory")
