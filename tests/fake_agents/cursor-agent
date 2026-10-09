@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Quota-free Cursor fixture with realistic assistant/tool/result stream-json."""
+import json
+import os
+from pathlib import Path
+import sys
+
+
+args = sys.argv[1:]
+assert "-p" in args and args[args.index("--output-format") + 1] == "stream-json"
+if "--sandbox" in args and args[args.index("--sandbox") + 1] == "enabled":
+    assert "--force" not in args
+if "--resume" in args:
+    assert args[args.index("--resume") + 1] == "fake-cursor-session"
+assert not any(k in os.environ for k in ("CLAUDECODE", "VSCODE_FAKE", "LD_LIBRARY_PATH"))
+wt = Path(args[args.index("--workspace") + 1])
+prompt = args[-1]
+read_only = "--mode" in args and args[args.index("--mode") + 1] == "ask"
+review = prompt.startswith("# Review request")
+if not read_only:
+    with (wt / "tracked.txt").open("a") as f:
+        f.write("cursor round\n")
+    with (wt / "new-cursor.txt").open("a") as f:
+        f.write("new cursor line\n")
+if review:
+    assert read_only
+    assert list((wt / ".delegate").glob("review-*.verify.log"))
+    answer = "## Verdict\nVerdict: CHANGES REQUESTED\n## Findings\n- [high] `tracked.txt:1`: fixture finding. Evidence: line. Fix: follow up.\n- [medium] `tracked.txt:2`: fixture finding. Evidence: line. Fix: follow up.\n- [low] `tracked.txt:3`: fixture finding. Evidence: line. Fix: follow up.\n## Spec compliance\n- partly\n"
+else:
+    answer = "## Changes\nUpdated tracked.txt and new-cursor.txt.\n## Verification\nChecks passed.\n## Open questions / conflicts\nNone.\n"
+answer += "\n## Digest\nfiles: tracked.txt (+1/-0); new-cursor.txt (+1/-0)\nverify: git diff --check -> pass\nconflicts: none\nrisks: none\n"
+
+
+def emit(event):
+    event["session_id"] = "fake-cursor-session"
+    print(json.dumps(event), flush=True)
+
+
+def assistant(text):
+    emit({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}})
+
+
+emit({"type": "system", "subtype": "init", "model": "auto"})
+assistant("Earlier narration, omitted from the final message.")
+emit({"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {"path": "tracked.txt"}}}})
+emit({"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {"path": "tracked.txt"}, "result": {"content": "base"}}}})
+assistant(answer)
+emit({"type": "result", "subtype": "success", "is_error": False, "duration_ms": 1500,
+      "result": "Earlier narration, omitted from the final message." + answer,
+      "usage": {"inputTokens": 110, "outputTokens": 25, "cacheReadTokens": 900, "cacheWriteTokens": 30}})
+sys.exit(int(os.environ.get("FAKE_AGENT_EXIT", "0")))

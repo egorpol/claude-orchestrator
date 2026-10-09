@@ -14,6 +14,7 @@
   delegate cleanup RUN                remove worktree + branch
 """
 import argparse
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -75,7 +76,10 @@ def cmd_route(a):
     pools = quota.pools(quota.fetch(a.source))
     aa = ratings.load(refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))["models"]
     agents = set(a.agents.split(",")) if a.agents else None
-    task, rows = route.rank(a.task, cat, pools, aa, min_quota=a.min_quota, agents=agents)
+    options = {"min_quota": a.min_quota, "agents": agents}
+    if a.prefer is not None:
+        options["prefer"] = [s.strip() for s in a.prefer.split(",") if s.strip()]
+    task, rows = route.rank(a.task, cat, pools, aa, **options)
     if a.json:
         print(json.dumps([{"id": r["delegate"]["id"], "score": r["score"], "quality": r["quality"],
                            "quota_left": r["left"], "pace": r["pace"], "excluded": r["excluded"],
@@ -105,6 +109,7 @@ def main():
     s = sub.add_parser("route", help="rank delegates for a task type")
     s.add_argument("task", help="review | refactor | implement | research | bulk-label (see catalog.json)")
     s.add_argument("--agents", help="comma list to restrict: codex,cursor,claude-subagent")
+    s.add_argument("--prefer", help="comma list of preferred delegate IDs")
     s.add_argument("--min-quota", type=float, help="exclude pools below this %% left (default from catalog)")
     s.add_argument("--refresh", action="store_true")
     s.add_argument("--source", default="auto", choices=["auto", "direct", "daemon"])
@@ -142,6 +147,8 @@ def main():
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--verify", metavar="CMD", help="override the run's verify command")
+    s.add_argument("--link", action="append", default=[],
+                   help="repo-relative gitignored path to symlink into the worktree (repeatable)")
     s.add_argument("--detach", action="store_true")
     s.add_argument("--dry-run", action="store_true", help="show what would run; archive nothing")
     s.set_defaults(fn=runs.followup)
@@ -164,6 +171,7 @@ def main():
     s = sub.add_parser("status", help="list runs, or details for given runs")
     s.add_argument("runs", nargs="*", help="run name or directory")
     s.add_argument("--log", type=int, default=15, help="log lines to show")
+    s.add_argument("--full", action="store_true", help="also show the log tail and whole last message")
     s.set_defaults(fn=runs.status)
 
     s = sub.add_parser("diff", help="write changes.patch for a run and show its stat")
@@ -187,6 +195,21 @@ def main():
     s = sub.add_parser("_cursor-last")
     s.add_argument("root")
     s.set_defaults(fn=lambda a: runs.cursor_last(Path(a.root)))
+
+    s = sub.add_parser("_finalize")
+    s.add_argument("root")
+    s.set_defaults(fn=lambda a: runs.finalize(Path(a.root)))
+
+    for name in ("cost", "ask"):
+        try:
+            mod = importlib.import_module(name)
+        except ImportError:
+            continue
+        mod.register(sub)
+
+    # Internal lifecycle helpers remain callable but stay out of CLI help.
+    sub._choices_actions[:] = [c for c in sub._choices_actions if not c.dest.startswith("_")]
+    sub.metavar = "{" + ",".join(k for k in sub.choices if not k.startswith("_")) + "}"
 
     a = p.parse_args()
     a.fn(a)
