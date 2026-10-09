@@ -63,7 +63,7 @@ Delegates' summaries can be wrong when their code is right (Composer misquoted a
 ## Agents
 
 - **Codex** (`codex exec --json`): `-s workspace-write` or `read-only`, `-C <worktree>`, `-o last-message.md`, prompt on stdin. Per-round usage from `turn.completed.usage` lands in meta history. Follow-ups: `codex exec resume <session-id>` (id from log; sandbox via `-c sandbox_mode=…`). Models: `gpt-6.1-sol` (proven), `gpt-6-astra` (~5× $/token), `gpt-5.6-terra` (fast, mechanical). Effort `low`…`xhigh`, then `max`.
-- **Cursor** (`cursor-agent -p`, `~/.local/bin`): **`--model auto`** stays the default (Auto pool, SpaceX in-house). Grok (`cursor-grok`, `grok-4.7-*`) draws on Cursor's "Models" quota, not premium; openusage has no metric, so `route` shows QUOTA `?`. Composer bills premium (unverified). Use named models only if the user asks.
+- **Cursor** (`cursor-agent -p`, `~/.local/bin`): **`--model auto`** stays the default (Auto pool, SpaceX in-house). Named Grok (`cursor-grok`, `grok-4.7-*`) and Composer (`composer-2.5*`) draw on Cursor's "Cursor Models" quota, not premium (Cursor spending tab, 2026-10-10); openusage has no metric for it, so `route` shows QUOTA `?`. Use named models only if the user asks.
   - Runs with `--sandbox enabled --trust --workspace <worktree> --output-format stream-json`. Sandboxed shell auto-runs; writes outside fail with EPERM; no network.
   - **Never add `--force`**: it silently bypasses the sandbox (tested 2026-10-09). `--unsandboxed` (network, installs) needs the user's OK.
   - `--mode ask` (`--read-only` and Cursor reviews) **cannot run shell**; reads only.
