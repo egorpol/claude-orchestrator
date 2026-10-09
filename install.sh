@@ -5,6 +5,8 @@
 #   ./install.sh            symlink skills (edits in the repo apply immediately)
 #   ./install.sh --copy     copy instead (for machines where the repo may move)
 #   ./install.sh --bin      also put `delegate` on PATH via ~/.local/bin
+#   ./install.sh --hooks    also register hooks/context-guard.py as a UserPromptSubmit
+#                           hook in settings.json (nudges a handoff past ~250k context)
 #   ./install.sh --check    only check prerequisites
 #   ./install.sh --force    replace an existing non-symlinked skill dir (it is
 #                           moved to ~/.claude/skill-backups/, never deleted)
@@ -13,14 +15,16 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SKILLS_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"
 BACKUP_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skill-backups"
-mode=link bin=0 check_only=0 force=0 failed=0
+SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+mode=link bin=0 hooks=0 check_only=0 force=0 failed=0
 for arg in "$@"; do
   case "$arg" in
     --copy) mode=copy ;;
     --bin) bin=1 ;;
+    --hooks) hooks=1 ;;
     --check) check_only=1 ;;
     --force) force=1 ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -61,6 +65,8 @@ check_prereqs() {
   fi
   [ -n "${ARTIFICIAL_ANALYSIS_API_KEY:-}" ] && ok "ARTIFICIAL_ANALYSIS_API_KEY set (official AA coding index)" \
     || warn "ARTIFICIAL_ANALYSIS_API_KEY unset: ratings come from the AA leaderboard page (coding = proxy)"
+  if grep -qs 'hooks/context-guard.py' "$SETTINGS"; then ok "context-guard hook registered in $SETTINGS"
+  else warn "optional: context-guard hook not registered (./install.sh --hooks)"; fi
 }
 
 install_skill() {
@@ -105,6 +111,22 @@ if [ "$bin" = 1 ]; then
   mkdir -p "$HOME/.local/bin"
   ln -sfn "$SKILLS_DIR/delegate/scripts/delegate" "$HOME/.local/bin/delegate"
   ok "delegate on PATH via ~/.local/bin/delegate"
+fi
+if [ "$hooks" = 1 ]; then
+  # merge, never replace: keep every existing key and hook; back the file up first
+  [ -f "$SETTINGS" ] && cp "$SETTINGS" "$SETTINGS.bak-$(date +%Y%m%d-%H%M%S)"
+  python3 - "$SETTINGS" "$REPO/hooks/context-guard.py" <<'PY_HOOK'
+import json, pathlib, sys
+path, script = pathlib.Path(sys.argv[1]), sys.argv[2]
+s = json.loads(path.read_text()) if path.exists() else {}
+cmd = f'python3 "{script}"'
+groups = s.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
+if not any(h.get("command") == cmd for g in groups for h in g.get("hooks", [])):
+    groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 5}]})
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(s, indent=2) + "\n")
+PY_HOOK
+  ok "context-guard hook registered in $SETTINGS"
 fi
 if [ "$failed" = 1 ]; then echo "some skills were not installed (see above)" >&2; exit 1; fi
 echo "done. Claude Code picks up new skills without a restart."

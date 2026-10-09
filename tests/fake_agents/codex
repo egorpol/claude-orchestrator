@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Quota-free codex exec fixture with native JSON events and a final message."""
+import json
+import os
+from pathlib import Path
+import sys
+
+
+args = sys.argv[1:]
+assert args[0] == "exec" and "--json" in args, args
+if "resume" in args:
+    assert "fake-codex-thread" in args, args
+prompt = sys.stdin.read()
+wt = Path(args[args.index("-C") + 1]) if "-C" in args else Path.cwd()
+last = Path(args[args.index("-o") + 1])
+read_only = ("read-only" in args or 'sandbox_mode="read-only"' in args)
+assert not any(k in os.environ for k in ("CLAUDECODE", "VSCODE_FAKE", "LD_LIBRARY_PATH"))
+review = prompt.startswith("# Review request")
+if not read_only:
+    with (wt / "tracked.txt").open("a") as f:
+        f.write("codex round\n")
+    with (wt / "new-codex.txt").open("a") as f:
+        f.write("new codex line\n")
+if review:
+    assert read_only
+    assert list((wt / ".delegate").glob("review-*.verify.log"))
+    answer = "## Verdict\nVerdict: APPROVE\n## Findings\nNone.\n## Spec compliance\n- met\n"
+else:
+    answer = "## Changes\nUpdated tracked.txt and new-codex.txt.\n## Verification\nChecks passed.\n## Open questions / conflicts\nNone.\n"
+answer += "\n## Digest\nfiles: tracked.txt (+1/-0); new-codex.txt (+1/-0)\nverify: git diff --check -> pass\nconflicts: none\nrisks: none\n"
+last.write_text(answer)
+
+
+def emit(event):
+    print(json.dumps(event), flush=True)
+
+
+print("Reading additional input from stdin...")
+emit({"type": "thread.started", "thread_id": "fake-codex-thread"})
+emit({"type": "turn.started"})
+emit({"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "Inspecting the requested change."}})
+emit({"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": "git diff --check", "exit_code": 0, "status": "completed"}})
+if not read_only:
+    emit({"type": "item.completed", "item": {"id": "item_2", "type": "file_change", "changes": [{"path": "tracked.txt", "kind": "update"}, {"path": "new-codex.txt", "kind": "add"}], "status": "completed"}})
+emit({"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 40, "cache_write_input_tokens": 0, "output_tokens": 10, "reasoning_output_tokens": 5}})
+emit({"type": "turn.started"})
+emit({"type": "item.completed", "item": {"id": "item_3", "type": "agent_message", "text": answer}})
+emit({"type": "item.completed", "item": {"id": "item_4", "type": "future_item"}})
+emit({"type": "turn.completed", "usage": {"input_tokens": 200, "cached_input_tokens": 50, "output_tokens": 20, "reasoning_output_tokens": 7}})
+sys.exit(int(os.environ.get("FAKE_AGENT_EXIT", "0")))

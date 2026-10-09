@@ -1,12 +1,29 @@
 {
   "_doc": [
     "Edit freely. delegates[].aa is the Artificial Analysis slug (effort suffix included; the bare slug is the max-effort run).",
-    "pools are ids from quota.py: claude-5h, claude-7d, codex-5h, codex-7d, cursor-auto, cursor-premium.",
+    "pools are ids from quota.py: claude-5h, claude-7d, codex-5h, codex-7d, cursor-auto, cursor-premium. cursor-models has no openusage metric (quota unknown).",
     "prior: hand-set stand-in numbers for models AA does not rate; aa_proxy: true means `aa` is a stand-in model's rating, not the delegate's own.",
+    "prefer: list (all tasks) or {task: [delegate ids...]}; preferred delegates that clear min_quota rank first in listed order.",
     "tasks[].weights apply to intelligence, coding, speed (output tok/s) and price (cheaper scores higher; inside a subscription it approximates how fast a model drains its pool)."
   ],
   "min_quota_pct": 10,
   "orchestrator_pool_penalty": 0.8,
+  "orchestrator_cost": {
+    "weights": {
+      "input": 1,
+      "cache_read": 0.1,
+      "cache_write": 2.0,
+      "output": 5.0
+    },
+    "usd_per_mtok_input": null
+  },
+  "prefer": {
+    "implement": ["cursor-auto", "codex-sol"],
+    "refactor": ["cursor-auto", "codex-sol"],
+    "review": ["codex-sol", "cursor-auto"],
+    "research": ["codex-sol", "cursor-auto"],
+    "bulk-label": ["cursor-auto"]
+  },
   "delegates": [
     {
       "id": "codex-sol",
@@ -53,7 +70,17 @@
       "pools": [
         "cursor-auto"
       ],
-      "notes": "Default Cursor delegate. Auto routes to SpaceX in-house models (Cursor is SpaceX-owned) and is the most cost-efficient Cursor option; rated with Grok 4.7 High as a stand-in. Named models (composer-2.5, grok-4.7-*, ...) work via --model but bill to the premium pool."
+      "notes": "Default Cursor delegate. Auto routes to SpaceX in-house models (Cursor is SpaceX-owned) and is the most cost-efficient Cursor option; rated with Grok 4.7 High as a stand-in. composer-2.5 bills the premium/API pool (unverified). Named Grok models bill Cursor's Models quota — see cursor-grok."
+    },
+    {
+      "id": "cursor-grok",
+      "agent": "cursor",
+      "model": "grok-4.7-high",
+      "aa": "grok-4-7-high",
+      "pools": [
+        "cursor-models"
+      ],
+      "notes": "Grok in Cursor draws on Cursor's Models quota, not premium/API. openusage has no Models metric (only plan_auto / plan_api / plan_percent), so quota shows as unknown. Real model ids: grok-4.7-{low,medium,high,xhigh}[-fast]."
     },
     {
       "id": "claude-sonnet",

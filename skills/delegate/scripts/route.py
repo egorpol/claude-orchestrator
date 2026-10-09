@@ -20,11 +20,20 @@ def _ratings(d, aa_models):
 
 
 def _quota(d, pools):
-    lefts, paces, problems = [], [], []
+    """Return (left_pct|None, pace|None, problems, unknown_pools).
+
+    A pool missing from `pools` is unknown: it neither excludes the delegate nor
+    counts as full. Pools present but with an `error` key are reported in
+    problems; left stays None when no healthy pool reported a percentage.
+    """
+    lefts, paces, problems, unknown = [], [], [], []
     for pid in d.get("pools", []):
         e = pools.get(pid)
-        if not e or "error" in e:
-            problems.append(f"{pid}: {e.get('error') if e else 'unknown pool'}")
+        if not e:
+            unknown.append(pid)
+            continue
+        if "error" in e:
+            problems.append(f"{pid}: {e['error']}")
             continue
         lefts.append(e["left_pct"])
         # pace only counts for long windows; a 5h window refills too soon to matter
@@ -32,21 +41,35 @@ def _quota(d, pools):
             paces.append(e["pace"])
     left = min(lefts) if lefts else None
     pace = min(paces) if paces else None
-    return left, pace, problems
+    return left, pace, problems, unknown
 
 
-def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None):
+def _prefer_list(task_name, catalog, prefer):
+    if prefer is None:
+        prefer = catalog.get("prefer")
+    if prefer is None:
+        return []
+    if isinstance(prefer, dict):
+        return list(prefer.get(task_name) or [])
+    return list(prefer)
+
+
+def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None, prefer=None):
     task = catalog["tasks"][task_name]
     w = task["weights"]
     min_quota = catalog.get("min_quota_pct", 10) if min_quota is None else min_quota
+    pref = _prefer_list(task_name, catalog, prefer)
+    pref_index = {did: i for i, did in enumerate(pref)}
     rows = []
     for d in catalog["delegates"]:
         if agents and d["agent"] not in agents:
             continue
         metrics, source = _ratings(d, aa_models)
-        left, pace, problems = _quota(d, pools)
+        left, pace, problems, unknown = _quota(d, pools)
         rows.append({"delegate": d, "metrics": metrics, "source": source,
-                     "left": left, "pace": pace, "problems": problems})
+                     "left": left, "pace": pace, "problems": problems,
+                     "unknown_pools": unknown,
+                     "preferred": d["id"] in pref_index})
 
     # normalise each metric to 0..1 against the best candidate. Speed and price
     # span 5-100x across models, so they are damped; otherwise a tiny model's
@@ -72,7 +95,8 @@ def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None):
             wsum += w[k]
         r["quality"] = q / wsum if wsum else 0.0
         if r["left"] is None:
-            r["quota_factor"] = 0.7  # unknown quota: neither trust nor exclude
+            # unknown / errored quota: neither trust nor exclude (visible as "?")
+            r["quota_factor"] = 0.7
         else:
             bonus = 1 + 0.15 * max(0.0, min(1.0, (r["pace"] or 1) - 1))
             r["quota_factor"] = math.sqrt(r["left"] / 100) * bonus
@@ -81,7 +105,16 @@ def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None):
             r["quota_factor"] *= catalog.get("orchestrator_pool_penalty", 0.8)
         r["excluded"] = r["left"] is not None and r["left"] < min_quota
         r["score"] = 0.0 if r["excluded"] else 100 * r["quality"] * r["quota_factor"]
-    rows.sort(key=lambda r: -r["score"])
+
+    # Preferred delegates that clear the quota filter lead, in catalog/CLI order.
+    # Preference never resurrects an exhausted pool; those stay excluded and
+    # sort with everyone else by score (excluded → 0).
+    def sort_key(r):
+        if r["preferred"] and not r["excluded"]:
+            return (0, pref_index[r["delegate"]["id"]])
+        return (1, -r["score"])
+
+    rows.sort(key=sort_key)
     return task, rows
 
 
@@ -107,8 +140,13 @@ def render(task_name, task, rows):
     table = [hdr]
     for r in rows:
         m = r["metrics"]
+        tag = r["delegate"]["id"]
+        if r["excluded"]:
+            tag += " (excluded)"
+        elif r.get("preferred"):
+            tag += " (pref)"
         table.append((
-            r["delegate"]["id"] + (" (excluded)" if r["excluded"] else ""),
+            tag,
             f"{r['score']:.0f}", f"{r['quality']:.2f}",
             fmt(m["intelligence"], ".1f"), fmt(m["coding"], ".1f"),
             fmt(m["speed"], ".0f"), fmt(m["price"], ".2f"),
@@ -120,7 +158,9 @@ def render(task_name, task, rows):
     out += ["  ".join(c.ljust(wd) for c, wd in zip(row, widths)).rstrip() for row in table]
     out.append("")
     out.append("QUAL = weighted AA metrics vs the best candidate (speed^0.5, price^0.35 damped); "
-               "SCORE = QUAL x sqrt(quota left) x pace bonus (<=+15%), x0.8 for Claude subagents (shared pool).")
+               "SCORE = QUAL x sqrt(quota left) x pace bonus (<=+15%), x0.8 for Claude subagents (shared pool). "
+               "pref = catalog/CLI preference (outranks score when the pool clears min_quota). "
+               "QUOTA ? = unknown pool (neither excluded nor treated as full).")
     out.append("SRC: aa = AA API, aa* = AA page (coding = proxy from Terminal-Bench 4.0 + SciCode), "
                "~ = rating of a stand-in model (aa_proxy), prior = hand-set guess in catalog.json.")
     top = next((r for r in rows if not r["excluded"]), None)
@@ -133,4 +173,6 @@ def render(task_name, task, rows):
     for r in rows:
         for p in r["problems"]:
             out.append(f"warning: {r['delegate']['id']}: {p}")
+        for pid in r.get("unknown_pools") or []:
+            out.append(f"quota ?: {r['delegate']['id']}: {pid} (unknown pool)")
     return "\n".join(out)

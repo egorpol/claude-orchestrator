@@ -21,6 +21,8 @@ POOLS = {
     "cursor-premium": {"provider": "cursor", "metric": "plan_api_percent_used",
                        "reset": "billing_cycle_end", "cycle": True,
                        "label": "Cursor premium (API)"},
+    # cursor-models (Grok etc.): openusage has no metric — intentionally absent.
+    # route._quota treats a missing pool as unknown (QUOTA ?), not excluded.
 }
 
 

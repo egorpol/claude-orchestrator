@@ -12,7 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -21,7 +21,7 @@ RUNS_ROOT = Path(os.environ.get("CLAUDE_DELEGATE_ROOT",
                                 / "claude-delegate" / "runs"))
 DEFAULTS = {"codex": ("gpt-6.1-sol", "xhigh"), "cursor": ("auto", None)}
 ROUND_FILES = ("brief.md", "prompt.md", "run.sh", "log", "last-message.md", "exit_code", "pid",
-               "started_at", "finished_at", "verify.log", "verify_code")
+               "started_at", "finished_at", "verify.log", "verify_code", "verify-adhoc.log")
 
 # Claude Code here runs inside Cursor's AppImage; these leak into children and
 # can break other binaries, or make a delegate think it is talking to an IDE.
@@ -40,12 +40,19 @@ CONTRACT = """
 {links}- If a constraint in the brief would make you drop existing behaviour, data or a fallback, or real data contradicts an assumption in the brief, do not comply silently: keep the existing behaviour where you can and flag the conflict in your final message.
 - Verify against real data or tests where the brief says how (dry runs, test commands) and report the actual output, not what you expect it to be.
 - End with a final message containing: (1) what you changed, file by file; (2) the commands you ran to verify and their real results; (3) open questions, conflicts, and anything you skipped or were unsure about.
+- Keep those prose sections and append this short machine-readable block at the very end:
+## Digest
+files: <path> (+a/-d); ...
+verify: <command> -> <result>
+conflicts: <one line each, or none>
+risks: <path:line - why, or none>
 """
 
 FOLLOWUP_NOTE = """
 
 ---
 Follow-up round {round}. The delegation contract from the start of this session still applies: same worktree, no commits, flag conflicts, same final-message structure. The worktree already contains your earlier changes; build on them.
+Keep the prose sections and append the same `## Digest` block (files, verify, conflicts, risks) at the very end.
 """
 
 REVIEW_PROMPT = """# Review request (read-only)
@@ -53,6 +60,7 @@ REVIEW_PROMPT = """# Review request (read-only)
 Another coding agent made changes in this git worktree ({wt}) relative to commit {base}. Review them. This is a read-only task: do not modify, create or delete any files.
 
 The full diff is in `.delegate/review-{n}.patch` (path relative to the worktree root; new files appear as additions). Read it, then read the surrounding code in the worktree where you need context.{shell_note}
+The run's verify command and the last 80 lines of its latest verify output are in `.delegate/review-{n}.verify.log`. Read that file to check verification claims against actual output.
 
 ## The brief(s) the other agent was given
 <brief>
@@ -67,20 +75,27 @@ Report only material issues; skip style nits.
 
 ## Output (use exactly this structure)
 ## Verdict
-APPROVE or CHANGES REQUESTED
+Verdict: APPROVE or CHANGES REQUESTED
 ## Findings
 - [high|medium|low] `path:line`: the problem. Evidence: what you saw. Fix: the smallest change that resolves it.
 (write "None." when there are no material findings)
 ## Spec compliance
 - one line per requirement in the brief: met / partly / not met, with the reason
+Keep these prose sections and append at the very end:
+## Digest
+files: none (read-only review)
+verify: <command or supplied verify log> -> <result>
+conflicts: <one line each, or none>
+risks: <path:line - why, or none>
 """
 
 
 def git(*args, cwd=None, check=True):
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                       env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     if check and r.returncode != 0:
         sys.exit(f"git {' '.join(args)} failed: {r.stderr.strip()}")
-    return r.stdout.strip()
+    return r.stdout if "-z" in args else r.stdout.strip()
 
 
 def _foreign_venv(path_entry, repo):
@@ -106,6 +121,9 @@ def clean_env_lines(repo):
             kept = [p for p in val.split(":")
                     if p and "/.mount_" not in p and not (var == "PATH" and _foreign_venv(p, repo))]
             lines.append(f"export {var}={shlex.quote(':'.join(kept))}")
+    # test runs (agent or --verify) must not leave __pycache__/*.pyc in the worktree: untracked
+    # files count as changes, so they would land in changes.patch and get applied
+    lines.append("export PYTHONDONTWRITEBYTECODE=1")
     return lines
 
 
@@ -121,7 +139,7 @@ def build_cmd(agent, model, effort, wt, job, read_only, unsandboxed=False, resum
             cmd = ["codex", "exec", "-m", model, "-s", sandbox, "-C", str(wt), "--color", "never"]
         if effort:
             cmd += ["-c", f'model_reasoning_effort="{effort}"']
-        cmd += ["-o", str(job / "last-message.md")]
+        cmd += ["--json", "-o", str(job / "last-message.md")]
         cmd += [resume, "-"] if resume else ["-"]
         return " ".join(q(c) for c in cmd) + f" < {q(str(job / 'prompt.md'))}"
     if agent == "cursor":
@@ -150,9 +168,10 @@ def job_script(job, label, repo, wt, cmd, agent, verify=None, digest_base=None):
              f"# delegate {label}: generated {datetime.now().isoformat(timespec='seconds')}",
              "# Clean environment, run the agent in its worktree, record exit code and last message.",
              *clean_env_lines(repo),
-             f"cd {q(str(wt))} || exit 1",
              f"echo $$ > {J('pid')}",
-             f"date -Is > {J('started_at')}"]
+             f"date -Is > {J('started_at')}",
+             f"cd {q(str(wt))} || {{ echo 1 > {J('exit_code')}; date -Is > {J('finished_at')}; "
+             f"python3 {q(str(SCRIPTS / 'delegate'))} _finalize {q(str(job))}; exit 1; }}"]
     if digest:
         lines.append(f"{digest} > {J('pre_digest')}")
     lines += [f"{cmd} > {J('log')} 2>&1", "rc=$?", f'echo "$rc" > {J("exit_code")}']
@@ -163,7 +182,8 @@ def job_script(job, label, repo, wt, cmd, agent, verify=None, digest_base=None):
     if verify:
         lines.append(f"{{ echo {q('$ ' + verify)}; bash -c {q(verify)}; }} > {J('verify.log')} 2>&1; "
                      f"echo $? > {J('verify_code')}")
-    lines += [f"date -Is > {J('finished_at')}", 'exit "$rc"', ""]
+    lines += [f"date -Is > {J('finished_at')}",
+              f"python3 {q(str(SCRIPTS / 'delegate'))} _finalize {q(str(job))}", 'exit "$rc"', ""]
     return "\n".join(lines)
 
 
@@ -206,6 +226,27 @@ def _exclude(repo, patterns):
         if p not in lines:
             lines.append(p)
     exclude.write_text("\n".join(lines) + "\n")
+
+
+def add_links(repo, wt, paths, existing=()):
+    """Validate links first, then install them and share launch/followup exclusions."""
+    for link in paths:
+        p = Path(link)
+        if p.is_absolute() or ".." in p.parts or not p.parts or p.parts[0] in (".git", ".delegate"):
+            sys.exit(f"--link {link}: expected a repo-relative input path")
+        src, dst = repo / p, wt / p
+        if not src.exists():
+            sys.exit(f"--link {link}: {src} does not exist")
+        if dst.exists() or dst.is_symlink():
+            if link in existing and dst.is_symlink() and dst.resolve() == src.resolve():
+                continue
+            sys.exit(f"--link {link}: {dst} already exists in the worktree (tracked path?)")
+    for link in paths:
+        dst = wt / link
+        if not dst.is_symlink():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.symlink_to(repo / link)
+    _exclude(repo, ["/" + l.strip("/") for l in paths] + ["/.delegate"])
 
 
 def launch(a):
@@ -254,15 +295,7 @@ def launch(a):
 
     root.mkdir(parents=True, exist_ok=True)
     git("worktree", "add", "-b", branch, str(wt), base_sha, cwd=repo)
-    for l in a.link:
-        src, dst = repo / l, wt / l
-        if not src.exists():
-            sys.exit(f"--link {l}: {src} does not exist")
-        if dst.exists() or dst.is_symlink():
-            sys.exit(f"--link {l}: {dst} already exists in the worktree (tracked path?)")
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.symlink_to(src)
-    _exclude(repo, ["/" + l.strip("/") for l in a.link] + ["/.delegate"])
+    add_links(repo, wt, a.link)
     (root / "brief.md").write_text(brief)
     (root / "prompt.md").write_text(prompt)
     (root / "run.sh").write_text(run_sh)
@@ -285,6 +318,9 @@ def session_id(job, agent):
         return None
     text = log.read_text(errors="replace")
     if agent == "codex":
+        for ev in _events(job):
+            if ev.get("type") == "thread.started" and ev.get("thread_id"):
+                return ev["thread_id"]
         m = re.search(r"^session id: (\S+)", text, re.M)
         return m.group(1) if m else None
     for line in text.splitlines():
@@ -300,7 +336,7 @@ def session_id(job, agent):
 def followup(a):
     root = find_run(a.run)
     meta = load_meta(root)
-    if state(root) == "running":
+    if state(root) in BUSY:
         sys.exit("delegate is still running")
     wt = Path(meta["worktree"])
     if not wt.exists():
@@ -326,12 +362,18 @@ def followup(a):
         print(f"[dry run] round {k + 1}: {meta['agent']} {model}"
               + (f", resuming session {sid}" if sid else ", fresh session") + f"\n---- brief ----\n{text}")
         return
+    links = list(dict.fromkeys(meta.get("links", []) + a.link))
+    add_links(Path(meta["repo"]), wt, a.link, existing=meta.get("links", []))
+    meta["links"] = links
+    if (root / "exit_code").exists() and not any(r.get("n", r.get("round")) == k for r in meta.get("history", [])):
+        meta.setdefault("history", []).append(_round_record(root, meta, k))
     archive.mkdir(exist_ok=True)
     for f in ROUND_FILES:
         if (root / f).exists():
             shutil.move(str(root / f), str(archive / f))
     if a.fresh:
-        scope = "Work only inside this worktree; do not modify files outside it."
+        scope = ("This is a read-only task: do not modify, create or delete any files."
+                 if meta.get("read_only") else "Work only inside this worktree; do not modify files outside it.")
         links_txt = "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
                             for l in meta.get("links", []))
         prompt = (text + "\n\nAn earlier attempt's changes are already in this worktree (see `git diff "
@@ -340,14 +382,14 @@ def followup(a):
                                     links=links_txt))
     else:
         prompt = text + FOLLOWUP_NOTE.format(round=k + 1)
+        prompt += "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
+                          for l in a.link)
     cmd = build_cmd(meta["agent"], model, effort, wt, root, meta.get("read_only"), meta.get("unsandboxed"),
                     resume=sid)
     (root / "brief.md").write_text(text + "\n")
     (root / "prompt.md").write_text(prompt)
     (root / "run.sh").write_text(job_script(root, f"run {meta['name']} round {k + 1}", Path(meta["repo"]), wt,
                                             cmd, meta["agent"], verify=verify))
-    meta.setdefault("history", []).append({"round": k, "model": meta["model"], "effort": meta.get("effort"),
-                                           "session": session_id(archive, meta["agent"])})
     meta.update(rounds=k + 1, model=model, effort=effort, verify=verify)
     save_meta(root, meta)
     print(f"round {k} archived to {archive}")
@@ -359,7 +401,7 @@ def followup(a):
 def review(a):
     root = find_run(a.run)
     meta = load_meta(root)
-    if state(root) == "running":
+    if state(root) in BUSY:
         sys.exit("delegate is still running")
     wt = Path(meta["worktree"])
     if not wt.exists():
@@ -395,11 +437,19 @@ def review(a):
     for old in (wt / ".delegate").glob("review-*.patch"):
         old.unlink()  # a stale diff would only confuse the reviewer
     (wt / ".delegate" / f"review-{n}.patch").write_text(patch)
+    verify_log = root / "verify.log"
+    if not verify_log.exists():
+        previous = sorted(root.glob("round-*/verify.log"), key=lambda p: int(p.parent.name.split("-")[1]))
+        verify_log = previous[-1] if previous else verify_log
+    verify_tail = ("\n".join(verify_log.read_text(errors="replace").splitlines()[-80:])
+                   if verify_log.exists() else "(no verify output recorded)")
+    (wt / ".delegate" / f"review-{n}.verify.log").write_text(
+        f"$ {meta.get('verify') or '(no verify command stored)'}\n{verify_tail}\n")
     (job / "prompt.md").write_text(prompt)
     (job / "run.sh").write_text(job_script(job, f"review {meta['name']} #{n}", Path(meta["repo"]), wt, cmd,
                                            agent, digest_base=meta["base"]))
-    (job / "meta.json").write_text(json.dumps({"agent": agent, "model": model, "effort": effort,
-                                               "round": meta.get("rounds", 1)}, indent=2) + "\n")
+    save_meta(job, {"agent": agent, "model": model, "effort": effort, "n": n,
+                    "round": meta.get("rounds", 1)})
     print(f"review {n} of {meta['name']} (round {meta.get('rounds', 1)}) by {agent} {model}"
           + (f" @{effort}" if effort else ""))
     print(f"result:   {job / 'last-message.md'}")
@@ -409,21 +459,41 @@ def review(a):
 def verify(a):
     root = find_run(a.run)
     meta = load_meta(root)
+    if not Path(meta["worktree"]).is_dir():
+        sys.exit("worktree was removed; cannot run verify (saved output is in verify.log)")
     cmd = a.cmd or meta.get("verify")
     if not cmd:
         sys.exit("no verify command stored for this run; pass --cmd")
     r = subprocess.run(["bash", "-c", cmd], cwd=meta["worktree"], capture_output=True, text=True)
     out = f"$ {cmd}\n{r.stdout}{r.stderr}"
-    if cmd == meta.get("verify"):  # ad-hoc --cmd runs only print; status tracks the run's own check
+    if a.cmd is None:
         (root / "verify.log").write_text(out)
         (root / "verify_code").write_text(f"{r.returncode}\n")
-    print(out.rstrip())
-    print(f"\nverify: {'pass' if r.returncode == 0 else f'FAIL rc={r.returncode}'}")
+    else:
+        (root / "verify-adhoc.log").write_text(out)
+    print("\n".join(out.rstrip().splitlines()[-30:]))
+    print(f"verify: {'pass' if r.returncode == 0 else f'FAIL rc={r.returncode}'}")
     sys.exit(r.returncode)
+
+
+BUSY = ("running", "verifying")
+
+
+def _pid_alive(job):
+    try:
+        os.kill(int((job / "pid").read_text().strip()), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def state(job):
     if (job / "exit_code").exists():
+        # the agent has exited; until finished_at exists, run.sh is still verifying/finalising
+        if not (job / "finished_at").exists() and _pid_alive(job):
+            return "verifying"
         rc = (job / "exit_code").read_text().strip()
         return "done" if rc == "0" else f"failed rc={rc}"
     pid_f = job / "pid"
@@ -439,14 +509,244 @@ def state(job):
 
 
 def _elapsed(job):
+    minutes = _minutes(job)
+    if minutes is None:
+        return "?"
+    m, s = divmod(round(minutes * 60), 60)
+    return f"{m}m{s:02d}s"
+
+
+def _minutes(job):
     try:
         start_t = datetime.fromisoformat((job / "started_at").read_text().strip())
-    except (FileNotFoundError, ValueError):
-        return ""
-    end_f = job / "finished_at"
-    end = datetime.fromisoformat(end_f.read_text().strip()) if end_f.exists() else datetime.now(start_t.tzinfo)
-    m, s = divmod(int((end - start_t).total_seconds()), 60)
-    return f"{m}m{s:02d}s"
+        end_f = job / "finished_at"
+        end = datetime.fromisoformat(end_f.read_text().strip()) if end_f.exists() else datetime.now(start_t.tzinfo)
+        return round(max(0, (end - start_t).total_seconds()) / 60, 4)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _read(job, name):
+    p = job / name
+    return p.read_text(errors="replace").strip() if p.exists() else None
+
+
+def _code(job, name):
+    try:
+        return int(_read(job, name))
+    except (ValueError, TypeError):
+        return None
+
+
+def _events(job):
+    log = job / "log"
+    if log.exists():
+        with log.open(errors="replace") as stream:
+            for line in stream:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and isinstance(ev.get("type"), str):
+                    yield ev
+
+
+def usage(job, agent):
+    """Normalise one job's usage; old Codex totals remain explicitly cumulative."""
+    if agent == "cursor":
+        reported = [e["usage"] for e in _events(job)
+                    if e["type"] == "result" and isinstance(e.get("usage"), dict)]
+        if not reported:
+            return None
+        u = reported[-1]
+        return {"input": u.get("inputTokens", 0), "cached_input": u.get("cacheReadTokens", 0),
+                "cache_write": u.get("cacheWriteTokens"), "output": u.get("outputTokens", 0),
+                "reasoning_output": None}
+    reported = [e["usage"] for e in _events(job)
+                if e["type"] == "turn.completed" and isinstance(e.get("usage"), dict)]
+    if reported:
+        optional_sum = lambda key: (sum(u.get(key) or 0 for u in reported)
+                                    if any(u.get(key) is not None for u in reported) else None)
+        return {"input": sum(u.get("input_tokens", 0) - u.get("cached_input_tokens", 0) for u in reported),
+                "cached_input": sum(u.get("cached_input_tokens", 0) for u in reported),
+                "cache_write": optional_sum("cache_write_input_tokens"),
+                "output": sum(u.get("output_tokens", 0) for u in reported),
+                "reasoning_output": optional_sum("reasoning_output_tokens")}
+    text = _read(job, "log") or ""
+    totals = re.findall(r"tokens used\s*:?\s*([\d,]+)", text, re.I)
+    return {"total_reported": int(totals[-1].replace(",", ""))} if totals else None
+
+
+def _verdict(job):
+    # Accept both the new Verdict: line and the original ## Verdict + next line.
+    m = re.search(r"verdict\W*\s*(APPROVE|CHANGES REQUESTED)", _read(job, "last-message.md") or "", re.I)
+    return m.group(1).upper() if m else None
+
+
+def _round_record(job, meta, n):
+    return {"n": n, "model": meta.get("model"), "effort": meta.get("effort"),
+            "started": _read(job, "started_at"), "minutes": _minutes(job),
+            "exit": _code(job, "exit_code"), "verify": _code(job, "verify_code"),
+            "usage": usage(job, meta["agent"])}
+
+
+def _context(job):
+    meta = load_meta(job)
+    if job.name.startswith("review-") and (job.parent / "meta.json").exists():
+        return job.parent, load_meta(job.parent), meta
+    return job, meta, None
+
+
+def finalize(job):
+    """Record this finished job once, then print the notification's final packet."""
+    root, meta, review_meta = _context(job)
+    if _code(job, "exit_code") is None or not (job / "finished_at").exists():
+        sys.exit(f"job is not finished: {job}")
+    if review_meta is not None:
+        review_meta.update(minutes=_minutes(job), usage=usage(job, review_meta["agent"]),
+                           verdict=_verdict(job))
+        save_meta(job, review_meta)
+    else:
+        n = meta.get("rounds", 1)
+        history = [r for r in meta.get("history", []) if r.get("n", r.get("round")) != n]
+        history.append(_round_record(job, meta, n))
+        meta["history"] = sorted(history, key=lambda r: r.get("n", r.get("round", 0)))
+        save_meta(root, meta)
+    print("\n".join(packet(job)))
+
+
+def _numstat(text):
+    """Parse git's NUL format, including the three-field rename representation."""
+    fields = iter(text.split("\0"))
+    rows = []
+    for field in fields:
+        if not field:
+            continue
+        parts = field.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        added, deleted, path = parts
+        if not path:
+            old, path = next(fields, ""), next(fields, "")
+            path = f"{old} => {path}"
+        rows.append({"path": path, "insertions": int(added) if added.isdigit() else 0,
+                     "deletions": int(deleted) if deleted.isdigit() else 0,
+                     "binary": added == "-" or deleted == "-"})
+    return rows
+
+
+def change_stats(root, meta):
+    """Read-only numstat against base, adding untracked files without staging."""
+    wt = Path(meta["worktree"])
+    if wt.is_dir():
+        rows = _numstat(git("diff", "--numstat", "-z", meta["base"], "--", ".",
+                            ":(exclude).delegate", cwd=wt, check=False))
+        known = {r["path"] for r in rows}
+        untracked = git("ls-files", "--others", "--exclude-standard", "-z", "--", ".",
+                        ":(exclude).delegate", cwd=wt, check=False)
+        for path in filter(None, untracked.split("\0")):
+            if path in known:
+                continue
+            # --no-index handles binary and missing-newline files exactly as git does.
+            stat = git("diff", "--no-index", "--numstat", "-z", "--", "/dev/null", path,
+                       cwd=wt, check=False)
+            extra = _numstat(stat)
+            for r in extra:
+                r["path"] = path
+            rows.extend(extra)
+        return rows
+    patch = root / "changes.patch"
+    if patch.exists():
+        cwd = meta["repo"] if Path(meta["repo"]).is_dir() else root
+        return _numstat(git("apply", "--numstat", "-z", str(patch), cwd=cwd, check=False))
+    return []
+
+
+def _one_line(text):
+    return " ".join(str(text).split())
+
+
+def _concerns(job):
+    text = _read(job, "last-message.md") or ""
+    digest = re.search(r"^## Digest\s*$([\s\S]*)", text, re.M)
+    if digest:
+        values = {}
+        key = None
+        for line in digest.group(1).splitlines():
+            match = re.match(r"^(files|verify|conflicts|risks):\s*(.*)", line)
+            if match:
+                key = match[1]
+                values.setdefault(key, []).append(match[2])
+            elif line.strip() and key:
+                values[key].append(line.strip())
+        if any(k in values for k in ("conflicts", "risks")):
+            lines = []
+            for k in ("conflicts", "risks"):
+                value = _one_line("; ".join(values.get(k, ["see last-message.md"])))
+                lines.append(f"{k}: {value}")
+            return lines
+    section = re.search(r"^#{1,6}[^\n]*(?:open.?questions|conflicts|open.?points)[^\n]*\n([\s\S]*?)(?=^#{1,6} |\Z)",
+                        text, re.M | re.I)
+    if section:
+        lines = [l.strip() for l in section.group(1).splitlines() if l.strip()][:3]
+        if lines:
+            return ["conflicts/risks: " + _one_line(l) for l in lines]
+    return ["conflicts/risks: see last-message.md"]
+
+
+def _usage_line(u):
+    if u is None:
+        return "usage: unavailable"
+    if "total_reported" in u:
+        return f"usage: {u['total_reported']:,} total reported (legacy Codex; cumulative session total)"
+    return (f"usage: input {u['input']:,}, cached {u['cached_input']:,}, "
+            f"cache write {u['cache_write'] if u['cache_write'] is not None else '?'}, "
+            f"output {u['output']:,}, reasoning {u['reasoning_output'] if u['reasoning_output'] is not None else '?'}")
+
+
+def packet(job):
+    """Rebuild a bounded notification packet entirely from existing artifacts."""
+    root, meta, review_meta = _context(job)
+    jm = review_meta or meta
+    label = f"review {job.name.split('-')[-1]}" if review_meta is not None else f"round {meta.get('rounds', 1)}"
+    rc = _code(job, "exit_code")
+    verify_state = _verify_state(job) or "verify none"
+    lines = [f"== {_one_line(meta['name'])} | {_one_line(jm['agent'])} {_one_line(jm['model'])} | {label} | "
+             f"{state(job)} | {_elapsed(job)} | exit {rc if rc is not None else '?'} | {verify_state}",
+             _usage_line(usage(job, jm["agent"]))]
+    if review_meta is not None:
+        text = _read(job, "last-message.md") or ""
+        counts = {s: len(re.findall(r"^\s*[-*]\s*\[" + s + r"\]", text, re.M | re.I))
+                  for s in ("high", "medium", "low")}
+        lines.append(f"verdict: {_verdict(job) or 'unclear'} | findings: "
+                     + ", ".join(f"{s} {count}" for s, count in counts.items()))
+        pre, post = _read(job, "pre_digest"), _read(job, "post_digest")
+        if pre is not None and post is not None and pre != post:
+            lines.append("WARNING: reviewer changed the worktree")
+    else:
+        rows = change_stats(root, meta)
+        totals = (sum(r["insertions"] for r in rows), sum(r["deletions"] for r in rows))
+        suffix = " (worktree removed; saved patch)" if not Path(meta["worktree"]).is_dir() else ""
+        if not Path(meta["worktree"]).is_dir() and not (root / "changes.patch").exists():
+            suffix = " (worktree removed; no saved patch)"
+        lines.append(f"files: {len(rows)} | +{totals[0]}/-{totals[1]} total{suffix}"
+                     + (" | applied" if (root / "applied").exists() else ""))
+        for r in sorted(rows, key=lambda r: (-(r["insertions"] + r["deletions"]), r["path"]))[:8]:
+            lines.append(f"  {_one_line(r['path'])}: " + ("binary" if r["binary"] else
+                         f"+{r['insertions']}/-{r['deletions']}"))
+        if len(rows) > 8:
+            lines.append(f"  ... {len(rows) - 8} more file(s)")
+        reviews = sorted(root.glob("review-*/meta.json"), key=lambda p: int(p.parent.name.split("-")[1]))
+        if reviews:
+            lines.append("latest " + _review_summary(reviews[-1].parent))
+    lines.extend(_concerns(job))
+    paths = f"artifacts: {job / 'last-message.md'} | {job / 'log'} | {job / 'verify.log'}"
+    if review_meta is not None:
+        paths += f" | {Path(meta['worktree']) / '.delegate' / (job.name + '.verify.log')}"
+    else:
+        paths += f" | {root / 'changes.patch'}"
+    lines.append(paths)
+    return lines
 
 
 def _verify_state(job):
@@ -462,8 +762,7 @@ def _review_summary(job):
     parts = [f"{job.name}: {meta.get('agent', '?')} {meta.get('model', '?')} [{state(job)} {_elapsed(job)}]"]
     last = job / "last-message.md"
     if last.exists():
-        m = re.search(r"verdict\W*\s*(APPROVE|CHANGES REQUESTED)", last.read_text(), re.I)
-        parts.append(m.group(1).upper() if m else "verdict unclear")
+        parts.append(_verdict(job) or "verdict unclear")
     pre, post = job / "pre_digest", job / "post_digest"
     if pre.exists() and post.exists() and pre.read_text() != post.read_text():
         parts.append("WARNING: reviewer changed the worktree")
@@ -490,6 +789,18 @@ def _render_cursor_line(line):
     return None
 
 
+def _render_codex_event(ev):
+    item = ev.get("item") or {}
+    kind = item.get("type") or ev["type"]
+    if kind in ("agent_message", "reasoning"):
+        return kind + ": " + _one_line(item.get("text", ""))[:200]
+    if kind == "command_execution":
+        return f"command: {_one_line(item.get('command', ''))[:160]} | exit {item.get('exit_code', '?')}"
+    if kind == "file_change":
+        return "files: " + "; ".join(_one_line(c.get("path", "?")) for c in item.get("changes", []))[:200]
+    return kind
+
+
 def log_tail(job, agent, n):
     log = job / "log"
     if not log.exists() or n <= 0:
@@ -497,6 +808,10 @@ def log_tail(job, agent, n):
     lines = log.read_text(errors="replace").splitlines()
     if agent == "cursor":
         lines = [r for r in (_render_cursor_line(l) for l in lines) if r]
+    elif agent == "codex":
+        events = list(_events(job))
+        if events:
+            lines = [_render_codex_event(e) for e in events]
     return lines[-n:]
 
 
@@ -507,6 +822,16 @@ def status(a):
         print(f"no runs under {RUNS_ROOT}")
         return
     for root in roots:
+        if a.runs and not a.full:
+            print("\n".join(packet(root)))
+            continue
+        if root.name.startswith("review-"):  # review meta has no worktree; show packet, log tail, message
+            print("\n".join(packet(root)))
+            for l in log_tail(root, load_meta(root)["agent"], a.log):
+                print("   " + l[:240])
+            if (root / "last-message.md").exists():
+                print("   -- last message --\n" + (root / "last-message.md").read_text().rstrip())
+            continue
         meta = load_meta(root)
         wt = Path(meta["worktree"])
         changes = git("status", "--porcelain", cwd=wt, check=False).splitlines() if wt.exists() else []
@@ -519,6 +844,8 @@ def status(a):
             bits.append("applied")
         print(f"== {meta['name']}  {meta['agent']} {meta['model']}  [{state(root)} {_elapsed(root)}]  "
               + ", ".join(bits))
+        if not a.runs:
+            continue
         print(f"   {root}")
         reviews = sorted(root.glob("review-*"), key=lambda p: int(p.name.split("-")[1]))
         for rv in reviews:
@@ -579,7 +906,14 @@ def make_patch(root, meta):
 def diff(a):
     root = find_run(a.run)
     meta = load_meta(root)
-    stat, patch = make_patch(root, meta)
+    if Path(meta["worktree"]).is_dir():
+        stat, patch = make_patch(root, meta)
+    elif (root / "changes.patch").exists():
+        patch = (root / "changes.patch").read_text()
+        cwd = meta["repo"] if Path(meta["repo"]).is_dir() else root
+        stat = git("apply", "--stat", str(root / "changes.patch"), cwd=cwd)
+    else:
+        sys.exit("worktree was removed and no changes.patch was saved")
     print(stat or "(no changes)")
     print(f"\npatch: {root / 'changes.patch'}  ({len(patch.splitlines())} lines)")
     if a.full:
@@ -589,7 +923,7 @@ def diff(a):
 def apply(a):
     root = find_run(a.run)
     meta = load_meta(root)
-    if state(root) == "running":
+    if state(root) in BUSY:
         sys.exit("delegate is still running")
     _, patch = make_patch(root, meta)
     if not patch.strip():
@@ -603,6 +937,46 @@ def apply(a):
     if not a.check:
         (root / "applied").write_text(_digest(patch) + "\n")
     print(("patch applies cleanly to " if a.check else "applied to working tree of ") + meta["repo"])
+    if not a.check:
+        log_run(root, meta, "applied")
+        print(f"logged to {RUNS_ROOT / 'runs.jsonl'}. If this completes the work item: "
+              "write a handoff and start a fresh orchestrator session.")
+
+
+def log_run(root, meta, outcome):
+    """Append the cost interface's record, reading legacy accounting without backfilling."""
+    history = {r.get("n", r.get("round")): r for r in meta.get("history", [])}
+    rounds = []
+    for n in range(1, meta.get("rounds", 1) + 1):
+        job = root if n == meta.get("rounds", 1) else root / f"round-{n}"
+        old = history.get(n, {})
+        if _code(job, "exit_code") is None and old.get("exit") is None:
+            continue
+        info = {**meta, **{k: old[k] for k in ("model", "effort") if k in old}}
+        record = _round_record(job, info, n)
+        for key in record:
+            if key in old:
+                record[key] = old[key]
+        rounds.append(record)
+    reviews = []
+    for path in sorted(root.glob("review-*/meta.json"), key=lambda p: int(p.parent.name.split("-")[1])):
+        job, rv = path.parent, load_meta(path.parent)
+        reviews.append({"n": int(job.name.split("-")[1]), "agent": rv["agent"], "model": rv["model"],
+                        "minutes": rv.get("minutes", _minutes(job)),
+                        "verdict": rv.get("verdict", _verdict(job)),
+                        "usage": rv.get("usage", usage(job, rv["agent"]))})
+    rows = change_stats(root, meta)
+    mode = ("read-only" if meta.get("read_only") else "workspace-write") if meta["agent"] == "codex" else (
+        "ask" if meta.get("read_only") else "unsandboxed" if meta.get("unsandboxed") else "sandbox")
+    record = {"v": 1, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "repo": Path(meta["repo"]).name, "repo_path": meta["repo"], "run": meta["name"],
+              "agent": meta["agent"], "model": meta["model"], "effort": meta.get("effort"),
+              "mode": mode, "links": meta.get("links", []), "base": meta["base"], "outcome": outcome,
+              "files": len(rows), "insertions": sum(r["insertions"] for r in rows),
+              "deletions": sum(r["deletions"] for r in rows), "rounds": rounds, "reviews": reviews}
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    with (RUNS_ROOT / "runs.jsonl").open("a") as stream:
+        stream.write(json.dumps(record) + "\n")
 
 
 def _digest(text):
@@ -612,7 +986,7 @@ def _digest(text):
 def cleanup(a):
     root = find_run(a.run)
     meta = load_meta(root)
-    if state(root) == "running" or any(state(rv) == "running" for rv in root.glob("review-*")):
+    if state(root) in BUSY or any(state(rv) in BUSY for rv in root.glob("review-*")):
         sys.exit("delegate or a review is still running")
     wt = Path(meta["worktree"])
     if wt.exists():
@@ -622,6 +996,9 @@ def cleanup(a):
             if not (applied.exists() and applied.read_text().strip() == _digest(make_patch(root, meta)[1])):
                 sys.exit(f"worktree has changes that were not applied (or changed since apply); "
                          f"apply them or pass --force:\n{dirty}")
+    if a.purge and not (root / "applied").exists():
+        log_run(root, meta, "discarded")
+    if wt.exists():
         for l in meta.get("links", []):
             if (wt / l).is_symlink():
                 (wt / l).unlink()
