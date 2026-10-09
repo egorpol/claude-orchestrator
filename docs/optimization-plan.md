@@ -31,8 +31,9 @@ Also fixed along the way:
 
 Still open:
 - Cursor's "Models" quota has no openusage metric.
-- Composer's billing pool is unverified.
+- ~~Composer's billing pool is unverified.~~ Settled 2026-10-10: the Cursor spending tab lists "Cursor Models · Includes Cursor Grok and Composer", so both named Grok and Composer bill the `cursor-models` pool.
 - Re-measure on the next long session with `delegate cost --session latest`.
+- Orchestrator effort: measured above (lever 4), keep xhigh. If you want proof, run one routine work item at `high` and compare its thinking tokens and rounds against an xhigh item.
 
 ## What the orchestrator session cost
 
@@ -104,7 +105,12 @@ The notification then *is* the status. SKILL.md: "never poll a run started with 
   - or a Claude subagent;
   - then read only the flagged spots.
 - **The orchestrator's own inline Bash scripts** (102k tokens) stay in context too. Repeated analyses should become `delegate` subcommands or files, not heredocs.
-- **Retained thinking** (21%) only moves with the orchestrator's effort setting. It's worth trying a lower effort for routine orchestration turns.
+- **Retained thinking** (21% of the final context) only moves with the orchestrator's effort setting. **Measured 2026-10-10: keep xhigh.**
+  - Thinking is retained across calls: each call's context grows by at least the previous call's full output.
+  - About 260k thinking tokens over 387 calls cost **29%** of the session, but 21.6 points of that were re-reads caused by the session's length. With one work item per session (lever 1), the same thinking costs about 10%. A lower effort would save only a fraction of that: about 3% if it cut thinking by a third, which is a guess, since high was never measured.
+  - xhigh already scales thinking to the turn. Routine steps got little: `delegate status` averaged 170 tokens, `Read` 215, replies 262. Thinking went to judgement: briefs and docs (`Write`, mean 1.6k), `Edit` and commits (1.5k each). The top 10% of calls held 41% of it. A lower effort would mostly cut those turns.
+  - Brief gaps caused 3 of the 6 extra rounds (lever 5). One avoided round outweighs the remaining thinking cost.
+  - The real waste is upstream: 107 inline `.venv/bin/python` / heredoc calls carried 27% of all thinking. That is the orchestrator doing worker jobs (lever 4).
 - **Trade-off (needs a decision):** SKILL.md currently mandates reading the whole patch. A digest + targeted-read review would save tokens, but it weakens that guarantee. A middle ground: keep the full read for modules with semantic rules or data rules, and use digest + targeted reads for UI, docs and plumbing.
 
 ### 5. Fewer rounds: better briefs and native repo instructions (quality lever)

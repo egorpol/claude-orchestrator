@@ -1,7 +1,7 @@
 {
   "_doc": [
     "Edit freely. delegates[].aa is the Artificial Analysis slug (effort suffix included; the bare slug is the max-effort run).",
-    "pools are ids from quota.py: claude-5h, claude-7d, codex-5h, codex-7d, cursor-auto, cursor-premium. cursor-models has no openusage metric (quota unknown).",
+    "pools are ids from quota.py: claude-5h, claude-7d, codex-5h, codex-7d, cursor-auto, cursor-premium. cursor-models (Cursor Grok + Composer) has no openusage metric (quota unknown).",
     "prior: hand-set stand-in numbers for models AA does not rate; aa_proxy: true means `aa` is a stand-in model's rating, not the delegate's own.",
     "prefer: list (all tasks) or {task: [delegate ids...]}; preferred delegates that clear min_quota rank first in listed order.",
     "tasks[].weights apply to intelligence, coding, speed (output tok/s) and price (cheaper scores higher; inside a subscription it approximates how fast a model drains its pool)."
@@ -70,7 +70,7 @@
       "pools": [
         "cursor-auto"
       ],
-      "notes": "Default Cursor delegate. Auto routes to SpaceX in-house models (Cursor is SpaceX-owned) and is the most cost-efficient Cursor option; rated with Grok 4.7 High as a stand-in. composer-2.5 bills the premium/API pool (unverified). Named Grok models bill Cursor's Models quota — see cursor-grok."
+      "notes": "Default Cursor delegate. Auto routes to SpaceX in-house models (Cursor is SpaceX-owned) and is the most cost-efficient Cursor option; rated with Grok 4.7 High as a stand-in. Named Grok and Composer models bill Cursor's \"Cursor Models\" quota (spending tab, 2026-10-10) — see cursor-grok."
     },
     {
       "id": "cursor-grok",
@@ -80,7 +80,7 @@
       "pools": [
         "cursor-models"
       ],
-      "notes": "Grok in Cursor draws on Cursor's Models quota, not premium/API. openusage has no Models metric (only plan_auto / plan_api / plan_percent), so quota shows as unknown. Real model ids: grok-4.7-{low,medium,high,xhigh}[-fast]."
+      "notes": "Grok (and Composer) in Cursor draw on Cursor's \"Cursor Models\" quota, not premium/API (spending tab, 2026-10-10). openusage has no Models metric (only plan_auto / plan_api / plan_percent), so quota shows as unknown. Real model ids: grok-4.7-{low,medium,high,xhigh}[-fast]."
     },
     {
       "id": "claude-sonnet",
