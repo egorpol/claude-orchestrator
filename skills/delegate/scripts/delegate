@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Delegate work from Claude Code to Codex / Cursor agents.
+
+  delegate quota                      remaining quota + reset per pool
+  delegate ratings [--refresh]        AA ratings for catalog models
+  delegate route <task>               rank delegates for a task type
+  delegate launch codex|cursor ...    worktree + brief + background run
+  delegate status [RUN]               runs overview / one run in detail
+  delegate diff RUN                   diff stat + changes.patch
+  delegate apply RUN [--check]        apply the reviewed patch to the main checkout
+  delegate cleanup RUN                remove worktree + branch
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import quota
+import ratings
+import route
+import runs
+
+CATALOG = Path(__file__).resolve().parent / "catalog.json"
+
+
+def load_catalog():
+    return json.loads(CATALOG.read_text())
+
+
+def cmd_quota(a):
+    res = quota.pools(quota.fetch(a.source))
+    print(json.dumps(res, indent=2) if a.json else quota.render(res))
+
+
+def cmd_ratings(a):
+    env = ratings.load(refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))
+    models = env["models"]
+    cat = load_catalog()
+    if a.grep:
+        import re
+        pat = re.compile(a.grep, re.I)
+        picks = [(s, s) for s in models if pat.search(s) or pat.search(models[s].get("name") or "")]
+    else:
+        picks = [(d["id"], d.get("aa")) for d in cat["delegates"]]
+    if a.json:
+        print(json.dumps({k: models.get(s) for k, s in picks}, indent=2))
+        return
+    import time
+    print(f"source: {env['source']}, fetched {time.strftime('%Y-%m-%d %H:%M', time.localtime(env['fetched_at']))}"
+          f"{'  (coding = proxy: mean of Terminal-Bench 4.0 and SciCode)' if env['source'] != 'api' else ''}")
+    f = lambda v, s: format(v, s) if v is not None else "-"
+    body = []
+    for key, slug in picks:
+        m = models.get(slug) if slug else None
+        if not m:
+            body.append((-1, (key, slug or "(no AA rating)", "-", "-", "-", "-", "-", "-")))
+            continue
+        body.append((m["intelligence"] or 0,
+                     (key, slug, f(m["intelligence"], ".1f"), f(m["coding"], ".1f"), f(m["tps"], ".0f"),
+                      f(m["price_in"], ".2f"), f(m["price_out"], ".2f"), f(m["price_blended"], ".2f"))))
+    body.sort(key=lambda t: -t[0])
+    rows = [("ID", "AA SLUG", "INT", "COD", "TOK/S", "$IN", "$OUT", "$BLEND")] + [r for _, r in body]
+    w = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(x) for c, x in zip(r, w)).rstrip())
+
+
+def cmd_route(a):
+    cat = load_catalog()
+    if a.task not in cat["tasks"]:
+        sys.exit(f"unknown task {a.task!r}; known: {', '.join(cat['tasks'])}")
+    pools = quota.pools(quota.fetch(a.source))
+    aa = ratings.load(refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))["models"]
+    agents = set(a.agents.split(",")) if a.agents else None
+    task, rows = route.rank(a.task, cat, pools, aa, min_quota=a.min_quota, agents=agents)
+    if a.json:
+        print(json.dumps([{"id": r["delegate"]["id"], "score": r["score"], "quality": r["quality"],
+                           "quota_left": r["left"], "pace": r["pace"], "excluded": r["excluded"],
+                           "metrics": r["metrics"], "source": r["source"],
+                           "launch": route.launch_hint(r["delegate"], task)} for r in rows], indent=2))
+        return
+    print(route.render(a.task, task, rows))
+
+
+def main():
+    p = argparse.ArgumentParser(prog="delegate", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("quota", help="remaining quota and reset time per pool")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--source", default="auto", choices=["auto", "direct", "daemon"],
+                   help="openusage collection source; 'direct' polls providers now (slower, fresher)")
+    s.set_defaults(fn=cmd_quota)
+
+    s = sub.add_parser("ratings", help="Artificial Analysis ratings for catalog models")
+    s.add_argument("--refresh", action="store_true", help="ignore the 24h cache")
+    s.add_argument("--grep", help="show all AA models matching this regex instead of the catalog")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_ratings)
+
+    s = sub.add_parser("route", help="rank delegates for a task type")
+    s.add_argument("task", help="review | refactor | implement | research | bulk-label (see catalog.json)")
+    s.add_argument("--agents", help="comma list to restrict: codex,cursor,claude-subagent")
+    s.add_argument("--min-quota", type=float, help="exclude pools below this %% left (default from catalog)")
+    s.add_argument("--refresh", action="store_true")
+    s.add_argument("--source", default="auto", choices=["auto", "direct", "daemon"])
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_route)
+
+    s = sub.add_parser("launch", help="start a delegate in its own worktree")
+    s.add_argument("agent", choices=["codex", "cursor"])
+    s.add_argument("--brief", required=True, help="markdown brief file")
+    s.add_argument("--model", help="codex default gpt-6.1-sol (@xhigh); cursor default composer-2.5")
+    s.add_argument("--effort", help="codex reasoning effort (low..xhigh, max)")
+    s.add_argument("--name", help="run name (default <agent>-<timestamp>); branch is delegate/<name>")
+    s.add_argument("--repo", help="repo path (default: cwd)")
+    s.add_argument("--base", help="commit-ish to branch from (default HEAD)")
+    s.add_argument("--root", help=f"run directory (default {runs.RUNS_ROOT}/<repo>/<name>)")
+    s.add_argument("--link", action="append", default=[],
+                   help="repo-relative gitignored path to symlink into the worktree (repeatable), e.g. data/cache")
+    s.add_argument("--read-only", action="store_true", help="codex -s read-only / cursor --mode ask")
+    s.add_argument("--unsandboxed", action="store_true",
+                   help="cursor only: --sandbox disabled --force (needed for network, e.g. installs); ask the user first")
+    s.add_argument("--detach", action="store_true",
+                   help="return immediately (default: block until done; run it with run_in_background)")
+    s.add_argument("--dry-run", action="store_true", help="print run.sh and prompt, create nothing")
+    s.set_defaults(fn=runs.launch)
+
+    s = sub.add_parser("status", help="list runs, or details for given runs")
+    s.add_argument("runs", nargs="*", help="run name or directory")
+    s.add_argument("--log", type=int, default=15, help="log lines to show")
+    s.set_defaults(fn=runs.status)
+
+    s = sub.add_parser("diff", help="write changes.patch for a run and show its stat")
+    s.add_argument("run")
+    s.add_argument("--full", action="store_true", help="also print the patch")
+    s.set_defaults(fn=runs.diff)
+
+    s = sub.add_parser("apply", help="apply a run's patch to the main checkout (after review)")
+    s.add_argument("run")
+    s.add_argument("--check", action="store_true", help="only test whether it applies")
+    s.add_argument("--3way", dest="three_way", action="store_true", help="fall back to 3-way merge (stages files)")
+    s.set_defaults(fn=runs.apply)
+
+    s = sub.add_parser("cleanup", help="remove a run's worktree and branch")
+    s.add_argument("run")
+    s.add_argument("--force", action="store_true", help="discard unapplied changes")
+    s.add_argument("--keep-branch", action="store_true")
+    s.add_argument("--purge", action="store_true", help="also delete the run record (log, brief, last message)")
+    s.set_defaults(fn=runs.cleanup)
+
+    s = sub.add_parser("_cursor-last")
+    s.add_argument("root")
+    s.set_defaults(fn=lambda a: runs.cursor_last(Path(a.root)))
+
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
