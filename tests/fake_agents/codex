@@ -42,9 +42,11 @@ emit({"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "t
 emit({"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": "git diff --check", "exit_code": 0, "status": "completed"}})
 if not read_only:
     emit({"type": "item.completed", "item": {"id": "item_2", "type": "file_change", "changes": [{"path": "tracked.txt", "kind": "update"}, {"path": "new-codex.txt", "kind": "add"}], "status": "completed"}})
-emit({"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 40, "cache_write_input_tokens": 0, "output_tokens": 10, "reasoning_output_tokens": 5}})
+# Like real Codex, usage is the running thread total; a resumed thread starts from the previous round's total.
+b = (300, 90, 30, 12) if "resume" in args else (0, 0, 0, 0)
+emit({"type": "turn.completed", "usage": {"input_tokens": 100 + b[0], "cached_input_tokens": 40 + b[1], "cache_write_input_tokens": 0, "output_tokens": 10 + b[2], "reasoning_output_tokens": 5 + b[3]}})
 emit({"type": "turn.started"})
 emit({"type": "item.completed", "item": {"id": "item_3", "type": "agent_message", "text": answer}})
 emit({"type": "item.completed", "item": {"id": "item_4", "type": "future_item"}})
-emit({"type": "turn.completed", "usage": {"input_tokens": 200, "cached_input_tokens": 50, "output_tokens": 20, "reasoning_output_tokens": 7}})
+emit({"type": "turn.completed", "usage": {"input_tokens": 300 + b[0], "cached_input_tokens": 90 + b[1], "cache_write_input_tokens": 0, "output_tokens": 30 + b[2], "reasoning_output_tokens": 12 + b[3]}})
 sys.exit(int(os.environ.get("FAKE_AGENT_EXIT", "0")))

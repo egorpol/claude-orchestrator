@@ -15,6 +15,10 @@
 <data_traps>
 </data_traps>
 
+## `<scratch>`
+<!-- Keep scratch output (notebook copies, extracted cells, temp scripts) under `.delegate/` in the worktree.
+     It is git-excluded; scratch elsewhere floods the exit packet (once: 1016 files, +18.3M lines). -->
+
 ## `<output_contract>`
 <!-- Word cap, required tables/sections, citation style. Every number comes from a script. -->
 <output_contract>

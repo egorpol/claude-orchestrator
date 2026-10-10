@@ -19,17 +19,18 @@ One CLI: `~/.claude/skills/delegate/scripts/delegate` (stdlib Python; full path)
 | `delegate followup NAME --brief F \| --from-review N [--fresh --model M] [--link PATH]` | next round in the same worktree, resuming the session; `--link` as on launch |
 | `delegate verify NAME [--cmd C]` | re-run the check in the worktree |
 | `delegate status [NAME] [--full]` | compact exit packet (default); `--full` for log tail and whole last message |
-| `delegate diff NAME` / `apply NAME [--check]` / `cleanup NAME` | inspect, merge, tidy up. Successful `apply` appends to `runs.jsonl` in the runs root (what `cost` summarises) |
+| `delegate diff NAME` / `apply NAME [--check]` / `cleanup NAME` | inspect, merge, tidy up. Each run is logged once to `runs.jsonl` in the runs root (what `cost` summarises): at `apply`, or at `cleanup` for read-only, hand-merged or discarded runs |
 
 ## Sessions
 
-One work item per orchestrator session. After an item is merged or committed, write a handoff (memory files plus a short `HANDOFF.md`: state, open PRs or runs, next step), then suggest a fresh session or `/clear`. The context-guard hook (`hooks/context-guard.py`, via `./install.sh --hooks`) reminds at about 250k tokens and again every 150k. `delegate cost --session latest` shows the current session's size and cost.
+One work item per orchestrator session. An assessment or a plan counts as an item: hand off after it, before implementation starts. After an item is merged or committed, write a handoff (memory files plus a short `HANDOFF.md`: state, open PRs or runs, next step), then suggest a fresh session or `/clear`. The context-guard hook (`hooks/context-guard.py`, via `./install.sh --hooks`) reminds at about 250k tokens and again every 150k. `delegate cost --session latest` shows the current session's size and cost.
 
 **Waits over an hour:** the prompt cache expires after 1h idle, so the turn that wakes up re-writes the whole context at 2×. In the field, two such rebuilds were 26% of a session's cost. Before a multi-hour wait (a long run, a crawl), write the handoff and continue in a fresh session.
 
 ## Workflow
 
 0. **Prefetch and inspect.** Delegates have no network: fetch every input first. Inspect the real data before writing rules into a brief.
+   - **Decisions:** put 3–4 measured numbers per option into `AskUserQuestion` (e.g. F1 and coverage per policy). Field result: one reply settled four design questions.
 1. **Quota and pick.** `delegate route <task>` (includes quota). One line to the user: which delegate and why. openusage can lag ~1h (`DATA AGE`); use `--source direct` near a limit. Batch independent checks in one Bash call, or parallel tool calls in one message.
 2. **Brief.** Pick a template from `templates/` by job type (`implement`, `mechanical`, `review`, `research`). Stable repo conventions belong in the target repo's `AGENTS.md` (verified 2026-10-10: headless Codex reads only `AGENTS.md`; `cursor-agent` reads `AGENTS.md`, `CLAUDE.md` and `.cursor/rules` with `alwaysApply`). Briefs cite it and carry only the deltas. State **intent, not mechanism** — field lesson: "derive must not add columns" made Codex skip new columns; the intent was "prove derive reproduces r012". Cover owned / off-limits files; put a real-data dry run with expected outcomes in `--verify`. Give the reason behind each constraint (Codex follows them literally). One job per run. GPT models like tagged sections (`<task>`, `<verification_loop>`, `<default_follow_through_policy>`). The launcher appends the contract (no commits, stay in worktree, flag conflicts, fixed final-message format); do not repeat it.
 3. **Launch** with Bash and `run_in_background: true`. **Do not poll.** When the run ends, the exit packet (≤20 lines: state, verify, top files, Digest risks, usage, artifact paths) arrives in the task notification — that *is* the status.
@@ -42,14 +43,14 @@ One work item per orchestrator session. After an item is merged or committed, wr
    - `--link PATH` symlinks a gitignored path from the main checkout and excludes it in `.git/info/exclude`.
    - Parallel runs need disjoint files. `--dry-run` prints `run.sh` and the prompt without creating anything.
    - Use `status NAME` only for runs not launched in this session; `--full` only when the packet flags something.
-4. **Cross-review** (non-trivial changes): `delegate review NAME` in the background. Other vendor by default (`--agent` / `--focus` override). Reviewer gets the brief plus the diff at `wt/.delegate/review-N.patch`. Returns Verdict, findings, spec compliance. `status` warns if a reviewer changed the worktree.
+4. **Cross-review** (non-trivial changes): `delegate review NAME` in the background. Other vendor by default (`--agent` / `--focus` override). Reviewer gets the brief plus the diff at `wt/.delegate/review-N.patch`. Returns Verdict, findings, spec compliance. `status` warns if a reviewer changed the worktree. The reviewer is asked to challenge the brief too, but a compliance review still tends to approve a wrong brief: twice on 2026-10-10 (a physically wrong acceptance criterion, a broken repo convention). Check domain criteria yourself or ask the user before launch.
 5. **Your own review. Never trust a summary.** Risk-based:
    - **Data / semantic modules** (parsers, validation, matching, accounting, safety guards): read the whole patch.
    - **UI, docs, plumbing:** review the packet's file list and Digest risks, then read only the flagged spots.
    - Send large documents to `delegate ask` instead of reading them here.
    - Re-run tests and the dry run yourself against real data. Adjudicate each reviewer finding; some are wrong.
 6. **Fix rounds.** Brief with accepted findings (or `--from-review N`), then `delegate followup NAME --brief fixes.md`. Archives to `round-<k>/`, resumes the same session and `--verify`. After ~3 rounds without convergence: `--fresh --model <stronger>`.
-7. **Merge.** `delegate apply NAME --check`, then `delegate apply NAME` (uncommitted on the main tree). Commit only when the user asks. `--3way` if the main tree moved. After merging several delegates' work: one real integrated end-to-end pass with the same cache state as production (cold if production is cold), plus a preflight of offline inputs before long network phases.
+7. **Merge.** `delegate apply NAME --check`, then `delegate apply NAME` (uncommitted on the main tree). Commit only when the user asks. In auto mode, collect the destructive or outward git steps (`git rm` of tracked data, commit, push, PR, merge, tag) into one explicit approval request at the end of the item; the classifier blocks them one at a time otherwise. `--3way` if the main tree moved. After merging several delegates' work: one real integrated end-to-end pass with the same cache state as production (cold if production is cold), plus a preflight of offline inputs before long network phases.
 8. **Clean up.** `delegate cleanup NAME` removes worktree and branch, keeps the run record; refuses while unapplied. `--purge` deletes the record; `--force` discards changes.
 9. **Before outward-facing actions** (emails, scheduled crawls, publishing): check every quantitative claim in docs and briefs against the code that executes. Field incident: docs said ≤1 request/s while code paced 0.1 s apart.
 
@@ -85,6 +86,9 @@ Delegates' summaries can be wrong when their code is right (Composer misquoted a
 - The launcher strips Cursor AppImage variables (`LD_LIBRARY_PATH`, `/tmp/.mount_*` PATH entries), `VSCODE_*`, `CURSOR_*`, `CLAUDE_CODE_*` (including the messaging token), and virtualenvs that belong to another repo.
 - Python editable installs: inside the worktree, `import pkg` can resolve to the main checkout. Check with `python -c "import pkg; print(pkg.__file__)"` or use `PYTHONPATH=.`.
 - A gitignore rule `dir/` does not match a symlink; `--link` writes exact paths (and `/.delegate`) to `.git/info/exclude`.
+- **Codex's sandbox blocks Jupyter kernel sockets** (`nbclient` fails with `PermissionError`). Run extracted cells with the venv's `ipython`, or run notebooks in `--verify`, which runs outside the sandbox.
+- **Clean up only what the session created.** Build into the scratchpad (`--outdir`) instead of deleting the repo's `build/` afterwards.
+- **Bash runs zsh:** an unquoted `$var` does not split into words. Loop over a file list with `while read`.
 - Untracked files count as changes. `run.sh` exports `PYTHONDONTWRITEBYTECODE=1`, so test runs leave no `.pyc`; other build output (`node_modules`, `dist`) needs a `.gitignore` in the target repo, or it lands in the patch.
 
 ## Tuning

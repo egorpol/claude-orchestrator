@@ -131,6 +131,9 @@ class LifecycleTests(unittest.TestCase):
         meta = runs.load_meta(root)
         self.assertEqual([r["n"] for r in meta["history"]], [1, 2])
         self.assertEqual([r["usage"] for r in meta["history"]], [expected, expected])
+        if agent == "codex":  # resumed thread totals are kept next to the per-round delta
+            self.assertTrue(meta["history"][1]["resumed"])
+            self.assertEqual(meta["history"][1]["usage_thread"]["input"], 2 * expected["input"])
         self.assertEqual(meta["links"], ["data/cache", "other-cache"])
         self.assertTrue((wt / "data/cache").is_symlink())
         self.assertEqual((wt / "data/cache").resolve(), self.repo / "data/cache")
@@ -216,6 +219,27 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(record["outcome"], "discarded")
         self.assertEqual((record["files"], record["insertions"]), (2, 2))
         self.assertEqual(record["rounds"][0]["usage"], CODEX_USAGE)
+
+    def test_crlf_base_applies_byte_for_byte(self):
+        # Field incident 2026-10-10: text-mode capture dropped the \r, so CRLF files never applied.
+        (self.repo / "tracked.txt").write_bytes(b"base\r\nsecond\r\n")
+        self.git("commit", "-qam", "crlf base")
+        self.launch()
+        root = self.root("test")
+        self.cli("review", "test")
+        self.assertIn(b"second\r\n", (root / "wt/.delegate/review-1.patch").read_bytes())
+        self.cli("apply", "test")
+        self.assertEqual((self.repo / "tracked.txt").read_bytes(), b"base\r\nsecond\r\ncodex round\n")
+
+    def test_cleanup_logs_runs_that_skip_apply_once(self):
+        self.launch("codex", "ro", "--read-only")
+        self.cli("cleanup", "ro")
+        self.launch("cursor", "merged")
+        self.cli("apply", "merged")
+        self.cli("cleanup", "merged")
+        records = [json.loads(l) for l in (self.storage / "runs.jsonl").read_text().splitlines()]
+        self.assertEqual([(r["run"], r["outcome"]) for r in records], [("ro", "read-only"), ("merged", "applied")])
+        self.assertEqual(records[0]["rounds"][0]["usage"], CODEX_USAGE)
 
     def test_verify_tails_and_adhoc_output(self):
         cmd = "for i in {1..100}; do echo verify-$i; done"
