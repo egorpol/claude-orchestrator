@@ -6,7 +6,9 @@
 #   ./install.sh --copy     copy instead (for machines where the repo may move)
 #   ./install.sh --bin      also put `delegate` on PATH via ~/.local/bin
 #   ./install.sh --hooks    also register hooks/context-guard.py as a UserPromptSubmit
-#                           hook in settings.json (nudges a handoff past ~250k context)
+#                           hook in settings.json (handoff nudge at item boundaries past ~120k)
+#   ./install.sh --rules    also import rules/orchestrator.md from the user-level CLAUDE.md,
+#                           so every session gets the orchestrator rules (stays live from the repo)
 #   ./install.sh --check    only check prerequisites
 #   ./install.sh --force    replace an existing non-symlinked skill dir (it is
 #                           moved to ~/.claude/skill-backups/, never deleted)
@@ -16,15 +18,17 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SKILLS_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"
 BACKUP_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skill-backups"
 SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-mode=link bin=0 hooks=0 check_only=0 force=0 failed=0
+USER_MD="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/CLAUDE.md"
+mode=link bin=0 hooks=0 rules=0 check_only=0 force=0 failed=0
 for arg in "$@"; do
   case "$arg" in
     --copy) mode=copy ;;
     --bin) bin=1 ;;
     --hooks) hooks=1 ;;
+    --rules) rules=1 ;;
     --check) check_only=1 ;;
     --force) force=1 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -67,6 +71,8 @@ check_prereqs() {
     || warn "ARTIFICIAL_ANALYSIS_API_KEY unset: ratings come from the AA leaderboard page (coding = proxy)"
   if grep -qs 'hooks/context-guard.py' "$SETTINGS"; then ok "context-guard hook registered in $SETTINGS"
   else warn "optional: context-guard hook not registered (./install.sh --hooks)"; fi
+  if grep -qsF "@$REPO/rules/orchestrator.md" "$USER_MD"; then ok "orchestrator rules imported in $USER_MD"
+  else warn "optional: orchestrator rules not imported (./install.sh --rules)"; fi
 }
 
 install_skill() {
@@ -127,6 +133,17 @@ path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(s, indent=2) + "\n")
 PY_HOOK
   ok "context-guard hook registered in $SETTINGS"
+fi
+if [ "$rules" = 1 ]; then
+  line="@$REPO/rules/orchestrator.md"
+  if grep -qsF "$line" "$USER_MD"; then
+    ok "orchestrator rules already imported in $USER_MD"
+  else
+    [ -f "$USER_MD" ] && cp "$USER_MD" "$USER_MD.bak-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$(dirname "$USER_MD")"
+    { [ -s "$USER_MD" ] && printf '\n'; printf '%s\n' "$line"; } >> "$USER_MD"
+    ok "orchestrator rules imported in $USER_MD"
+  fi
 fi
 if [ "$failed" = 1 ]; then echo "some skills were not installed (see above)" >&2; exit 1; fi
 echo "done. Claude Code picks up new skills without a restart."
