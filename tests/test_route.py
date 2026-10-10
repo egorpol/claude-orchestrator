@@ -153,7 +153,7 @@ class TestRealCatalog(unittest.TestCase):
         self.assertIn("cursor-grok", ids)
         grok = next(d for d in cat["delegates"] if d["id"] == "cursor-grok")
         self.assertEqual(grok["model"], "grok-4.7-high")
-        self.assertEqual(grok["pools"], ["cursor-models"])
+        self.assertEqual(grok["pools"], ["cursor-auto"])
         self.assertEqual(grok["aa"], "grok-4-7-high")
         self.assertIn("orchestrator_cost", cat)
 

@@ -17,12 +17,13 @@ POOLS = {
                  "reset": "rate_limit_secondary", "window_h": 168, "label": "Codex 7d"},
     "cursor-auto": {"provider": "cursor", "metric": "plan_auto_percent_used",
                     "reset": "billing_cycle_end", "cycle": True,
-                    "label": "Cursor Auto"},
+                    "label": "Cursor Auto+Models"},
     "cursor-premium": {"provider": "cursor", "metric": "plan_api_percent_used",
                        "reset": "billing_cycle_end", "cycle": True,
                        "label": "Cursor premium (API)"},
-    # cursor-models (Cursor Grok + Composer): openusage has no metric — intentionally absent.
-    # route._quota treats a missing pool as unknown (QUOTA ?), not excluded.
+    # plan_auto_percent_used covers Auto plus the "Cursor Models" (Grok, Composer):
+    # it equals their summed spend / $450 (checked 2026-10-10). Named Claude/GPT
+    # models bill plan_api. route._quota treats a pool missing here as unknown.
 }
 
 

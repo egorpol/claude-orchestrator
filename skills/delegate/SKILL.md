@@ -25,6 +25,8 @@ One CLI: `~/.claude/skills/delegate/scripts/delegate` (stdlib Python; full path)
 
 One work item per orchestrator session. After an item is merged or committed, write a handoff (memory files plus a short `HANDOFF.md`: state, open PRs or runs, next step), then suggest a fresh session or `/clear`. The context-guard hook (`hooks/context-guard.py`, via `./install.sh --hooks`) reminds at about 250k tokens and again every 150k. `delegate cost --session latest` shows the current session's size and cost.
 
+**Waits over an hour:** the prompt cache expires after 1h idle, so the turn that wakes up re-writes the whole context at 2×. In the field, two such rebuilds were 26% of a session's cost. Before a multi-hour wait (a long run, a crawl), write the handoff and continue in a fresh session.
+
 ## Workflow
 
 0. **Prefetch and inspect.** Delegates have no network: fetch every input first. Inspect the real data before writing rules into a brief.
@@ -53,6 +55,13 @@ One work item per orchestrator session. After an item is merged or committed, wr
 
 Delegates' summaries can be wrong when their code is right (Composer misquoted a brief). Judge the patch and your own re-run.
 
+## Long runs and bulk labelling
+
+- **Read-only is not blind.** Codex read-only and Cursor ask mode can still read reference labels in the repo. Run labelling or eval calls from an empty temp dir (`cursor-agent` then needs `--trust`).
+- **Gate each chunk on quota** (`delegate quota --json --source direct`): pause at the codex-5h floor, stop at the 7d or Auto floor, and log quota per chunk. Gauges are whole percents, and a 300-label pilot overestimated the per-label cost about 2×.
+- **Pools differ a lot for bulk work.** For 6.5k labels (2026-10-10), grok-4.7-low used about 2.7 points of Cursor Auto, while gpt-6.1-sol@low used about 15 points of Codex 7d and drained the 5h pool once.
+- **Detached drivers write their own PID file** (`os.getpid()`). `pgrep` after `setsid nohup` found the launcher's PID instead.
+
 ## Run directory
 
 `~/.cache/claude-delegate/runs/<repo>/<name>/` (`--root` or `$CLAUDE_DELEGATE_ROOT`):
@@ -63,7 +72,7 @@ Delegates' summaries can be wrong when their code is right (Composer misquoted a
 ## Agents
 
 - **Codex** (`codex exec --json`): `-s workspace-write` or `read-only`, `-C <worktree>`, `-o last-message.md`, prompt on stdin. Per-round usage from `turn.completed.usage` lands in meta history. Follow-ups: `codex exec resume <session-id>` (id from log; sandbox via `-c sandbox_mode=…`). Models: `gpt-6.1-sol` (proven), `gpt-6-astra` (~5× $/token), `gpt-5.6-terra` (fast, mechanical). Effort `low`…`xhigh`, then `max`.
-- **Cursor** (`cursor-agent -p`, `~/.local/bin`): **`--model auto`** stays the default (Auto pool, SpaceX in-house). Named Grok (`cursor-grok`, `grok-4.7-*`) and Composer (`composer-2.5*`) draw on Cursor's "Cursor Models" quota, not premium (Cursor spending tab, 2026-10-10); openusage has no metric for it, so `route` shows QUOTA `?`. Use named models only if the user asks.
+- **Cursor** (`cursor-agent -p`, `~/.local/bin`): **`--model auto`** stays the default (Auto pool, SpaceX in-house). Named Grok (`cursor-grok`, `grok-4.7-*`) and Composer (`composer-2.5*`) bill Cursor's "Cursor Models" quota, which is the same pool as Auto (`cursor-auto`), not premium. Use named models only if the user asks.
   - Runs with `--sandbox enabled --trust --workspace <worktree> --output-format stream-json`. Sandboxed shell auto-runs; writes outside fail with EPERM; no network.
   - **Never add `--force`**: it silently bypasses the sandbox (tested 2026-10-09). `--unsandboxed` (network, installs) needs the user's OK.
   - `--mode ask` (`--read-only` and Cursor reviews) **cannot run shell**; reads only.
