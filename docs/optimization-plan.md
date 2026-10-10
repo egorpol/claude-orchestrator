@@ -29,30 +29,36 @@ Also fixed along the way:
 - `exit_code` was written only after verify (there is now a "verifying" state);
 - `status --full` crashed on review jobs.
 
-### Field result (2026-10-10, session 55a11d16: one item, LLM style pass)
+### Field results (2026-10-10)
 
-Lever 1 held up. The session started after a `HANDOFF.md` and ran one work item: a 4.5h labelling run by a detached driver, with background waiters instead of polling.
+Lever 1 held up. Measured with `delegate cost --session`; the work differs between sessions, so compare per call, not in total.
 
-| | marathon 762dc86f | 55a11d16 |
-|---|---:|---:|
-| calls | 389 | 88 |
-| context at end | 779k | 158k |
-| cost units | 26.2M | 1.9M (14× less) |
-| units per call | 67k | 22k (−68%) |
-| Claude 7d pool | 84 → 67 (shared with other sessions) | 60 → 58 |
+| session | work items | calls | context at end | cost units | units per call | Claude 7d (shared pool) |
+|---|---|---:|---:|---:|---:|---|
+| 762dc86f, eu-pd-composers marathon | 7 | 389 | 779k | 26.2M | 67k | 84 → 67 |
+| 55a11d16, LLM style pass | 1 (from `HANDOFF.md`) | 88 | 158k | 1.9M | 22k | 60 → 58 |
+| 9a59a1f6, audiospylt | 3 (assessment, plan, Phase 0) | 104 | 334k | 3.8M | 37k | 57 → 54 |
+| fc63a0c8, eu-pd-composers v3.5.0 | 1 (from `HANDOFF.md`) | 67 | 162k | 1.2M | 19k | 58 → 54 |
 
-Per call the saving is −68%, close to the −60% the model predicted. The work differs, so compare per call, not in total.
+One-item sessions cost 19–22k units per call, 68–72% below the marathon; the model predicted about 60%. The three-item audiospylt session sits in between at 37k: its last ~20 calls each re-read ~300k. Its report notes that a handoff after the plan would have kept Phase 0 near 40k context.
 
-New findings:
+New findings from 55a11d16:
 - **Idle cache rebuilds.** Two wake-ups after 4.4h and 6.1h waits each re-wrote the whole context, about 120k tokens at 2×. Together they were 26% of the session's cost. SKILL.md now says to hand off before a multi-hour wait.
 - **Cursor pools resolved.** openusage `plan_auto_percent_used` = (Auto + Grok + Composer spend) / $450, exact at two snapshots. So "Cursor Models" shares the Auto pool, and `cursor-grok` now routes on `cursor-auto` with real quota. Named Claude/GPT models bill `plan_api` ($22.50).
 - **Bulk labelling** (6.5k rows, outside `delegate`): grok-4.7-low used about 2.7 points of Cursor Auto; gpt-6.1-sol@low used about 15 points of Codex 7d. Both had zero failures.
 - **Lessons now in SKILL.md:** read-only is not blind (isolate the answer key), per-chunk quota gates, PID files for detached drivers.
 - **Thinking share was unchanged** at about 60% of output under xhigh, which is consistent with the effort analysis in lever 4.
 
+New findings from 9a59a1f6 and fc63a0c8, and what changed:
+- **CRLF patches never applied: our bug, now fixed.** `make_patch` read `git diff` with `text=True`, and universal newlines turned every `\r\n` into `\n`. Patches and review diffs are now handled as bytes; a lifecycle test covers a CRLF base. The proposed file-copy fallback and launch warning are not needed.
+- **`runs.jsonl` saw 1 of 5 runs.** Read-only, hand-merged and discarded runs are now logged once at `cleanup`, with their reviews.
+- **Codex usage of resumed rounds was cumulative.** `turn.completed.usage` is the thread total. A round now records its own delta as `usage` and the raw total as `usage_thread`, and the exit packet shows the delta.
+- **Reviews approved wrong briefs twice** (a physically wrong Σamp² criterion; a `dump_date` convention break). The review prompt now asks the reviewer to challenge the brief's criteria against the domain and repo conventions. The implement template names convention-stamped columns, and SKILL.md tells the orchestrator to check domain criteria before launch.
+- **SKILL.md and templates:** hand off after an assessment or plan; measured numbers per option in decision questions; one bundled approval for outward git steps in auto mode; Jupyter needs `ipython` or `--verify` under Codex; clean up only paths the session created; zsh word splitting; research scratch under `.delegate/`.
+
 Still open:
 - ~~Cursor's "Models" quota has no openusage metric.~~ Resolved above: it is the Auto pool.
-- ~~Composer's billing pool is unverified.~~ Settled 2026-10-10: the Cursor spending tab lists "Cursor Models · Includes Cursor Grok and Composer", so both named Grok and Composer bill the `cursor-models` pool.
+- ~~Composer's billing pool is unverified.~~ Settled 2026-10-10: Composer and named Grok bill "Cursor Models", which is the Auto pool.
 - Re-measure on the next long session with `delegate cost --session latest`.
 - Orchestrator effort: measured above (lever 4), keep xhigh. If you want proof, run one routine work item at `high` and compare its thinking tokens and rounds against an xhigh item.
 

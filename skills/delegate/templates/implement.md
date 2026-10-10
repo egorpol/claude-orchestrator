@@ -13,7 +13,9 @@
 </context>
 
 ## `<schema_contract>`
-<!-- What may change. Everything else must round-trip byte for byte. -->
+<!-- What may change. Everything else must round-trip byte for byte.
+     Name convention-stamped columns (dump_date, fetched_at, ...) that identity checks must ignore:
+     "byte-identical" once made Codex keep a stale dump_date, and the review approved it. -->
 <schema_contract>
 
 </schema_contract>

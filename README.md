@@ -55,6 +55,8 @@ mkdir -p .delegate/tmp && TMPDIR=$PWD/.delegate/tmp python3 -m unittest discover
 - **Codex `--json`:** `turn.completed.usage` exposes `input_tokens`, `cached_input_tokens`, `output_tokens` and `reasoning_output_tokens`; the launcher records per-round usage in meta history.
 - **`delegate ask`** answered in about 10s with `path:line` citations (Cursor auto, read-only).
 - **Cursor pools:** openusage's `plan_auto_percent_used` is Auto + Grok + Composer spend over $450, so named Grok and Composer share the Auto pool (`cursor-auto`). Named Claude/GPT models bill `plan_api` (premium). Checked against per-model spend at two snapshots; a 6.5k-row grok-4.7-low labelling run moved Auto by about 2.7 points and premium by 0.
+- **CRLF repos:** `apply` failed on CRLF and mixed-ending files because patches were read in text mode. Patches are now kept as bytes; a lifecycle test applies a delegate's edit to a CRLF file byte for byte.
+- **Codex usage on resumed rounds:** `turn.completed.usage` is the running thread total (a resumed round reported 139k input after 114k in round 1). Each round now records its own delta.
 - **Exit packet:** when a background run finishes, `run.sh` prints a compact ≤20-line packet (state, verify, top files, Digest risks, usage, artifact paths) into the task notification — that is the status; do not poll.
 
 ## Related projects

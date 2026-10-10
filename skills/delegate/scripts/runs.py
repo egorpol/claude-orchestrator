@@ -71,6 +71,7 @@ The run's verify command and the last 80 lines of its latest verify output are i
 1. Spec compliance: does the change do what the brief asks, no more and no less? Did it drop existing behaviour, data or fallbacks?
 2. Correctness: bugs, edge cases, error handling, behaviour on the real data the brief mentions.
 3. Tests: do they exercise the new behaviour meaningfully?
+4. The brief itself: you judge the patch against the brief, so a wrong brief passes unnoticed. Is any requirement or acceptance criterion wrong for the domain, or does it contradict an existing repo convention (columns every stage stamps, how tests compare outputs)? If the change meets the brief by breaking a convention or by encoding a wrong criterion, report it as a finding against the brief.
 Report only material issues; skip style nits.
 
 ## Output (use exactly this structure)
@@ -390,7 +391,7 @@ def followup(a):
     (root / "prompt.md").write_text(prompt)
     (root / "run.sh").write_text(job_script(root, f"run {meta['name']} round {k + 1}", Path(meta["repo"]), wt,
                                             cmd, meta["agent"], verify=verify))
-    meta.update(rounds=k + 1, model=model, effort=effort, verify=verify)
+    meta.update(rounds=k + 1, model=model, effort=effort, verify=verify, resumed=bool(sid))
     save_meta(root, meta)
     print(f"round {k} archived to {archive}")
     print(f"round {k + 1}: {meta['agent']} {model}" + (f" @{effort}" if effort else "")
@@ -436,7 +437,7 @@ def review(a):
     (wt / ".delegate").mkdir(exist_ok=True)
     for old in (wt / ".delegate").glob("review-*.patch"):
         old.unlink()  # a stale diff would only confuse the reviewer
-    (wt / ".delegate" / f"review-{n}.patch").write_text(patch)
+    write_patch(wt / ".delegate" / f"review-{n}.patch", patch)
     verify_log = root / "verify.log"
     if not verify_log.exists():
         previous = sorted(root.glob("round-*/verify.log"), key=lambda p: int(p.parent.name.split("-")[1]))
@@ -562,16 +563,17 @@ def usage(job, agent):
         return {"input": u.get("inputTokens", 0), "cached_input": u.get("cacheReadTokens", 0),
                 "cache_write": u.get("cacheWriteTokens"), "output": u.get("outputTokens", 0),
                 "reasoning_output": None}
+    # Codex reports running thread totals (a resumed round's numbers include the earlier rounds,
+    # field data 2026-10-10), so the last event is this job's thread total; see _round_record.
     reported = [e["usage"] for e in _events(job)
                 if e["type"] == "turn.completed" and isinstance(e.get("usage"), dict)]
     if reported:
-        optional_sum = lambda key: (sum(u.get(key) or 0 for u in reported)
-                                    if any(u.get(key) is not None for u in reported) else None)
-        return {"input": sum(u.get("input_tokens", 0) - u.get("cached_input_tokens", 0) for u in reported),
-                "cached_input": sum(u.get("cached_input_tokens", 0) for u in reported),
-                "cache_write": optional_sum("cache_write_input_tokens"),
-                "output": sum(u.get("output_tokens", 0) for u in reported),
-                "reasoning_output": optional_sum("reasoning_output_tokens")}
+        u = reported[-1]
+        return {"input": u.get("input_tokens", 0) - u.get("cached_input_tokens", 0),
+                "cached_input": u.get("cached_input_tokens", 0),
+                "cache_write": u.get("cache_write_input_tokens"),
+                "output": u.get("output_tokens", 0),
+                "reasoning_output": u.get("reasoning_output_tokens")}
     text = _read(job, "log") or ""
     totals = re.findall(r"tokens used\s*:?\s*([\d,]+)", text, re.I)
     return {"total_reported": int(totals[-1].replace(",", ""))} if totals else None
@@ -584,10 +586,20 @@ def _verdict(job):
 
 
 def _round_record(job, meta, n):
-    return {"n": n, "model": meta.get("model"), "effort": meta.get("effort"),
-            "started": _read(job, "started_at"), "minutes": _minutes(job),
-            "exit": _code(job, "exit_code"), "verify": _code(job, "verify_code"),
-            "usage": usage(job, meta["agent"])}
+    record = {"n": n, "model": meta.get("model"), "effort": meta.get("effort"),
+              "started": _read(job, "started_at"), "minutes": _minutes(job),
+              "exit": _code(job, "exit_code"), "verify": _code(job, "verify_code"),
+              "usage": usage(job, meta["agent"])}
+    if meta["agent"] == "codex" and meta.get("resumed"):
+        # A resumed Codex round reports thread totals: keep them, and store this round's delta as usage.
+        record["resumed"] = True
+        prev = next((r for r in meta.get("history", []) if r.get("n", r.get("round")) == n - 1), {})
+        base, u = prev.get("usage_thread") or prev.get("usage"), record["usage"]
+        if u and base and "input" in u and "input" in base:
+            record["usage_thread"] = u
+            record["usage"] = {k: max(0, v - (base.get(k) or 0)) if isinstance(v, int) else v
+                               for k, v in u.items()}
+    return record
 
 
 def _context(job):
@@ -704,6 +716,15 @@ def _usage_line(u):
             f"output {u['output']:,}, reasoning {u['reasoning_output'] if u['reasoning_output'] is not None else '?'}")
 
 
+def _job_usage(job, meta, review_meta):
+    if review_meta is None:
+        n = meta.get("rounds", 1)
+        for r in meta.get("history", []):
+            if r.get("n", r.get("round")) == n and r.get("usage"):
+                return r["usage"]
+    return usage(job, (review_meta or meta)["agent"])
+
+
 def packet(job):
     """Rebuild a bounded notification packet entirely from existing artifacts."""
     root, meta, review_meta = _context(job)
@@ -713,7 +734,7 @@ def packet(job):
     verify_state = _verify_state(job) or "verify none"
     lines = [f"== {_one_line(meta['name'])} | {_one_line(jm['agent'])} {_one_line(jm['model'])} | {label} | "
              f"{state(job)} | {_elapsed(job)} | exit {rc if rc is not None else '?'} | {verify_state}",
-             _usage_line(usage(job, jm["agent"]))]
+             _usage_line(_job_usage(job, meta, review_meta))]
     if review_meta is not None:
         text = _read(job, "last-message.md") or ""
         counts = {s: len(re.findall(r"^\s*[-*]\s*\[" + s + r"\]", text, re.M | re.I))
@@ -897,10 +918,19 @@ def make_patch(root, meta):
     if head != meta["base"]:
         print(f"WARNING: worktree HEAD {head[:9]} != base {meta['base'][:9]}: the delegate made commits "
               f"(contract breach). The patch below covers them too.", file=sys.stderr)
+    # Bytes, not text=True: universal newlines would turn \r\n into \n and break CRLF files.
     patch = subprocess.run(["git", "diff", "--binary", meta["base"]], cwd=wt,
-                           capture_output=True, text=True, check=True).stdout
-    (root / "changes.patch").write_text(patch)
+                           capture_output=True, check=True).stdout.decode("utf-8", "surrogateescape")
+    write_patch(root / "changes.patch", patch)
     return git("diff", "--stat", meta["base"], cwd=wt), patch
+
+
+def write_patch(path, patch):
+    path.write_bytes(patch.encode("utf-8", "surrogateescape"))
+
+
+def read_patch(path):
+    return path.read_bytes().decode("utf-8", "surrogateescape")
 
 
 def diff(a):
@@ -909,7 +939,7 @@ def diff(a):
     if Path(meta["worktree"]).is_dir():
         stat, patch = make_patch(root, meta)
     elif (root / "changes.patch").exists():
-        patch = (root / "changes.patch").read_text()
+        patch = read_patch(root / "changes.patch")
         cwd = meta["repo"] if Path(meta["repo"]).is_dir() else root
         stat = git("apply", "--stat", str(root / "changes.patch"), cwd=cwd)
     else:
@@ -952,7 +982,8 @@ def log_run(root, meta, outcome):
         old = history.get(n, {})
         if _code(job, "exit_code") is None and old.get("exit") is None:
             continue
-        info = {**meta, **{k: old[k] for k in ("model", "effort") if k in old}}
+        info = {**meta, "resumed": old.get("resumed", meta.get("resumed") if n == meta.get("rounds", 1) else False),
+                **{k: old[k] for k in ("model", "effort") if k in old}}
         record = _round_record(job, info, n)
         for key in record:
             if key in old:
@@ -977,6 +1008,7 @@ def log_run(root, meta, outcome):
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     with (RUNS_ROOT / "runs.jsonl").open("a") as stream:
         stream.write(json.dumps(record) + "\n")
+    (root / "logged").write_text(outcome + "\n")
 
 
 def _digest(text):
@@ -996,8 +1028,10 @@ def cleanup(a):
             if not (applied.exists() and applied.read_text().strip() == _digest(make_patch(root, meta)[1])):
                 sys.exit(f"worktree has changes that were not applied (or changed since apply); "
                          f"apply them or pass --force:\n{dirty}")
-    if a.purge and not (root / "applied").exists():
-        log_run(root, meta, "discarded")
+    if not (root / "logged").exists() and not (root / "applied").exists():  # apply already logged it
+        # Read-only runs, reviews and runs merged by hand never pass through apply.
+        changed = wt.exists() and bool(git("status", "--porcelain", cwd=wt, check=False))
+        log_run(root, meta, "discarded" if changed else "read-only" if meta.get("read_only") else "no-changes")
     if wt.exists():
         for l in meta.get("links", []):
             if (wt / l).is_symlink():
