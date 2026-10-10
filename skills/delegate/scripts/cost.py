@@ -46,6 +46,12 @@ def resolve_session(spec):
         return files[0]
     matches = sorted(root.glob(f"*/{spec}.jsonl"))
     if not matches:
+        # Accept a unique id prefix such as "55a11d16".
+        matches = sorted(root.glob(f"*/{spec}*.jsonl"))
+        ids = {m.stem for m in matches}
+        if len(ids) > 1:
+            sys.exit(f"session prefix {spec} is ambiguous: {', '.join(sorted(ids))}")
+    if not matches:
         sys.exit(f"no transcript {spec}.jsonl under {root}")
     if len(matches) > 1:
         # Prefer the one matching cwd when several projects share an id (unlikely).

@@ -29,7 +29,7 @@ bash -n install.sh
   - `test_route.py`, `test_cost.py` and `test_ask.py` cover routing preferences, cost accounting and `ask`.
 - **Real-data checks** (read-only):
   - `delegate status <run>` against the old records in `~/.cache/claude-delegate/runs/PublicDomainSheetMusicFinder/`;
-  - `delegate cost --session 762dc86f-2159-4f5a-ae39-bc9fbec0e6cb` must print 386 calls and cache_read 172,948,900.
+  - `delegate cost --session 762dc86f` must print 389 calls and cache_read 174,522,404. The session was resumed for 3 calls after the 2026-10-09 analysis, so older docs quote 386.
 - **Real agent runs spend quota.** Use a throwaway repo in the scratchpad.
 - **Installer:** test it against `CLAUDE_CONFIG_DIR=<scratch>`, never the real `~/.claude`.
 - **Docs:** after a behaviour change, update SKILL.md, plus README's "Verified behaviour" with the date when the fact was tested live.
@@ -37,7 +37,7 @@ bash -n install.sh
 ## Rules that must not regress
 
 - **Never pass `--force` to `cursor-agent`.** It silently disables `--sandbox enabled` (tested 2026-10-09). Only `--unsandboxed` adds it, and that flag needs the user's OK.
-- **Cursor defaults to `--model auto`**, which is the user's preference: Auto pool, SpaceX in-house models. Named Grok and Composer bill to the "Cursor Models" pool (no openusage metric); other named models bill premium.
+- **Cursor defaults to `--model auto`**, which is the user's preference: Auto pool, SpaceX in-house models. Named Grok and Composer bill "Cursor Models", which shares the Auto pool; other named models bill premium.
 - **Delegates never commit, and nothing auto-commits.** `apply` puts the patch into the main tree uncommitted. `cleanup` refuses to drop unapplied changes without `--force`.
 - **Reviews are read-only and use the other vendor by default.** Cursor `--mode ask` can't run shell, so the diff goes in as `wt/.delegate/review-N.patch`.
 - **Delegates get a scrubbed environment:** no Cursor AppImage `LD_LIBRARY_PATH` or `/tmp/.mount_*` PATH entries, no `VSCODE_*`/`CURSOR_*`/`CLAUDE_CODE_*`, no foreign venvs. Claude Code here runs inside Cursor and inherits all of these.

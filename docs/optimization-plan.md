@@ -29,8 +29,29 @@ Also fixed along the way:
 - `exit_code` was written only after verify (there is now a "verifying" state);
 - `status --full` crashed on review jobs.
 
+### Field result (2026-10-10, session 55a11d16: one item, LLM style pass)
+
+Lever 1 held up. The session started after a `HANDOFF.md` and ran one work item: a 4.5h labelling run by a detached driver, with background waiters instead of polling.
+
+| | marathon 762dc86f | 55a11d16 |
+|---|---:|---:|
+| calls | 389 | 88 |
+| context at end | 779k | 158k |
+| cost units | 26.2M | 1.9M (14× less) |
+| units per call | 67k | 22k (−68%) |
+| Claude 7d pool | 84 → 67 (shared with other sessions) | 60 → 58 |
+
+Per call the saving is −68%, close to the −60% the model predicted. The work differs, so compare per call, not in total.
+
+New findings:
+- **Idle cache rebuilds.** Two wake-ups after 4.4h and 6.1h waits each re-wrote the whole context, about 120k tokens at 2×. Together they were 26% of the session's cost. SKILL.md now says to hand off before a multi-hour wait.
+- **Cursor pools resolved.** openusage `plan_auto_percent_used` = (Auto + Grok + Composer spend) / $450, exact at two snapshots. So "Cursor Models" shares the Auto pool, and `cursor-grok` now routes on `cursor-auto` with real quota. Named Claude/GPT models bill `plan_api` ($22.50).
+- **Bulk labelling** (6.5k rows, outside `delegate`): grok-4.7-low used about 2.7 points of Cursor Auto; gpt-6.1-sol@low used about 15 points of Codex 7d. Both had zero failures.
+- **Lessons now in SKILL.md:** read-only is not blind (isolate the answer key), per-chunk quota gates, PID files for detached drivers.
+- **Thinking share was unchanged** at about 60% of output under xhigh, which is consistent with the effort analysis in lever 4.
+
 Still open:
-- Cursor's "Models" quota has no openusage metric.
+- ~~Cursor's "Models" quota has no openusage metric.~~ Resolved above: it is the Auto pool.
 - ~~Composer's billing pool is unverified.~~ Settled 2026-10-10: the Cursor spending tab lists "Cursor Models · Includes Cursor Grok and Composer", so both named Grok and Composer bill the `cursor-models` pool.
 - Re-measure on the next long session with `delegate cost --session latest`.
 - Orchestrator effort: measured above (lever 4), keep xhigh. If you want proof, run one routine work item at `high` and compare its thinking tokens and rounds against an xhigh item.

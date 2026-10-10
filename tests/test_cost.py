@@ -202,6 +202,22 @@ class TestSession(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+    def test_resolve_session_prefix(self):
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as cfg:
+            proj = Path(cfg) / "projects" / "-tmp-toy"
+            proj.mkdir(parents=True)
+            for sid in ("55a11d16-aaaa", "55b00000-bbbb"):
+                (proj / f"{sid}.jsonl").write_text("")
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
+                self.assertEqual(cost.resolve_session("55a1").name, "55a11d16-aaaa.jsonl")
+                self.assertEqual(cost.resolve_session("55a11d16-aaaa").name, "55a11d16-aaaa.jsonl")
+                with self.assertRaises(SystemExit) as cm:
+                    cost.resolve_session("55")
+                self.assertIn("ambiguous", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
