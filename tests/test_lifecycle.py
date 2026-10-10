@@ -231,6 +231,15 @@ class LifecycleTests(unittest.TestCase):
         self.cli("apply", "test")
         self.assertEqual((self.repo / "tracked.txt").read_bytes(), b"base\r\nsecond\r\ncodex round\n")
 
+    def test_status_flags_day_old_applied_worktree(self):
+        self.launch()
+        self.assertIn("delegate cleanup test", self.cli("apply", "test"))
+        self.assertNotIn("STALE", self.cli("status"))
+        applied = self.root("test") / "applied"
+        old = applied.stat().st_mtime - 2 * 86400
+        os.utime(applied, (old, old))
+        self.assertIn("STALE worktree", self.cli("status"))
+
     def test_cleanup_logs_runs_that_skip_apply_once(self):
         self.launch("codex", "ro", "--read-only")
         self.cli("cleanup", "ro")

@@ -20,7 +20,8 @@ gh repo clone egorpol/claude-orchestrator   # private; or use the Nextcloud-sync
 cd claude-orchestrator
 ./install.sh --check        # what is missing
 ./install.sh                # symlink skills into ~/.claude/skills (add --bin for `delegate` on PATH)
-./install.sh --hooks        # optional: register hooks/context-guard.py (handoff nudge past ~250k tokens)
+./install.sh --hooks        # optional: register hooks/context-guard.py (handoff nudge at item boundaries past ~120k)
+./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
 ```
 
 `install.sh` is idempotent. It never deletes an existing skill directory: with `--force` the old one moves to `~/.claude/skill-backups/`. Use `--copy` where a symlink into the repo is not wanted.
@@ -67,7 +68,8 @@ See [docs/related-projects.md](docs/related-projects.md) for what else exists (O
 
 ```text
 install.sh                         link/copy skills, check prerequisites; --hooks registers context-guard
-hooks/context-guard.py             UserPromptSubmit nudge past ~250k context
+hooks/context-guard.py             UserPromptSubmit nudge at item boundaries past ~120k context
+rules/orchestrator.md              user-level rules for every session (install.sh --rules)
 skills/delegate/SKILL.md           instructions Claude loads
 skills/delegate/templates/         brief templates (implement, mechanical, review, research)
 skills/delegate/scripts/           delegate CLI + catalog.json

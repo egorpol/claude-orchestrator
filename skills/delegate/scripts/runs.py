@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -863,6 +864,9 @@ def status(a):
             bits.append(_verify_state(root))
         if (root / "applied").exists():
             bits.append("applied")
+            if wt.exists() and time.time() - (root / "applied").stat().st_mtime > 86400:
+                # Field incident: a day-old applied worktree with edits looked like unmerged work.
+                bits.append(f"STALE worktree: applied over a day ago; `delegate cleanup {meta['name']}`")
         print(f"== {meta['name']}  {meta['agent']} {meta['model']}  [{state(root)} {_elapsed(root)}]  "
               + ", ".join(bits))
         if not a.runs:
@@ -969,8 +973,8 @@ def apply(a):
     print(("patch applies cleanly to " if a.check else "applied to working tree of ") + meta["repo"])
     if not a.check:
         log_run(root, meta, "applied")
-        print(f"logged to {RUNS_ROOT / 'runs.jsonl'}. If this completes the work item: "
-              "write a handoff and start a fresh orchestrator session.")
+        print(f"logged to {RUNS_ROOT / 'runs.jsonl'}. Once committed: `delegate cleanup {meta['name']}`. "
+              "If this completes the work item: write a handoff and start a fresh orchestrator session.")
 
 
 def log_run(root, meta, outcome):

@@ -39,6 +39,10 @@ Lever 1 held up. Measured with `delegate cost --session`; the work differs betwe
 | 55a11d16, LLM style pass | 1 (from `HANDOFF.md`) | 88 | 158k | 1.9M | 22k | 60 → 58 |
 | 9a59a1f6, audiospylt | 3 (assessment, plan, Phase 0) | 104 | 334k | 3.8M | 37k | 57 → 54 |
 | fc63a0c8, eu-pd-composers v3.5.0 | 1 (from `HANDOFF.md`) | 67 | 162k | 1.2M | 19k | 58 → 54 |
+| e06990b8, cache fix, cleanup, IMSLP rights | 4 | 103 | 251k | 2.5M | 24k | 54 → 51 |
+| 48800fa0, rights evidence r016, gold set, merge | 3 | 112 | 283k | 3.0M | 27k | 51 → 48 |
+| 96cb4576, gold-set form, annotation support, plan | 10 | 116 | 286k | 3.4M | 29k | 48 → 45 |
+| 4994250f, identity guard, r017 | 1 large + 2 short | 141 | 290k | 4.1M | 29k | 45 → 41 |
 
 One-item sessions cost 19–22k units per call, 68–72% below the marathon; the model predicted about 60%. The three-item audiospylt session sits in between at 37k: its last ~20 calls each re-read ~300k. Its report notes that a handoff after the plan would have kept Phase 0 near 40k context.
 
@@ -55,6 +59,30 @@ New findings from 9a59a1f6 and fc63a0c8, and what changed:
 - **Codex usage of resumed rounds was cumulative.** `turn.completed.usage` is the thread total. A round now records its own delta as `usage` and the raw total as `usage_thread`, and the exit packet shows the delta.
 - **Reviews approved wrong briefs twice** (a physically wrong Σamp² criterion; a `dump_date` convention break). The review prompt now asks the reviewer to challenge the brief's criteria against the domain and repo conventions. The implement template names convention-stamped columns, and SKILL.md tells the orchestrator to check domain criteria before launch.
 - **SKILL.md and templates:** hand off after an assessment or plan; measured numbers per option in decision questions; one bundled approval for outward git steps in auto mode; Jupyter needs `ipython` or `--verify` under Codex; clean up only paths the session created; zsh word splitting; research scratch under `.delegate/`.
+
+### Field results, evening of 2026-10-10 (four eu-pd-composers sessions)
+
+All four started from a handoff, and all four then sprawled. The user added items mid-session ("ok go on", "sure go on"), and the orchestrator started them in place.
+
+| session | prompts that started a new item, at context |
+|---|---|
+| e06990b8 | 87k, 180k |
+| 48800fa0 | 205k, 256k |
+| 96cb4576 | 145k, 201k, then 7 support questions from 215k |
+| 4994250f | 219k (mid-item), 275k |
+
+- **The guard fired too late, but it works.** At 250k it fired only in three sessions, and each time after the boundaries had passed. Each time it fired, the session wrote a handoff. Clearing at every prompt above 120k (simulated on the transcripts, re-reads only, an upper bound) would have saved 20%, 18%, 33% and 21%. The hook now fires from 120k, then every 60k. Its text asks Claude to decide whether the prompt starts a new item, and if so to hand off and offer `/clear` before starting, even after "go on". Tested in `tests/test_context_guard.py`.
+- **SKILL.md never reached these sessions.** None of the four invoked `delegate`, so its session and approval guidance went unread, and the zsh slip recurred. Two fixes:
+  - `rules/orchestrator.md`, imported into the user-level `CLAUDE.md` by `./install.sh --rules`, carries the rules that apply everywhere;
+  - the skill description now asks for unprompted use on mechanical work with a clear spec.
+- **No delegation at all.** Claude 7d fell from 54% to 41% over the four sessions while Cursor Auto stayed at 71% (2.9× pace). Doc refreshes across five files, tests from a written spec and a near-copy fetcher were all delegable.
+- **Smaller items:**
+  - `status` flags an applied run whose worktree is over a day old;
+  - `apply` ends by suggesting `cleanup`;
+  - SKILL.md says a merge listed in a handoff is not approval, to start long network jobs first, to falsify a hypothesis with one cheap sample, and to check every changed headline value against a source.
+- **Not in this repo's scope:**
+  - Artifact lessons: take a headless-Firefox screenshot before the first publish, and read the `.d.ts` before writing capability code.
+  - The project-side cache-lag bug in eu-pd-composers.
 
 Still open:
 - ~~Cursor's "Models" quota has no openusage metric.~~ Resolved above: it is the Auto pool.
