@@ -22,6 +22,7 @@ Implemented and tested: 31 unittest cases with fake agents, plus one real Cursor
 | 5 fewer rounds | **done**: `templates/`; `AGENTS.md` guidance; prefetch, integrated e2e and docs-claims steps |
 | 6 measurement | **done**: Codex `--json` per-round usage; history bug fixed (plus backfill for old runs); `runs.jsonl` on `apply`/`--purge`; `delegate cost` |
 | 7 routing and CLI | **done**: `prefer` / `--prefer`, `cursor-grok` (quota unknown), `followup --link`, verify log in the review packet, `verify`/`diff` without a worktree |
+| 8 idle rebuilds (2026-10-12) | **done**: context guard holds the first typed prompt after 60 min idle at 100k+ once; `cost --session` lists rebuilds |
 
 Also fixed along the way:
 - `.pyc` files from test runs leaked into patches (`PYTHONDONTWRITEBYTECODE=1`);
@@ -112,6 +113,25 @@ All three started after `/clear` from a `HANDOFF.md` and ended at the next decis
   - Rules: a local commit is not approved either; name the check that passed rather than "validates"; carry qualifying notes into every doc; use fictional IDs in doc examples; zsh `=word`, unmatched globs, `cd` in a call, and killing chained commands.
   - This session itself: "continue from the handoff" found no `HANDOFF.md` here, because the previous session had pointed at this plan instead. Six calls went into reading transcripts. The rules now say to always write the file.
 - **Not in this repo's scope:** lxml cannot compile MEI's XPath 2 Schematron (CAMAT uses `saxonche`); the eu-pd scanner's test fake answers unmapped robots URLs with 404.
+
+### Field results, 2026-10-11/12 (three handoff sessions)
+
+All three started after `/clear` from a `HANDOFF.md`. Numbers from `delegate cost --session`, including the calls that wrote each report.
+
+| session | work | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---|---:|---:|---:|---:|---|---|
+| 9b03e065, Webern MEI edition headers | 1 item, short Q&A | none | 67 | 192k | 1.78M | 26.6k | 91 min, 141k written: 15.9% | 26 → 24 |
+| 12c68dfa, Webern breaks, then proofreading Q&A | 1 item, ~6 questions | none | 129 | 223k | 3.04M | 23.5k | 464 min, 184k: 12.1% | 24 → 20 |
+| 032191ec, table grid, site audit, eu-pd note | 3 items | Codex ×3, Cursor ×1 | 80 | 175k | 1.50M | 18.8k | 102 min, 68k: 9.0% | 11 → 10 |
+
+- **Idle cache rebuilds are the second-largest lever: 12.7% of all logged orchestrator cost.** Each of the three sessions had one: the user came back after a break, and the first prompt rewrote the whole context at 2×. Without it, units per call were 22.4k, 20.7k and 17.1k, in line with the one-item sessions. A scan of all 14 sessions in `token_usage.jsonl` found rebuilds in 7 of them, 7–26% of each, 7.2M of 56.3M units in total. See lever 8.
+- **Q&A after a finished item is still where sessions sprawl.** 12c68dfa answered six proofreading questions after its build was pushed and ran on to 223k. The guard fired at ~125k and ~204k, and `/clear` was offered four times as a closing sentence. The rules and SKILL.md now say to make it an option in the picker that closes the first answer.
+- **A six-line delegation cost more than doing it inline:** about 8 orchestrator calls against about 3. The rules and SKILL.md now keep changes under ~10 lines inline unless the user asks to delegate.
+- **`delegate wait` worked as built** (0ecc1c8): two detached read-only audits ran while the note was researched and written, with one wait and no polling.
+- **Nothing was delegated in the two Webern sessions.** Both were design and data items, and the break placement needed judgement. Claude 7d fell from 26% to 20% over them while Cursor Auto kept 2.8× spare pace; the mechanical follow-ups are queued in that project's handoff. Claude 7d then fell from 20% to 11% before 032191ec began, in sessions with no report.
+- **Lessons now in the rules:** never write an authority identifier from memory (a remembered GND for Webern was wrong); dates inherited from a Kern-to-MEI conversion are claims to check; a sibling project's renderer claim did not hold, so probe such claims and keep the minimal example next to any you write; check public claims against what is deployed, not the checkout; tally categories by exact value (a substring test counted 252 instead of 65); show the first check and ask before widening a test matrix; `pkill -f` can kill its own shell.
+- **SKILL.md and templates:** visual checks use orchestrator-made screenshots handed to every reviewer, because Codex's headless Firefox crashed in its sandbox; research briefs for public writing ask for a privacy-flags section and a second count per headline number, capped at about 15 KB.
+- **Not in this repo's scope:** a dark-mode `user.js` pref for headless Firefox, Brave's `--no-sandbox`, Verovio SVG position parsing, the Wikidata API as a fallback when DNB and lobid show a bot wall, revision histories from timestamps.
 
 Still open:
 - ~~Cursor's "Models" quota has no openusage metric.~~ Resolved above: it is the Auto pool.
@@ -231,6 +251,14 @@ Brief gaps caused 3 of the 6 extra rounds, and each round also costs orchestrato
 - **`followup --link PATH`.**
 - **Review packet:** add the last `verify.log` (tail) next to `review-N.patch`, so ask-mode reviewers, who can't run shell, can still check claims.
 - **`verify` / `diff` without a live worktree:** `verify` runs in `meta["worktree"]` and fails once it is gone, and it prints full test output. Print a tail and a summary instead; the full output stays in `verify.log`.
+
+### 8. Idle cache rebuilds: 12.7% of logged cost (found 2026-10-12)
+
+By measured impact this ranks second, after lever 1. The prompt cache expires after 60 minutes without a call. The next call rewrites the whole context at 2× the input price, about as much as 20 ordinary calls at the same size. Over the 14 sessions in `token_usage.jsonl`, 7 had at least one such rebuild, 7–26% of each session's cost and 7.2M of 56.3M units in total. Of the 11 rebuilds, 7 followed a user prompt after a break (3.6M units) and 4 followed a background run's notification after a long run (3.6M).
+
+- **Context guard:** after ≥60 min idle at ≥100k context, the hook holds the first prompt once and tells the user that `/clear` plus "continue from the handoff" starts at ~37k; sending the prompt again goes ahead. The user chose blocking over an inform-only nudge, because only blocking saves the rebuild itself. `CONTEXT_GUARD_IDLE_MIN` and `CONTEXT_GUARD_IDLE_CONTEXT` override the thresholds. UserPromptSubmit also fires for task notifications, `/loop` turns and subagent reports, and a held prompt never reaches Claude, so the hook lets through any prompt that starts with `<` or `/`. Built by Cursor Auto (run `idle-guard`), reviewed by Codex.
+- **Measurement:** `delegate cost --session` lists idle rebuilds and their share of cost units.
+- **Guidance:** hand off before a wait of over an hour (already in SKILL.md since 2026-10-10, and in the rules). This is the only lever for the notification half: the hook runs on user prompts, so it cannot hold a wake-up from a finished run.
 
 ### Not worth doing for tokens
 

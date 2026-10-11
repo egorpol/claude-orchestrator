@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "delegate" / "scripts"
@@ -257,6 +258,74 @@ class TestSession(unittest.TestCase):
                 with self.assertRaises(SystemExit) as cm:
                     cost.resolve_session("55")
                 self.assertIn("ambiguous", str(cm.exception))
+
+    def test_idle_rebuilds_gap_and_no_timestamp(self):
+        weights = {"input": 1, "cache_read": 0.1, "cache_write": 2.0, "output": 5.0}
+        base = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        def assistant(mid, minutes, cache_creation, with_ts=True):
+            ts = (base + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            obj = {
+                "type": "assistant",
+                "requestId": mid,
+                "message": {
+                    "id": mid,
+                    "model": "claude-opus-5-5",
+                    "usage": {
+                        "input_tokens": 1,
+                        "cache_read_input_tokens": 100,
+                        "cache_creation_input_tokens": cache_creation,
+                        "output_tokens": 1,
+                    },
+                },
+            }
+            if with_ts:
+                obj["timestamp"] = ts
+            return obj
+
+        lines = [
+            assistant("m1", 0, 1000),
+            assistant("m2", 59, 2000),          # 59 min — not idle
+            assistant("m3", 59, 9999, with_ts=False),  # no timestamp — never counts, restarts the clock
+            assistant("m4", 59 + 61, 3000),     # 61 min after m2, but m3 came between — not counted
+            assistant("m5", 59 + 61 + 61, 5000),  # 61 min after m4 — idle rebuild
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            path = Path(f.name)
+            for obj in lines:
+                f.write(json.dumps(obj) + "\n")
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        calls = cost.parse_assistant_usage(path)
+        self.assertEqual(len(calls), 5)
+        summary = cost.summarise_session(calls, weights, None)
+        self.assertEqual(len(summary["idle_rebuilds"]), 1)
+        self.assertEqual(summary["idle_rebuilds"][0]["gap_min"], 61)
+        self.assertEqual(summary["idle_rebuilds"][0]["cache_creation"], 5000)
+        self.assertEqual(summary["idle_rebuild_units"], 5000 * weights["cache_write"])
+        text = cost.render_session(path, summary)
+        self.assertIn("idle rebuilds (gap >= 60 min): 1", text)
+        self.assertIn("61 min", text)
+        self.assertIn("of cost units", text)
+        payload = json.loads(cost.render_session(path, summary, as_json=True))
+        self.assertIn("idle_rebuilds", payload)
+        self.assertIn("idle_rebuild_units", payload)
+        self.assertEqual(len(payload["idle_rebuilds"]), 1)
+
+        # No gaps → none
+        tight = [
+            assistant("a", 0, 100),
+            assistant("b", 10, 100),
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            path2 = Path(f.name)
+            for obj in tight:
+                f.write(json.dumps(obj) + "\n")
+        self.addCleanup(path2.unlink, missing_ok=True)
+        summary2 = cost.summarise_session(cost.parse_assistant_usage(path2), weights, None)
+        self.assertEqual(summary2["idle_rebuilds"], [])
+        self.assertEqual(summary2["idle_rebuild_units"], 0)
+        self.assertIn("idle rebuilds (gap >= 60 min): none", cost.render_session(path2, summary2))
 
 
 if __name__ == "__main__":

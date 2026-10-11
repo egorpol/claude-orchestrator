@@ -101,8 +101,32 @@ def parse_assistant_usage(path):
                 "cache_read": int(u.get("cache_read_input_tokens") or 0),
                 "cache_creation": int(u.get("cache_creation_input_tokens") or 0),
                 "output": int(u.get("output_tokens") or 0),
+                "timestamp": obj.get("timestamp"),
             })
     return calls
+
+
+def idle_rebuilds(calls, cache_write_weight=2.0):
+    """Calls whose timestamp is >= 3600 s after the previous call's (both timed)."""
+    rebuilds = []
+    prev = None
+    for c in calls:
+        ts = _parse_ts(c.get("timestamp"))
+        if ts is None:  # an untimed call may have refreshed the cache: restart the clock
+            prev = None
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if prev is not None:
+            gap = (ts - prev).total_seconds()
+            if gap >= 3600:
+                rebuilds.append({
+                    "gap_min": int(gap // 60),
+                    "cache_creation": c["cache_creation"],
+                })
+        prev = ts
+    units = sum(r["cache_creation"] * cache_write_weight for r in rebuilds)
+    return rebuilds, units
 
 
 def summarise_session(calls, weights, usd_per_mtok):
@@ -115,14 +139,16 @@ def summarise_session(calls, weights, usd_per_mtok):
     first = ctxs[0] if ctxs else 0
     last = ctxs[-1] if ctxs else 0
     mx = max(ctxs) if ctxs else 0
+    cw_w = weights.get("cache_write", 2.0)
     parts = {
         "input": inp * weights.get("input", 1),
         "cache_read": cr * weights.get("cache_read", 0.1),
-        "cache_write": cc * weights.get("cache_write", 2.0),
+        "cache_write": cc * cw_w,
         "output": out * weights.get("output", 5.0),
     }
     total = sum(parts.values())
     models = sorted({c["model"] for c in calls if c.get("model")})
+    rebuilds, rebuild_units = idle_rebuilds(calls, cw_w)
     return {
         "calls": n,
         "models": models,
@@ -137,6 +163,8 @@ def summarise_session(calls, weights, usd_per_mtok):
         "cost_parts": parts,
         "usd_per_mtok_input": usd_per_mtok,
         "usd": (total / 1e6) * usd_per_mtok if usd_per_mtok is not None else None,
+        "idle_rebuilds": rebuilds,
+        "idle_rebuild_units": rebuild_units,
     }
 
 
@@ -176,6 +204,18 @@ def render_session(path, summary, as_json=False):
     if summary.get("usd") is not None:
         cost_line += f"  ≈ ${summary['usd']:.2f}"
     lines.append(cost_line)
+    rebuilds = summary.get("idle_rebuilds") or []
+    if not rebuilds:
+        lines.append("idle rebuilds (gap >= 60 min): none")
+    else:
+        gaps = ", ".join(str(r["gap_min"]) for r in rebuilds)
+        written = sum(r["cache_creation"] for r in rebuilds)
+        total = summary["cost_units"] or 1
+        pct = 100 * (summary.get("idle_rebuild_units") or 0) / total
+        lines.append(
+            f"idle rebuilds (gap >= 60 min): {len(rebuilds)} "
+            f"({gaps} min; {_fmt_k(written)} written, {pct:.1f}% of cost units)"
+        )
     lines.append(f"next call re-reads ≈ {_fmt_k(summary['context_last'])} tokens")
     return "\n".join(lines)
 
