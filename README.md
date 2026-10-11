@@ -20,7 +20,7 @@ gh repo clone egorpol/claude-orchestrator   # private; or use the Nextcloud-sync
 cd claude-orchestrator
 ./install.sh --check        # what is missing
 ./install.sh                # symlink skills into ~/.claude/skills (add --bin for `delegate` on PATH)
-./install.sh --hooks        # optional: register hooks/context-guard.py (handoff nudge at item boundaries past ~120k)
+./install.sh --hooks        # optional: register hooks/context-guard.py (handoff nudge past ~120k; holds the first prompt after 1h idle once)
 ./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
 ```
 
@@ -65,6 +65,11 @@ mkdir -p .delegate/tmp && TMPDIR=$PWD/.delegate/tmp python3 -m unittest discover
 - **`delegate wait`** on a finished real run printed its packet and exited 0. Tests cover the four invariants: no return while verifying, no hang on a dead job, reviews re-listed on every poll, and a one-line exit 3 on timeout.
 - **`delegate cost --since 2026-10-11`** now reads a local date. On the real run log it counts 3 runs, including one applied at 01:09 local time; with `TZ=UTC` it counts 2.
 
+## Verified behaviour (2026-10-12)
+
+- **Idle cache rebuilds:** `delegate cost --session` now lists them. On the real transcripts it matched an independent scan exactly: 9b03e065 has 1 rebuild (91 min, 141,484 written, 15.9% of cost units), 762dc86f has 4 (19.7%) and still counts 389 calls.
+- **Context guard, idle hold:** fed a real 192k transcript whose last call was a day old, the hook held the prompt, and let the same prompt through on the second run. It never holds a prompt that starts with `<` or `/`, because UserPromptSubmit also fires for task notifications (seen live: the size guard fired on one) and `/loop` turns (Claude Code hooks docs), and a held one never reaches Claude. Not yet seen in a live session.
+
 ## Related projects
 
 See [docs/related-projects.md](docs/related-projects.md) for what else exists (OpenAI's Codex plugin for Claude Code, obra/superpowers, multi-agent orchestrators) and what is worth borrowing. The measured cost levers and job split are in [docs/optimization-plan.md](docs/optimization-plan.md). Field reports live under [`feedback/`](feedback/).
@@ -73,7 +78,7 @@ See [docs/related-projects.md](docs/related-projects.md) for what else exists (O
 
 ```text
 install.sh                         link/copy skills, check prerequisites; --hooks registers context-guard
-hooks/context-guard.py             UserPromptSubmit nudge at item boundaries past ~120k context
+hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle
 rules/orchestrator.md              user-level rules for every session (install.sh --rules)
 skills/delegate/SKILL.md           instructions Claude loads
 skills/delegate/templates/         brief templates (implement, mechanical, review, research)
