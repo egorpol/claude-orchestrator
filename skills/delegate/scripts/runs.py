@@ -837,6 +837,82 @@ def log_tail(job, agent, n):
     return lines[-n:]
 
 
+def _run_jobs(root):
+    """A run's jobs: the root plus every review-* directory that has meta.json."""
+    jobs = [root]
+    for meta_path in sorted(root.glob("review-*/meta.json"),
+                            key=lambda p: int(p.parent.name.split("-")[1])):
+        jobs.append(meta_path.parent)
+    return jobs
+
+
+def _job_busy(job):
+    """True while the job is running/verifying, or not-started with a fresh meta.json."""
+    st = state(job)
+    if st in BUSY:
+        return True
+    if st == "not started":
+        try:
+            return (time.time() - (job / "meta.json").stat().st_mtime) < 60
+        except OSError:
+            return False
+    return False
+
+
+def _started_sort_key(job):
+    try:
+        dt = datetime.fromisoformat((job / "started_at").read_text().strip())
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return dt.timestamp()
+    except (OSError, ValueError):
+        try:
+            return job.stat().st_mtime
+        except OSError:
+            return 0.0
+
+
+def wait(a):
+    """Block until every job of each RUN is idle; print bounded packets, no poll noise."""
+    roots = [find_run(r) for r in a.runs]
+    timeout = a.timeout
+    interval = a.interval
+    deadline = time.monotonic() + timeout
+    ever_busy = []
+    seen = set()
+
+    while True:
+        busy_now = []
+        for root in roots:
+            for job in _run_jobs(root):
+                if _job_busy(job):
+                    busy_now.append(job)
+                    key = str(job.resolve())
+                    if key not in seen:
+                        seen.add(key)
+                        ever_busy.append(job)
+        if not busy_now:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            for job in busy_now:
+                print(f"{packet(job)[0]} (still busy after {timeout:g} s)")
+            sys.exit(3)
+        time.sleep(min(interval, remaining))
+
+    if ever_busy:
+        to_print = ever_busy
+    else:
+        to_print = [max(_run_jobs(root), key=_started_sort_key) for root in roots]
+
+    failed = False
+    for job in to_print:
+        print("\n".join(packet(job)))
+        if state(job) != "done":
+            failed = True
+    sys.exit(1 if failed else 0)
+
+
 def status(a):
     roots = [find_run(r) for r in a.runs] if a.runs else sorted(
         (p.parent for p in RUNS_ROOT.glob("*/*/meta.json")), key=lambda p: p.stat().st_mtime)

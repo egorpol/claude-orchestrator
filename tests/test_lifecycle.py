@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -317,6 +319,89 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(runs.state(job), "verifying")
         (job / "finished_at").write_text("now\n")
         self.assertEqual(runs.state(job), "done")
+
+    def _fixture_run(self, name):
+        root = self.root(name)
+        root.mkdir(parents=True)
+        runs.save_meta(root, {
+            "name": name, "agent": "codex", "model": "gpt-6.1-sol", "rounds": 1,
+            "repo": str(self.repo), "worktree": str(root / "gone"),
+            "base": self.git("rev-parse", "HEAD"), "history": [],
+        })
+        (root / "started_at").write_text("2026-10-11T00:00:00+00:00\n")
+        return root
+
+    def test_wait_holds_through_verifying(self):
+        # Invariant 1: wait never returns while a job is verifying.
+        root = self._fixture_run("wait-verifying")
+        (root / "exit_code").write_text("0\n")
+        (root / "pid").write_text(f"{os.getpid()}\n")
+        self.assertEqual(runs.state(root), "verifying")
+        threading.Timer(0.15, lambda: (root / "finished_at").write_text(
+            "2026-10-11T00:01:00+00:00\n")).start()
+        t0 = time.monotonic()
+        out = self.cli("wait", "wait-verifying", "--interval", "0.05", "--timeout", "5")
+        self.assertGreaterEqual(time.monotonic() - t0, 0.12)
+        self.assertIn("| done |", out.splitlines()[0])
+
+    def test_wait_returns_at_once_on_dead_job(self):
+        # Invariant 2: wait never hangs on a dead job (died, no exit_code).
+        root = self._fixture_run("wait-dead")
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (root / "pid").write_text(f"{dead.pid}\n")
+        self.assertEqual(runs.state(root), "died (no exit code)")
+        t0 = time.monotonic()
+        out = self.cli("wait", "wait-dead", "--interval", "0.05", "--timeout", "30", code=1)
+        self.assertLess(time.monotonic() - t0, 10)  # far below the timeout; CLI startup can be slow under load
+        self.assertIn("died (no exit code)", out.splitlines()[0])
+
+    def test_wait_picks_up_review_started_during_poll(self):
+        # Invariant 3: re-list review-* every poll; a review that appears while
+        # the round was the only busy job is also waited for.
+        root = self._fixture_run("wait-review")
+        (root / "pid").write_text(f"{os.getpid()}\n")
+        self.assertEqual(runs.state(root), "running")
+
+        def start_review_then_finish_root():
+            # Create the busy review before clearing the root so a concurrent
+            # poll never sees an empty busy set mid-transition.
+            rv = root / "review-1"
+            rv.mkdir()
+            runs.save_meta(rv, {"name": "wait-review", "agent": "cursor", "model": "auto"})
+            (rv / "pid").write_text(f"{os.getpid()}\n")
+            (rv / "started_at").write_text("2026-10-11T00:02:00+00:00\n")
+            (root / "exit_code").write_text("0\n")
+            (root / "finished_at").write_text("2026-10-11T00:01:00+00:00\n")
+
+        def finish_review():
+            rv = root / "review-1"
+            (rv / "exit_code").write_text("0\n")
+            (rv / "finished_at").write_text("2026-10-11T00:03:00+00:00\n")
+
+        threading.Timer(0.1, start_review_then_finish_root).start()
+        threading.Timer(0.35, finish_review).start()
+        t0 = time.monotonic()
+        out = self.cli("wait", "wait-review", "--interval", "0.05", "--timeout", "5")
+        self.assertGreaterEqual(time.monotonic() - t0, 0.3)
+        self.assertIn("review 1", out)
+        self.assertIn("| done |", out)
+
+    def test_wait_timeout_prints_one_line_exit_3(self):
+        # Invariant 4: timeout returns exit 3 and does not print full packets.
+        root = self._fixture_run("wait-timeout")
+        (root / "pid").write_text(f"{os.getpid()}\n")
+        out = self.cli("wait", "wait-timeout", "--interval", "0.05", "--timeout", "0.2", code=3)
+        lines = [l for l in out.splitlines() if l.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("still busy after 0.2 s", lines[0])
+        self.assertTrue(lines[0].startswith("== "))
+        self.assertNotIn("artifacts:", out)
+
+    def test_wait_detached_launch_e2e(self):
+        self.launch("codex", "wait-e2e", "--detach")
+        out = self.cli("wait", "wait-e2e", "--interval", "0.05", "--timeout", "30")
+        self.assertIn("done", out.splitlines()[0])
 
     def test_followup_preserves_model_accounting_and_existing_links(self):
         (self.repo / "data/cache").mkdir(parents=True)

@@ -1,7 +1,9 @@
 """Tests for cost.py run-log and session transcript summarisation."""
 import json
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -73,6 +75,44 @@ class TestRunLog(unittest.TestCase):
             self.assertIn("2 runs", text)
         finally:
             path.unlink(missing_ok=True)
+
+    def test_since_bare_date_is_local(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            path = Path(f.name)
+            f.write(json.dumps(_run_record(
+                ts="2026-10-10T23:09:00+00:00", run="late-utc",
+            )) + "\n")
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        old_tz = os.environ.get("TZ")
+
+        def restore_tz():
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+        self.addCleanup(restore_tz)
+
+        os.environ["TZ"] = "Europe/Berlin"
+        time.tzset()
+        self.assertEqual(len(cost.load_run_log(path, since="2026-10-11")), 1)
+
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        self.assertEqual(len(cost.load_run_log(path, since="2026-10-11")), 0)
+
+    def test_since_explicit_offset_honoured(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            path = Path(f.name)
+            f.write(json.dumps(_run_record(
+                ts="2026-10-10T23:09:00+00:00", run="late-utc",
+            )) + "\n")
+        self.addCleanup(path.unlink, missing_ok=True)
+        # 23:09 UTC is before 2026-10-11T00:00+00:00 and after 2026-10-11T00:00+02:00
+        self.assertEqual(len(cost.load_run_log(path, since="2026-10-11T00:00:00+00:00")), 0)
+        self.assertEqual(len(cost.load_run_log(path, since="2026-10-11T00:00:00+02:00")), 1)
 
 
 class TestSession(unittest.TestCase):

@@ -10,7 +10,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
   - `quota.py`: pools from `openusage export`
   - `ratings.py`: Artificial Analysis via API key or leaderboard scrape, cached 24h
   - `route.py`: per-task score = ratings × weights × quota
-  - `runs.py`: worktree/launch/followup/review/verify/status/diff/apply/cleanup, `meta.json`, environment scrubbing
+  - `runs.py`: worktree/launch/followup/review/verify/status/wait/diff/apply/cleanup, `meta.json`, environment scrubbing
 - `skills/delegate/scripts/catalog.json`: user-editable delegates, pools, task weights, `min_quota_pct`, subagent penalty.
 - `install.sh`: links or copies skills into `~/.claude/skills`; `--check` checks prerequisites; `--hooks` registers `hooks/context-guard.py`; `--rules` imports `rules/orchestrator.md` into the user-level `CLAUDE.md`.
 - `hooks/context-guard.py`: a UserPromptSubmit hook. From about 120k context tokens, it asks Claude to hand off before starting a new work item. Tested in `tests/test_context_guard.py`.

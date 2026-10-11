@@ -16,6 +16,7 @@
      and a broken repo convention (2026-10-10). -->
 <check_against>
 - original brief, and whether its acceptance criteria are right for the domain and the repo's conventions
+- each invariant the brief states, against the adjacent cases, not only the example it names
 - `verify.log` / verify exit code
 - dry-run output vs expected outcomes
 </check_against>

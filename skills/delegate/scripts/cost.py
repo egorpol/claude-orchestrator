@@ -205,7 +205,12 @@ def _add_usage(dst, u):
 def load_run_log(path, since=None, repo=None):
     since_dt = None
     if since:
-        since_dt = datetime.fromisoformat(since).replace(tzinfo=timezone.utc)
+        # Bare YYYY-MM-DD / naive ISO → local midnight; explicit offsets (or Z) kept as given.
+        since_dt = _parse_ts(since)
+        if since_dt is None:
+            since_dt = datetime.fromisoformat(since)
+        if since_dt.tzinfo is None:
+            since_dt = since_dt.astimezone()
     rows = []
     if not path.is_file():
         return rows
@@ -311,7 +316,7 @@ def cmd_cost(a):
 
 
 def _add_args(p):
-    p.add_argument("--since", help="YYYY-MM-DD; only runs on/after this UTC date")
+    p.add_argument("--since", help="YYYY-MM-DD (local) or ISO timestamp; only runs at or after it")
     p.add_argument("--repo", help="filter by repo directory name")
     p.add_argument("--log", help=f"run log path (default {DEFAULT_LOG})")
     p.add_argument("--session", metavar="ID|latest|PATH",

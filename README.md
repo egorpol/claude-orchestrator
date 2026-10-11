@@ -60,6 +60,11 @@ mkdir -p .delegate/tmp && TMPDIR=$PWD/.delegate/tmp python3 -m unittest discover
 - **Codex usage on resumed rounds:** `turn.completed.usage` is the running thread total (a resumed round reported 139k input after 114k in round 1). Each round now records its own delta.
 - **Exit packet:** when a background run finishes, `run.sh` prints a compact ≤20-line packet (state, verify, top files, Digest risks, usage, artifact paths) into the task notification — that is the status; do not poll.
 
+## Verified behaviour (2026-10-11)
+
+- **`delegate wait`** on a finished real run printed its packet and exited 0. Tests cover the four invariants: no return while verifying, no hang on a dead job, reviews re-listed on every poll, and a one-line exit 3 on timeout.
+- **`delegate cost --since 2026-10-11`** now reads a local date. On the real run log it counts 3 runs, including one applied at 01:09 local time; with `TZ=UTC` it counts 2.
+
 ## Related projects
 
 See [docs/related-projects.md](docs/related-projects.md) for what else exists (OpenAI's Codex plugin for Claude Code, obra/superpowers, multi-agent orchestrators) and what is worth borrowing. The measured cost levers and job split are in [docs/optimization-plan.md](docs/optimization-plan.md). Field reports live under [`feedback/`](feedback/).
