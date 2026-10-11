@@ -1,7 +1,10 @@
 # Implement brief
 
 ## `<task>`
-<!-- Goal and intent (what must be true when done), not the mechanism. -->
+<!-- Goal and intent (what must be true when done), not the mechanism.
+     If you do prescribe a mechanism, add the invariant it serves and one adversarial case it must survive
+     ("two adjacent declarations of different licences both survive"). Two prescribed fixes handled the
+     reported example and failed the case next to it (2026-10-11). -->
 <task>
 
 </task>
@@ -21,7 +24,10 @@
 </schema_contract>
 
 ## `<verification_loop>`
-<!-- Tests to run, plus a real-data dry run with expected outcomes (exit code, key counts, sample rows). -->
+<!-- Tests to run, plus a real-data dry run with expected outcomes (exit code, key counts, sample rows).
+     Compute the expected counts yourself by a different code path; ask for any difference with its cause, not a tuned rule.
+     Network code: besides injected-response tests, one test through the real adapter with a fake session
+     (mixed-case headers, a body that must not be read). Three rounds of injected tests missed a header-case bug. -->
 <verification_loop>
 
 </verification_loop>

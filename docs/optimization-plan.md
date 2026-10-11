@@ -84,6 +84,35 @@ All four started from a handoff, and all four then sprawled. The user added item
   - Artifact lessons: take a headless-Firefox screenshot before the first publish, and read the `.d.ts` before writing capability code.
   - The project-side cache-lag bug in eu-pd-composers.
 
+### Field results, 2026-10-11 (three handoff sessions)
+
+All three started after `/clear` from a `HANDOFF.md` and ended at the next decision point. Numbers from `delegate cost --session`, which includes the calls that wrote each report, so they run a few calls above the reports' own figures.
+
+| session | work | delegates | calls | context at end | cost units | units per call | Claude 7d |
+|---|---|---|---:|---:|---:|---:|---|
+| 52e13958, eu-pd open-licence scanner + live scans | 1 item | Cursor round 3, Codex reviews 2–3 | 66 | 160k | 1.21M | 18.3k | → 32 |
+| a79562ac, eu-pd open-licence axis for r020 | 1 item (merge, pilot, feature) | Cursor 2 rounds, 1 Codex review | 65 | 158k | 1.15M | 17.7k | 32 → 29 |
+| 7272c8d9, Webern Op. 27 MEI 5.1 + docs | 3 small items | none | 71 | 183k | 1.48M | 20.9k | → 26 |
+
+- **Lever 1 held.** 17.7–20.9k units per call is the lowest yet: the one-item sessions of 2026-10-10 ran 19–22k, the sprawling evening ones 24–29k. The rules file reached these sessions; two reports cite it.
+- **The 120k guard fired mid-item once** (a79562ac, ~121k). The prompt continued the item, so the session carried on and handed off at 144k. That is the intended reading of the guard text.
+- **Webern ran three items to 183k.** The docs item started at ~70k, under the threshold, and read and wrote about 55 KB. The rules now say to hand off below 120k when the next item is large.
+- **Delegation improved, but Claude 7d still fell about 3 points a session** (32 → 26 over the three). Cursor Auto built a 15-file feature in 2 rounds with 0 review findings and no visible pool change (70 → 70; 68 at the end of the batch).
+- **What worked, now in SKILL.md and the templates:**
+  - one batched question for all of a handoff's open decisions;
+  - a stop rule agreed before a pilot (0 of 49 ended a 4.9M-token search);
+  - expected dry-run numbers computed by the orchestrator on a separate path; Cursor matched them exactly;
+  - reading the core while the cross-review runs;
+  - fixing the last review's 1–10 line findings inline instead of a fourth round.
+- **Friction, and what changed:**
+  - Two prescribed fixes handled the reported example and failed the adjacent case. Briefs that prescribe a mechanism now state the invariant and one adversarial case; the review template checks invariants against adjacent cases.
+  - Injected-response tests never touched the real `requests` adapter, where a header-case bug sat. The implement template asks network code for one fake-session test of the adapter.
+  - A hand-written wait loop exited at `verifying`. New `delegate wait RUN`, run in the background, blocks until the round and its reviews have finished, including verify.
+  - `cost --since` took a UTC date, so a run applied at 01:09 local time fell on the previous day. It now takes a local date.
+  - Rules: a local commit is not approved either; name the check that passed rather than "validates"; carry qualifying notes into every doc; use fictional IDs in doc examples; zsh `=word`, unmatched globs, `cd` in a call, and killing chained commands.
+  - This session itself: "continue from the handoff" found no `HANDOFF.md` here, because the previous session had pointed at this plan instead. Six calls went into reading transcripts. The rules now say to always write the file.
+- **Not in this repo's scope:** lxml cannot compile MEI's XPath 2 Schematron (CAMAT uses `saxonche`); the eu-pd scanner's test fake answers unmapped robots URLs with 404.
+
 Still open:
 - ~~Cursor's "Models" quota has no openusage metric.~~ Resolved above: it is the Auto pool.
 - ~~Composer's billing pool is unverified.~~ Settled 2026-10-10: Composer and named Grok bill "Cursor Models", which is the Auto pool.
