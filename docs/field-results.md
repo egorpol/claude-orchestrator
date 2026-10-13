@@ -20,8 +20,9 @@ Numbers come from `delegate cost --session` on each session's transcript and inc
 | 2026-10-12 | 032191ec | 80 | 175k | 1.50M | 18.8k | 9.0% |
 | 2026-10-12 | 9ce4e364 | 60 | 224k | 1.67M | 27.8k | 0 |
 | 2026-10-13 | 6a4f5d31 | 79 | 193k | 1.67M | 21.1k | 0 |
+| 2026-10-13 | 40ff2d3a | 77 | 185k | 1.60M | 20.8k | 0 |
 
-16 sessions, 1,737 calls, 59.6M cost units; idle rebuilds 7.2M (12.0%). The 15 sessions after the marathon averaged 24.8k units per call.
+17 sessions, 1,814 calls, 61.2M cost units; idle rebuilds 7.2M (11.7%). The 16 sessions after the marathon averaged 24.6k units per call.
 
 ## 2026-10-10
 
@@ -147,6 +148,22 @@ Both started after `/clear` from the project's `HANDOFF.md`. Numbers from `deleg
   - Issue images at 2× with `<img width>` set to half the pixel width.
   - Verovio's Python log capture through fd redirection.
   - Sanity-check an automated schema traversal against a known member: it first reported 326 elements instead of 17.
+
+## 2026-10-13: MEI 5.1 target
+
+Started after `/clear` from the project's `HANDOFF.md`; the first report written with `/field-report`. Numbers from `delegate cost --session 40ff2d3a`.
+
+| session | work | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---|---:|---:|---:|---:|---|---|
+| 40ff2d3a, `camat-convert --mei-version 5.1` from a decided spec | 1 item | Codex build (2 rounds), Cursor review | 77 | 185k | 1.60M | 20.8k | none | 93 at end |
+
+- **Independent expectations held again.** The orchestrator built a fixture of 40 real Humdrum files and computed the expected rewrites with lxml, a different code path from the delegate's text edits; one probe call found a real file for the incomplete branch. Codex matched every expected total in round 1. Told "do not change the expectation; report the case and its cause", it flagged three checker conflicts and left the fixture alone.
+- **The checker, not the code, lost round 1's verify signal.** The acceptance script called `Path(__file__).resolve()`, which followed the `--link` symlink into the main checkout, so it failed before checking anything. It also compared two separate conversions whose IDs are random per run. A smoke test against the old code showed neither: the new flag failed at argparse, so only the failure branch ran. SKILL.md step 0 now covers acceptance scripts in linked folders, running each branch once before launch, and pinning seeds. `delegate launch --preflight` is on the Roadmap.
+- **A byte invariant taken literally cost a round** (8 min, 1.05M cached Codex tokens). "Byte-identical outside the edited tags" made Codex keep six whitespace-only wrapper lines and flag them instead of fixing them. The implement template now asks for the expected look of the output next to a byte rule.
+- **The cross-review added nothing new.** The known issues were listed in `--focus`; the reviewer echoed two of them, proposed a fix that would have hidden other errors, and one finding was wrong. SKILL.md step 4 now says to mark known issues as handled, and that a small follow-up covered by your own read and a real-data check needs no second review.
+- **`delegate report` worked on its first live use:** skeleton, one `token_usage.jsonl` row, one copied run row, mode 644. The copied row kept the run log's folder name (`camat_v2`) while the session row had `egorpol/camat_v2`; copied rows now take the session row's `repo`.
+- **Context reached 185k within one item.** The guard fired at ~145k mid-item, which is its intended use. The two waits (18 and 8 min) went into handoff and memory updates, so the item stayed resumable. One stray `cd` broke the rule again, without damage.
+- **Not in this repo's scope:** a converter that resolves manifest entries against the cwd instead of the manifest's folder; Verovio's default `xmlIdSeed=0`, which makes conversions differ byte for byte between runs; the bundled MEI 5.1 schema rejecting Verovio's `meiversion="6.0-dev"`.
 
 ## Still open
 

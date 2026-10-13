@@ -10,10 +10,10 @@ It is a snapshot, published in case parts of it are useful to someone else. It i
 
 ## What it achieved so far
 
-These figures come from 16 Claude Code sessions across five projects, 2026-10-09 to 2026-10-13; the per-session numbers are in [field results](docs/field-results.md). Cost units weigh tokens by API price: input 1, cache read 0.1, cache write 2, output 5. Each session did different work, so the comparisons are per call, not controlled experiments.
+These figures come from 17 Claude Code sessions across five projects, 2026-10-09 to 2026-10-13; the per-session numbers are in [field results](docs/field-results.md). Cost units weigh tokens by API price: input 1, cache read 0.1, cache write 2, output 5. Each session did different work, so the comparisons are per call, not controlled experiments.
 
-- **Short sessions with handoffs.** The baseline was one 13-hour session: 389 calls, with context growing to 779k tokens. Each call re-reads everything before it, so cost grows with the square of session length; cache re-reads were 98% of its tokens. It averaged 67.4k cost units per call. The 15 sessions since averaged 24.8k (63% less), and those that did one item from a `HANDOFF.md` ran 17.7k–21.7k. The rules and the hook push for one work item per session.
-- **Idle cache rebuilds.** After an hour idle, the prompt cache expires, and the next turn rewrites the whole context at twice the input price. That happened in 7 of the 16 sessions and cost 12% of all logged units (7.2M of 59.6M). The hook now holds the first typed prompt after an hour idle and suggests `/clear`; this has not yet been seen in a live session.
+- **Short sessions with handoffs.** The baseline was one 13-hour session: 389 calls, with context growing to 779k tokens. Each call re-reads everything before it, so cost grows with the square of session length; cache re-reads were 98% of its tokens. It averaged 67.4k cost units per call. The 16 sessions since averaged 24.6k (64% less), and those that did one item from a `HANDOFF.md` ran 17.7k–21.7k. The rules and the hook push for one work item per session.
+- **Idle cache rebuilds.** After an hour idle, the prompt cache expires, and the next turn rewrites the whole context at twice the input price. That happened in 7 of the 17 sessions and cost 12% of all logged units (7.2M of 61.2M). The hook now holds the first typed prompt after an hour idle and suggests `/clear`; this has not yet been seen in a live session.
 - **No polling.** In the baseline, 40 status checks cost 15.3% of the session. A finished delegate run now puts its status, at most 20 lines, into the task notification.
 - **Delegation.**
   - On the baseline day, Cursor Auto used about 5× fewer tokens per run than Codex at xhigh effort, and moved its quota pool about 1 point over 9 runs.
@@ -73,6 +73,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 
 ## Roadmap
 
+- `delegate launch --preflight`: run the `--verify` check once in the fresh worktree before the agent starts, so a broken checker shows up in seconds instead of after a full run.
 - A pre-push guard that blocks secrets (API tokens, private keys, home paths) in outgoing commits, which `install.sh --hooks` can offer.
 - Personal tuning in an optional `catalog.local.json`, merged key by key over `catalog.json`.
 - Machine-readable reviews through `codex exec --output-schema`.

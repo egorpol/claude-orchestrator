@@ -18,7 +18,9 @@
 ## `<schema_contract>`
 <!-- What may change. Everything else must round-trip byte for byte.
      Name convention-stamped columns (dump_date, fetched_at, ...) that identity checks must ignore:
-     "byte-identical" once made Codex keep a stale dump_date, and the review approved it. -->
+     "byte-identical" once made Codex keep a stale dump_date, and the review approved it.
+     When the rule is about bytes, also say what the output should look like ("as the tool itself would write it")
+     and name the whitespace case: Codex kept six whitespace-only wrapper lines to honour it, which cost a round. -->
 <schema_contract>
 
 </schema_contract>
