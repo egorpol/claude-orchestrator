@@ -15,7 +15,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
 - `skills/delegate/scripts/catalog.json`: user-editable delegates, pools, task weights, `min_quota_pct`, subagent penalty.
 - `install.sh`: links or copies skills into `~/.claude/skills`; `--check` checks prerequisites; `--hooks` registers `hooks/context-guard.py`; `--rules` imports `rules/orchestrator.md` into the user-level `CLAUDE.md`.
 - `hooks/context-guard.py`: a UserPromptSubmit hook. From about 120k context tokens, it asks Claude to hand off before starting a new work item. After 60 min idle at 100k+ context, the prompt cache has expired, so it holds the first typed prompt once and suggests `/clear`. Tested in `tests/test_context_guard.py`.
-- `rules/orchestrator.md`: short rules for every session. SKILL.md only reaches sessions that invoke the skill, and the sessions that sprawl often don't.
+- `rules/hygiene.md` (every session) and `rules/delegation.md` (when to delegate): short rules; `rules/orchestrator.md` imports both. SKILL.md only reaches sessions that invoke the skill, and the sessions that sprawl often don't.
 - `skills/field-report/SKILL.md`: `/field-report [topic]` from any project; calls `delegate report`, then Claude writes the narrative.
 - `docs/`:
   - `cost-analysis.md`: the frozen 2026-10-09 baseline and the eight levers;
@@ -59,7 +59,7 @@ bash -n install.sh
 ## Field reports, releases, open items
 
 - **Folding in field reports:** list `feedback/*.md` newer than the last "fold in" commit. For each lesson:
-  - a rule for every session goes into `rules/orchestrator.md`;
+  - a rule for every session goes into `rules/hygiene.md`, or into `rules/delegation.md` if it is about delegating;
   - delegate workflow goes into SKILL.md or `templates/`;
   - a CLI or hook bug becomes a fix plus a test.
 

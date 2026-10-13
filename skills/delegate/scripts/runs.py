@@ -129,7 +129,7 @@ def clean_env_lines(repo):
     return lines
 
 
-def build_cmd(agent, model, effort, wt, job, read_only, unsandboxed=False, resume=None):
+def build_cmd(agent, model, effort, wt, job, read_only, unsandboxed=False, resume=None, web_search=False):
     q = shlex.quote
     if agent == "codex":
         sandbox = "read-only" if read_only else "workspace-write"
@@ -141,6 +141,9 @@ def build_cmd(agent, model, effort, wt, job, read_only, unsandboxed=False, resum
             cmd = ["codex", "exec", "-m", model, "-s", sandbox, "-C", str(wt), "--color", "never"]
         if effort:
             cmd += ["-c", f'model_reasoning_effort="{effort}"']
+        if web_search:
+            # the native Responses tool runs server-side, so it works under -s read-only (tested 2026-10-13)
+            cmd += ["-c", 'web_search="live"']
         cmd += ["--json", "-o", str(job / "last-message.md")]
         cmd += [resume, "-"] if resume else ["-"]
         return " ".join(q(c) for c in cmd) + f" < {q(str(job / 'prompt.md'))}"
@@ -265,6 +268,8 @@ def launch(a):
         sys.exit(f"branch {branch} already exists")
     if a.unsandboxed and a.agent != "cursor":
         sys.exit("--unsandboxed applies to cursor only (codex: pick -s yourself in run.sh)")
+    if getattr(a, "web_search", False) and a.agent != "codex":
+        sys.exit("--web-search applies to codex only")
     base_sha = git("rev-parse", a.base or "HEAD", cwd=repo)
     brief = Path(a.brief).expanduser().read_text()
     model = a.model or DEFAULTS[a.agent][0]
@@ -280,10 +285,12 @@ def launch(a):
                         for l in a.link)
     prompt = brief.rstrip() + CONTRACT.format(wt=wt, branch=branch, base=base_sha[:9], scope=scope,
                                               links=links_txt)
-    cmd = build_cmd(a.agent, model, effort, wt, root, a.read_only, a.unsandboxed)
+    cmd = build_cmd(a.agent, model, effort, wt, root, a.read_only, a.unsandboxed,
+                    web_search=getattr(a, "web_search", False))
     run_sh = job_script(root, f"run {name}", repo, wt, cmd, a.agent, verify=a.verify)
     meta = {"name": name, "agent": a.agent, "model": model, "effort": effort,
-            "read_only": a.read_only, "unsandboxed": a.unsandboxed, "verify": a.verify,
+            "read_only": a.read_only, "unsandboxed": a.unsandboxed,
+            "web_search": getattr(a, "web_search", False), "verify": a.verify,
             "repo": str(repo), "worktree": str(wt), "branch": branch, "base": base_sha,
             "links": a.link, "rounds": 1, "created": datetime.now().isoformat(timespec="seconds"),
             "brief_source": str(Path(a.brief).expanduser().resolve())}
@@ -393,7 +400,7 @@ def followup(a):
         prompt += "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
                           for l in a.link)
     cmd = build_cmd(meta["agent"], model, effort, wt, root, meta.get("read_only"), meta.get("unsandboxed"),
-                    resume=sid)
+                    resume=sid, web_search=meta.get("web_search", False))
     (root / "brief.md").write_text(text + "\n")
     (root / "prompt.md").write_text(prompt)
     (root / "run.sh").write_text(job_script(root, f"run {meta['name']} round {k + 1}", Path(meta["repo"]), wt,

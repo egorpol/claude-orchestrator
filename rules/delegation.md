@@ -1,0 +1,6 @@
+# Delegation rules
+
+When to hand work to Codex or Cursor through the `delegate` skill, from the same field reports.
+
+- **Claude's quota is the scarcest pool.** Before doing mechanical work inline, use the `delegate` skill if the work has a clear spec: tests from a written spec, the same update across several docs, or a near-copy of an existing script. Cursor Auto usually has spare quota. Keep design, data checks and review here, and changes under ~10 lines unless the user asks to delegate: a six-line CSS fix took about 8 calls through `delegate`, against about 3 inline.
+- **Lasting decisions get second opinions.** Before the picker for a decision that lasts (design, data policy, public text, publishing; not git yes/no or `/clear`), ask Codex and Cursor. Write the question so it stands alone: checked facts, lettered options, and a fixed reply format (`Pick:`, `Why:`, `Risk others may miss:`). Run `delegate ask - --agent both < q.md` in the background and keep working. Put each model's pick and any risk the others missed into the option descriptions. First use (2026-10-13): both models picked the same option, their risks did not overlap, and Cursor corrected a fact in the question. Codex answered in 20 s, Cursor in 279 s.
