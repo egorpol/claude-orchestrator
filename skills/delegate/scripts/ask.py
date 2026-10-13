@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -16,6 +17,14 @@ if str(SCRIPTS) not in sys.path:
 import runs  # noqa: E402
 
 DEFAULTS = {"cursor": ("auto", None), "codex": ("gpt-6.1-sol", "medium")}
+
+
+class AskFailed(Exception):
+    """A delegate call failed; str() is the stderr tail, .code the exit code."""
+
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.code = code or 1
 
 
 def clean_env():
@@ -84,12 +93,10 @@ def run_cursor(prompt, model, directory, timeout):
         )
     except subprocess.TimeoutExpired as e:
         err = (e.stderr or "") if isinstance(e.stderr, str) else (e.stderr or b"").decode("utf-8", "replace")
-        print(_tail(err) or f"cursor-agent timed out after {timeout}s", file=sys.stderr)
-        sys.exit(124)
+        raise AskFailed(_tail(err) or f"cursor-agent timed out after {timeout}s", 124)
     elapsed = time.monotonic() - t0
     if r.returncode != 0:
-        print(_tail(r.stderr) or f"cursor-agent exited {r.returncode}", file=sys.stderr)
-        sys.exit(r.returncode or 1)
+        raise AskFailed(_tail(r.stderr) or f"cursor-agent exited {r.returncode}", r.returncode)
     answer, usage = _parse_cursor(r.stdout)
     return answer, usage, elapsed, model
 
@@ -156,8 +163,7 @@ def run_codex(prompt, model, effort, directory, timeout):
             out_path.unlink(missing_ok=True)
         except OSError:
             pass
-        print(_tail(err) or f"codex timed out after {timeout}s", file=sys.stderr)
-        sys.exit(124)
+        raise AskFailed(_tail(err) or f"codex timed out after {timeout}s", 124)
     elapsed = time.monotonic() - t0
     try:
         answer = out_path.read_text(encoding="utf-8").strip() if out_path.is_file() else ""
@@ -167,8 +173,7 @@ def run_codex(prompt, model, effort, directory, timeout):
         except OSError:
             pass
     if r.returncode != 0:
-        print(_tail(r.stderr) or f"codex exited {r.returncode}", file=sys.stderr)
-        sys.exit(r.returncode or 1)
+        raise AskFailed(_tail(r.stderr) or f"codex exited {r.returncode}", r.returncode)
     usage = _parse_codex_usage(r.stdout)
     return answer, usage, elapsed, model
 
@@ -210,6 +215,18 @@ def _parse_codex_usage(stdout):
     return totals
 
 
+def _run_one(agent, prompt, a, directory):
+    model = a.model or DEFAULTS[agent][0]
+    if agent == "cursor":
+        return run_cursor(prompt, model, directory, a.timeout)
+    effort = a.effort or DEFAULTS[agent][1] or "medium"
+    return run_codex(prompt, model, effort, directory, a.timeout)
+
+
+def _footer(agent, model, elapsed, usage):
+    return f"({agent} {model} · {elapsed:.0f}s · {_usage_bits(usage)})"
+
+
 def cmd_ask(a):
     question = a.question
     if question == "-":
@@ -219,23 +236,47 @@ def cmd_ask(a):
         sys.exit("ask: empty question")
     directory = Path(a.dir).resolve() if a.dir else Path.cwd()
     agent = a.agent or "cursor"
-    model = a.model or DEFAULTS[agent][0]
-    effort = a.effort or DEFAULTS[agent][1] or "medium"
-    prompt = build_prompt(question, a.max_words, a.files or [])
-    if agent == "cursor":
-        answer, usage, elapsed, model = run_cursor(prompt, model, directory, a.timeout)
-    elif agent == "codex":
-        answer, usage, elapsed, model = run_codex(prompt, model, effort, directory, a.timeout)
-    else:
+    if agent not in DEFAULTS and agent != "both":
         sys.exit(f"unknown agent {agent!r}")
-    print(answer)
-    print(f"({agent} {model} · {elapsed:.0f}s · {_usage_bits(usage)})")
+    if agent == "both" and a.model:
+        sys.exit("ask: --model needs a single --agent")
+    prompt = build_prompt(question, a.max_words, a.files or [])
+    if agent != "both":
+        try:
+            answer, usage, elapsed, model = _run_one(agent, prompt, a, directory)
+        except AskFailed as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(e.code)
+        print(answer)
+        print(_footer(agent, model, elapsed, usage))
+        return
+    # Second opinions: same prompt to both vendors in parallel, one block each.
+    # A failure in one still prints the other's answer.
+    agents = ["codex", "cursor"]
+    with ThreadPoolExecutor(len(agents)) as pool:
+        futures = {ag: pool.submit(_run_one, ag, prompt, a, directory) for ag in agents}
+    code = 0
+    for i, ag in enumerate(agents):
+        if i:
+            print()
+        print(f"## {ag}")
+        try:
+            answer, usage, elapsed, model = futures[ag].result()
+        except AskFailed as e:
+            print(f"(failed, exit {e.code}) {e}")
+            code = code or e.code
+            continue
+        print(answer)
+        print(_footer(ag, model, elapsed, usage))
+    if code:
+        sys.exit(code)
 
 
 def _add_args(p):
     p.add_argument("question", help="question text, or - to read stdin")
-    p.add_argument("--agent", choices=["cursor", "codex"], default="cursor")
-    p.add_argument("--model", help="cursor default auto; codex default gpt-6.1-sol")
+    p.add_argument("--agent", choices=["cursor", "codex", "both"], default="cursor",
+                   help="both: same question to codex and cursor in parallel (second opinions)")
+    p.add_argument("--model", help="cursor default auto; codex default gpt-6.1-sol; not with --agent both")
     p.add_argument("--effort", help="codex reasoning effort (default medium)")
     p.add_argument("--dir", help="workspace directory (default: cwd)")
     p.add_argument("--max-words", type=int, default=200)

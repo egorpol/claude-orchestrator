@@ -259,6 +259,24 @@ class TestSession(unittest.TestCase):
                     cost.resolve_session("55")
                 self.assertIn("ambiguous", str(cm.exception))
 
+    def test_resolve_latest_from_subfolder(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as cfg, tempfile.TemporaryDirectory() as work:
+            sub = Path(work) / "upstream" / "drafts"
+            sub.mkdir(parents=True)
+            proj = Path(cfg) / "projects" / cost.munge_cwd(work)
+            proj.mkdir(parents=True)
+            (proj / "abc.jsonl").write_text("")
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}), \
+                    mock.patch("cost.os.getcwd", return_value=str(sub)):
+                self.assertEqual(cost.resolve_session("latest"), proj / "abc.jsonl")
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}), \
+                    mock.patch("cost.os.getcwd", return_value="/nonexistent-delegate-test"):
+                with self.assertRaises(SystemExit) as cm:
+                    cost.resolve_session("latest")
+                self.assertIn("or its parents", str(cm.exception))
+
     def test_idle_rebuilds_gap_and_no_timestamp(self):
         weights = {"input": 1, "cache_read": 0.1, "cache_write": 2.0, "output": 5.0}
         base = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
