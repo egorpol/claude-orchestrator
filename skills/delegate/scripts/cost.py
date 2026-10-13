@@ -20,6 +20,9 @@ CATALOG = SCRIPTS / "catalog.json"
 DEFAULT_WEIGHTS = {"input": 1, "cache_read": 0.1, "cache_write": 2.0, "output": 5.0}
 TOKEN_CLASSES = ("input", "cache_read", "cache_write_5m", "cache_write_1h",
                  "cache_write_unsplit", "output")
+MODES = ("orchestrator", "claude-only", "vanilla")
+DELEGATE_COMMANDS = ("launch", "followup", "review", "ask")
+DELEGATE_TOKENS = ("input", "cached_input", "output")
 
 
 def _claude_config_dir():
@@ -363,7 +366,8 @@ def _add_usage(dst, u):
         dst[k] = dst.get(k, 0) + int(v)
 
 
-def load_run_log(path, since=None, repo=None):
+def _since_dt(since):
+    """Bare dates and naive ISO cutoffs use local time, as in the run report."""
     since_dt = None
     if since:
         # Bare YYYY-MM-DD / naive ISO → local midnight; explicit offsets (or Z) kept as given.
@@ -372,7 +376,13 @@ def load_run_log(path, since=None, repo=None):
             since_dt = datetime.fromisoformat(since)
         if since_dt.tzinfo is None:
             since_dt = since_dt.astimezone()
+    return since_dt
+
+
+def load_jsonl(path):
+    """Read object rows in file order, ignoring blank/broken lines and missing logs."""
     rows = []
+    path = Path(path)
     if not path.is_file():
         return rows
     with open(path, encoding="utf-8") as f:
@@ -384,18 +394,310 @@ def load_run_log(path, since=None, repo=None):
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if repo and obj.get("repo") != repo:
-                continue
-            if since_dt:
-                ts = _parse_ts(obj.get("ts"))
-                if ts is None:
-                    continue
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if ts < since_dt:
-                    continue
-            rows.append(obj)
+            if isinstance(obj, dict):
+                rows.append(obj)
     return rows
+
+
+def load_run_log(path, since=None, repo=None):
+    since_dt = _since_dt(since)
+    rows = []
+    for obj in load_jsonl(path):
+        if repo and obj.get("repo") != repo:
+            continue
+        if since_dt:
+            ts = _row_ts(obj.get("ts"))
+            if ts is None or ts < since_dt:
+                continue
+        rows.append(obj)
+    return rows
+
+
+def _row_ts(value):
+    ts = _parse_ts(value)
+    return ts.replace(tzinfo=timezone.utc) if ts is not None and ts.tzinfo is None else ts
+
+
+def is_drawn(start):
+    """A session's earliest start row was randomised: drawn, not forced, excluded or unassigned."""
+    return (bool(start) and start.get("u") is not None
+            and not any(start.get(key) for key in ("forced", "excluded", "unassigned")))
+
+
+def _join_session_runs(state, run_rows):
+    """Assign each distinct run once, using explicit provenance before legacy matching.
+
+    Index all starts, including non-drawn/out-of-window sessions, so filtering the
+    report cannot steal a run from its actual owner. First duplicate run row wins.
+    """
+    launches = defaultdict(list)
+    for session, entry in state.items():
+        start = entry.get("start")
+        if start is None:
+            continue
+        ts = _row_ts(start.get("ts"))
+        if ts is not None:
+            for name in entry["launches"]:
+                launches[(name, start.get("repo_dir"))].append((ts, session))
+    joined = defaultdict(list)
+    seen = set()
+    for row in run_rows:
+        pair = (row.get("run"), row.get("ts"))
+        if pair in seen:
+            continue
+        seen.add(pair)
+        session = row.get("session")
+        if not session:
+            ts = _row_ts(row.get("ts"))
+            candidates = launches.get((row.get("run"), row.get("repo")), [])
+            earlier = [candidate for candidate in candidates if ts is not None and candidate[0] <= ts]
+            if earlier:
+                # max is stable for equal timestamps: first session in file order wins.
+                session = max(earlier, key=lambda candidate: candidate[0])[1]
+        if session in state:
+            joined[session].append(row)
+    return joined
+
+
+def _run_totals(rows):
+    tokens = {}
+    for row in rows:
+        agent = row.get("agent") or "?"
+        work = [(agent, rnd.get("usage")) for rnd in row.get("rounds") or []]
+        work.extend((rev.get("agent") or agent, rev.get("usage"))
+                    for rev in row.get("reviews") or [])
+        for worker, usage in work:
+            if not usage:
+                continue
+            totals = tokens.setdefault(worker, dict.fromkeys(DELEGATE_TOKENS, 0))
+            for key in DELEGATE_TOKENS:
+                totals[key] += usage.get(key) or 0
+    return {"runs": len(rows), "applied": sum(r.get("outcome") == "applied" for r in rows),
+            "discarded": sum(r.get("outcome") == "discarded" for r in rows),
+            "delegate_tokens": {agent: tokens[agent] for agent in sorted(tokens)}}
+
+
+def by_mode(session_rows, run_rows, since=None, repo=None):
+    """Intent-to-treat arm totals and per-session records, without I/O or mutations.
+
+    Sessions retain their first start's assignment and last summary/end in file
+    order. Per-session records are the aggregation boundary for future ratings.
+    """
+    state = {}
+    for row in session_rows:
+        session = row.get("session")
+        if not session:
+            continue
+        entry = state.setdefault(session, {"delegate": dict.fromkeys(DELEGATE_COMMANDS, 0),
+                                           "launches": set()})
+        event = row.get("event")
+        if event == "start":
+            entry.setdefault("start", row)
+        elif event in ("summary", "end"):
+            entry[event] = row
+        elif event == "delegate":
+            command = row.get("command")
+            if command in entry["delegate"]:
+                entry["delegate"][command] += 1
+            if command == "launch" and row.get("run"):
+                entry["launches"].add(row["run"])
+
+    joined = _join_session_runs(state, run_rows)
+    cutoff = _since_dt(since)
+    not_drawn = dict.fromkeys(("excluded", "forced", "unassigned", "other"), 0)
+    skipped = 0
+    sessions = []
+    configs = defaultdict(int)
+    unknown = 0
+    for session, entry in state.items():
+        start = entry.get("start")
+        if start is None:
+            skipped += 1
+            continue
+        ts = _row_ts(start.get("ts"))
+        if cutoff is not None and (ts is None or ts < cutoff):
+            continue
+        if repo and start.get("repo_dir") != repo:
+            continue
+        reason = next((key for key in ("excluded", "forced", "unassigned") if start.get(key)), None)
+        if not is_drawn(start):
+            not_drawn[reason or "other"] += 1
+            continue
+        summary = entry.get("summary")
+        pending = summary is None
+        summary = summary or {}
+        weights = start.get("weights")
+        if weights is None:
+            unknown += 1
+        else:
+            configs[tuple(sorted(weights.items()))] += 1
+        pools = {pool: reading.get("delta")
+                 for pool, reading in ((summary.get("quota") or {}).get("pools") or {}).items()}
+        sessions.append({
+            "session": session, "start": start.get("ts"),
+            "start_date": ts.astimezone().date().isoformat() if ts is not None else None,
+            "mode": start.get("mode"), "repo": start.get("repo"), "repo_dir": start.get("repo_dir"),
+            "weights": weights, "reroll": bool((entry.get("end") or {}).get("reroll")),
+            "pending": pending, "summarised": not pending,
+            **{key: summary.get(key) or 0 for key in ("calls", "subagent_calls", "cost_units", "blocked")},
+            "usd_list_price": summary.get("usd_list_price"),
+            "delegate": dict(entry["delegate"]), "pools": pools,
+            **_run_totals(joined[session]),
+        })
+
+    pool_names = sorted({pool for session in sessions for pool in session["pools"]})
+    arms = {}
+    sum_fields = ("calls", "subagent_calls", "cost_units", "blocked", "runs", "applied", "discarded")
+    for mode in MODES:
+        mine = [session for session in sessions if session["mode"] == mode]
+        summarised = sum(session["summarised"] for session in mine)
+        usd = sum(session["usd_list_price"] for session in mine if session["usd_list_price"] is not None)
+        priced = sum(session["usd_list_price"] is not None for session in mine)
+        arm = {
+            "sessions": len(mine), "rerolls": sum(session["reroll"] for session in mine),
+            "pending": sum(session["pending"] for session in mine), "summarised": summarised,
+            **{key: sum(session[key] for session in mine) for key in sum_fields},
+            "usd_list_price": usd,
+            "usd_null_sessions": sum(session["summarised"] and session["usd_list_price"] is None
+                                     for session in mine),
+            "usd_per_session": usd / priced if priced else None,
+            "calls_per_session": sum(session["calls"] for session in mine) / summarised if summarised else None,
+            "delegate": {command: sum(session["delegate"][command] for session in mine)
+                         for command in DELEGATE_COMMANDS},
+            "delegate_tokens": {}, "pools": {},
+        }
+        for agent in sorted({agent for session in mine for agent in session["delegate_tokens"]}):
+            arm["delegate_tokens"][agent] = {
+                key: sum(session["delegate_tokens"].get(agent, {}).get(key, 0) for session in mine)
+                for key in DELEGATE_TOKENS}
+        for pool in pool_names:
+            deltas = [session["pools"][pool] for session in mine if session["pools"].get(pool) is not None]
+            arm["pools"][pool] = {"sum": sum(deltas), "n": len(deltas),
+                                  "mean": sum(deltas) / len(deltas) if deltas else None}
+        arms[mode] = arm
+    return {"log": None, "run_log": None, "since": since, "arms": arms,
+            "not_drawn": not_drawn, "skipped_no_start": skipped,
+            "weights": {"configs": [{"weights": dict(config), "sessions": count}
+                                    for config, count in sorted(configs.items())], "unknown": unknown},
+            "sessions": sessions}
+
+
+def _table_lines(table):
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
+    return ["  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip() for row in table]
+
+
+def render_by_mode(result, as_json=False, sessions=False):
+    if as_json:
+        return json.dumps(result, indent=2)
+    arms = result["arms"]
+    count = sum(arm["sessions"] for arm in arms.values())
+    since = f" since {result['since']}" if result["since"] else ""
+    lines = [f"session log: {result['log']}  ({count} drawn sessions{since})"]
+    table = [("MODE", "SESS", "REROLL", "PEND", "CALLS", "SUB", "UNITS", "USD", "USD/S",
+              "LAUNCH", "RUNS", "APPLIED", "ASK", "BLOCKED")]
+    money = lambda value: f"{value:.2f}" if value is not None else "-"
+    for mode in MODES:
+        arm = arms[mode]
+        has_usd = arm["summarised"] > arm["usd_null_sessions"]
+        table.append((mode, str(arm["sessions"]), str(arm["rerolls"]), str(arm["pending"]),
+                      _fmt_int(arm["calls"]), _fmt_int(arm["subagent_calls"]), _fmt_int(arm["cost_units"]),
+                      money(arm["usd_list_price"] if has_usd else None), money(arm["usd_per_session"]),
+                      str(arm["delegate"]["launch"]), str(arm["runs"]), str(arm["applied"]),
+                      str(arm["delegate"]["ask"]), str(arm["blocked"])))
+    lines.extend(_table_lines(table))
+    pools = sorted({pool for arm in arms.values() for pool in arm["pools"]})
+    if pools:
+        lines.append("pool points used (sum over sessions with a same-window delta, n):")
+        table = [("MODE", *pools)]
+        for mode in MODES:
+            table.append((mode, *(f"{arms[mode]['pools'][pool]['sum']:.1f} ({arms[mode]['pools'][pool]['n']})"
+                                  if arms[mode]["pools"][pool]["n"] else "-" for pool in pools)))
+        lines.extend(_table_lines(table))
+    else:
+        lines.append("pool points used: no quota readings in the summaries yet")
+    lines.append("not drawn: " + ", ".join(f"{key} {value}" for key, value in result["not_drawn"].items()))
+    lines.append(f"skipped: {result['skipped_no_start']} sessions without a start row")
+    configs = result["weights"]["configs"]
+    if len(configs) >= 2:
+        labels = [f"{json.dumps(config['weights'], sort_keys=True)} ({config['sessions']} sessions)"
+                  for config in configs]
+        lines.append("warning: draw weights differ: " + "; ".join(labels) + "; compare arms within one config")
+
+    lines.append("session means and delegate outcomes:")
+    table = [("MODE", "SUMM", "USD-NULL", "CALLS/S", "FOLLOWUP", "REVIEW", "DISCARDED")]
+    for mode in MODES:
+        arm = arms[mode]
+        table.append((mode, str(arm["summarised"]), str(arm["usd_null_sessions"]),
+                      money(arm["calls_per_session"]), str(arm["delegate"]["followup"]),
+                      str(arm["delegate"]["review"]), str(arm["discarded"])))
+    lines.extend(_table_lines(table))
+    if pools:
+        lines.append("pool points used per measured session (mean):")
+        lines.extend(_table_lines([("MODE", *pools)] + [
+            (mode, *(f"{arms[mode]['pools'][pool]['mean']:.1f}"
+                     if arms[mode]["pools"][pool]["mean"] is not None else "-" for pool in pools))
+            for mode in MODES]))
+    if any(arm["delegate_tokens"] for arm in arms.values()):
+        lines.append("delegate tokens by agent (rounds and reviews):")
+        table = [("MODE", "AGENT", "IN", "CACHED", "OUT")]
+        for mode in MODES:
+            for agent, usage in arms[mode]["delegate_tokens"].items():
+                table.append((mode, agent, *(_fmt_int(usage[key]) for key in DELEGATE_TOKENS)))
+        lines.extend(_table_lines(table))
+    if all("items" in arm for arm in arms.values()):
+        lines.extend(_render_items(result))
+    if sessions:
+        lines.append("sessions:")
+        table = [("SESSION", "START", "MODE", "FLAGS", "REPO", "CALLS", "USD", "CLAUDE-5H", "LAUNCH", "APPLIED",
+                  "FIN/ITEMS")]
+        for session in result["sessions"]:
+            flags = "/".join(key for key in ("reroll", "pending") if session[key]) or "-"
+            delta = session["pools"].get("claude-5h")
+            table.append((session["session"][:8], session["start_date"] or "-", session["mode"], flags,
+                          session["repo"] or session["repo_dir"] or "-",
+                          _fmt_int(session["calls"]) if session["summarised"] else "-",
+                          money(session["usd_list_price"]), f"{delta:.1f}" if delta is not None else "-",
+                          str(session["delegate"]["launch"]), str(session["applied"]),
+                          _fin_items(session.get("items"))))
+        lines.extend(_table_lines(table))
+    return "\n".join(lines)
+
+
+def _fin_items(items):
+    if items is None:
+        return "-"
+    return f"{sum(item['status'] == 'finished' for item in items)}/{len(items)}"
+
+
+def _render_items(result):
+    """Rated items per arm: the headline divides all USD of rated sessions by finished items."""
+    arms = result["arms"]
+    money = lambda value: f"{value:.2f}" if value is not None else "-"
+    rubric = next(iter(arms.values()))["items"]["rubric"]
+    lines = [f"items (rubric {rubric}, rated sessions only; USD/FIN = all USD of rated sessions / finished items):"]
+    table = [("MODE", "RATED", "UNRATED", "ITEMS", "FIN", "PART", "UNCL", "CONT", "FIN%", "USD/FIN")]
+    for mode in MODES:
+        items = arms[mode]["items"]
+        share = items["finished_share"]
+        table.append((mode, str(items["rated_sessions"]), str(items["unrated_sessions"] + items["errors"]),
+                      str(items["items"]), str(items["finished"]), str(items["partial"]), str(items["unclear"]),
+                      str(items["continuations"]), f"{share * 100:.0f}" if share is not None else "-",
+                      money(items["usd_per_finished"])))
+    lines.extend(_table_lines(table))
+    for key, label in (("by_size", "by size"), ("by_type", "by type")):
+        groups = [g for g in result.get("item_order", {}).get(key, [])
+                  if any(g in arm["items"][key] for arm in arms.values())]
+        if not groups:
+            continue
+        lines.append(f"{label} (finished/items, USD per finished item from per-item call costs):")
+        table = [("MODE", *groups)]
+        for mode in MODES:
+            buckets = arms[mode]["items"][key]
+            table.append((mode, *(f"{buckets[g]['finished']}/{buckets[g]['items']} {money(buckets[g]['usd_per_finished'])}"
+                                  if g in buckets else "-" for g in groups)))
+        lines.extend(_table_lines(table))
+    return lines
 
 
 def summarise_runs(rows):
@@ -463,6 +765,19 @@ def render_runs(rows, groups, since=None, repo=None, log_path=None, as_json=Fals
 
 
 def cmd_cost(a):
+    if a.by_mode:
+        if a.session is not None:
+            sys.exit("--by-mode cannot be combined with --session")
+        log = runs.session_log_path(a.session_log)
+        run_log = Path(a.log) if a.log else DEFAULT_LOG
+        rows = load_jsonl(log)
+        result = by_mode(rows, load_jsonl(run_log), since=a.since, repo=a.repo)
+        result.update(log=str(log), run_log=str(run_log))
+        import rate  # here, not at the top: rate imports cost
+        weights, prices = load_catalog_cost()
+        rate.attach_items(result, rows, weights, prices)
+        print(render_by_mode(result, as_json=a.json, sessions=a.sessions))
+        return
     if a.session:
         path = resolve_session(a.session)
         weights, prices = load_catalog_cost()
@@ -477,12 +792,16 @@ def cmd_cost(a):
 
 
 def _add_args(p):
-    p.add_argument("--since", help="YYYY-MM-DD (local) or ISO timestamp; only runs at or after it")
+    p.add_argument("--since", help="YYYY-MM-DD (local) or ISO timestamp; only runs/session starts at or after it")
     p.add_argument("--repo", help="filter by repo directory name")
     p.add_argument("--log", help=f"run log path (default {DEFAULT_LOG})")
     p.add_argument("--session", metavar="ID|latest|PATH",
                    help="orchestrator Claude Code transcript (deduped by message.id)")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--by-mode", action="store_true", help="compare randomised session-mode arms")
+    p.add_argument("--session-log", metavar="PATH",
+                   help=f"session log path for --by-mode (default {runs.session_log_path()})")
+    p.add_argument("--sessions", action="store_true", help="also print per-session rows with --by-mode")
     p.set_defaults(fn=cmd_cost)
 
 

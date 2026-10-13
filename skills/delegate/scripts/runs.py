@@ -316,6 +316,7 @@ def launch(a):
                     web_search=getattr(a, "web_search", False))
     run_sh = job_script(root, f"run {name}", repo, wt, cmd, a.agent, verify=a.verify)
     meta = {"name": name, "agent": a.agent, "model": model, "effort": effort,
+            "session": os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
             "read_only": a.read_only, "unsandboxed": a.unsandboxed,
             "web_search": getattr(a, "web_search", False), "verify": a.verify,
             "repo": str(repo), "worktree": str(wt), "branch": branch, "base": base_sha,
@@ -1126,6 +1127,7 @@ def log_run(root, meta, outcome):
     mode = ("read-only" if meta.get("read_only") else "workspace-write") if meta["agent"] == "codex" else (
         "ask" if meta.get("read_only") else "unsandboxed" if meta.get("unsandboxed") else "sandbox")
     record = {"v": 1, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "session": meta.get("session"),
               "repo": Path(meta["repo"]).name, "repo_path": meta["repo"], "run": meta["name"],
               "agent": meta["agent"], "model": meta["model"], "effort": meta.get("effort"),
               "mode": mode, "links": meta.get("links", []), "base": meta["base"], "outcome": outcome,
