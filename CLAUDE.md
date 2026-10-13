@@ -1,6 +1,6 @@
 # claude-orchestrator
 
-User-level Claude Code skills for running Claude as orchestrator with Codex CLI and Cursor's headless agent as workers. The only skill so far is `delegate`; README.md covers what it does and how to install it, and `skills/delegate/SKILL.md` is the text other sessions load.
+User-level Claude Code skills for running Claude as orchestrator with Codex CLI and Cursor's headless agent as workers. Two skills: `delegate`, and `field-report`, a thin wrapper around `delegate report`. README.md covers why the repo exists, what it achieved and how to install it. `skills/*/SKILL.md` is the text other sessions load. Versions are in CHANGELOG.md (SemVer 0.x, first tag v0.1.0).
 
 **This checkout is live.** `~/.claude/skills/delegate` is a symlink into `skills/delegate/`, so every edit here immediately changes how delegation behaves in every project on this machine. Don't leave the scripts broken between edits.
 
@@ -11,12 +11,18 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
   - `ratings.py`: Artificial Analysis via API key or leaderboard scrape, cached 24h
   - `route.py`: per-task score = ratings × weights × quota
   - `runs.py`: worktree/launch/followup/review/verify/status/wait/diff/apply/cleanup, `meta.json`, environment scrubbing
+  - `cost.py`, `ask.py`, `report.py`: session and run-log cost, read-only questions, field-report skeletons and JSONL rows
 - `skills/delegate/scripts/catalog.json`: user-editable delegates, pools, task weights, `min_quota_pct`, subagent penalty.
 - `install.sh`: links or copies skills into `~/.claude/skills`; `--check` checks prerequisites; `--hooks` registers `hooks/context-guard.py`; `--rules` imports `rules/orchestrator.md` into the user-level `CLAUDE.md`.
 - `hooks/context-guard.py`: a UserPromptSubmit hook. From about 120k context tokens, it asks Claude to hand off before starting a new work item. After 60 min idle at 100k+ context, the prompt cache has expired, so it holds the first typed prompt once and suggests `/clear`. Tested in `tests/test_context_guard.py`.
 - `rules/orchestrator.md`: short rules for every session. SKILL.md only reaches sessions that invoke the skill, and the sessions that sprawl often don't.
-- `docs/related-projects.md`: survey of similar tools and ideas worth borrowing.
-- `feedback/`: field reports from real use (Markdown plus `runs.jsonl`). Read them before changing the workflow.
+- `skills/field-report/SKILL.md`: `/field-report [topic]` from any project; calls `delegate report`, then Claude writes the narrative.
+- `docs/`:
+  - `cost-analysis.md`: the frozen 2026-10-09 baseline and the eight levers;
+  - `field-results.md`: append-only per-session measurements, the public evidence for the README's numbers;
+  - `verified-behaviour.md`: dated facts tested live;
+  - `related-projects.md`: survey of similar tools.
+- `feedback/`: field reports from real use (Markdown plus `token_usage.jsonl` and `runs.jsonl`). **Gitignored since 0.1.0**, so it exists only in this checkout (Nextcloud syncs it). Read it before changing the workflow. `HANDOFF.md` is gitignored too.
 
 ## Checking a change
 
@@ -33,7 +39,7 @@ bash -n install.sh
   - `delegate cost --session 762dc86f` must print 389 calls and cache_read 174,522,404. The session was resumed for 3 calls after the 2026-10-09 analysis, so older docs quote 386.
 - **Real agent runs spend quota.** Use a throwaway repo in the scratchpad.
 - **Installer:** test it against `CLAUDE_CONFIG_DIR=<scratch>`, never the real `~/.claude`.
-- **Docs:** after a behaviour change, update SKILL.md, plus README's "Verified behaviour" with the date when the fact was tested live.
+- **Docs:** after a behaviour change, update SKILL.md, plus `docs/verified-behaviour.md` with the date when the fact was tested live, plus a line under `[Unreleased]` in CHANGELOG.md.
 
 ## Rules that must not regress
 
@@ -50,6 +56,13 @@ bash -n install.sh
 - **Nextcloud:** the maintainer's checkout lives in Nextcloud, so `.git` syncs too. On each other machine, use either the synced folder or a `gh repo clone`, never both.
 - **Git:** remote `egorpol/claude-orchestrator` is public since 2026-10-13, with its full history. Commit messages are imperative, e.g. "Add review, followup and verify rounds; …". Commit and push only when asked.
 
-## Open items
+## Field reports, releases, open items
 
-[docs/optimization-plan.md](docs/optimization-plan.md) is the current plan. It ranks levers by measured cost impact from the 2026-10-09 transcript analysis and splits them into jobs A–D with disjoint file ownership. The biggest lever, about 60%, is one work item per orchestrator session. It is workflow guidance, not CLI code. Mark items done there as they land.
+- **Folding in field reports:** list `feedback/*.md` newer than the last "fold in" commit. For each lesson:
+  - a rule for every session goes into `rules/orchestrator.md`;
+  - delegate workflow goes into SKILL.md or `templates/`;
+  - a CLI or hook bug becomes a fix plus a test.
+
+  Append a dated section with the sessions' numbers to `docs/field-results.md`, with `delegate cost --session <id>` as the source, and refresh the overview table there. If a headline number in README changes, re-check it against that table. Reports name other projects' private details; carry lessons over, not quotes.
+- **Releases:** move `[Unreleased]` to `## [X.Y.Z] - date` and update the compare links. The tag (`git tag -a vX.Y.Z`) and the push are outward steps, so bundle them into the end-of-item approval.
+- **Open items:** README's Roadmap lists them, and `HANDOFF.md` (local) has the next step.
