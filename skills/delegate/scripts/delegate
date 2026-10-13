@@ -207,7 +207,7 @@ def main():
     s.add_argument("root")
     s.set_defaults(fn=lambda a: runs.finalize(Path(a.root)))
 
-    for name in ("cost", "ask"):
+    for name in ("cost", "ask", "report"):
         try:
             mod = importlib.import_module(name)
         except ImportError:
