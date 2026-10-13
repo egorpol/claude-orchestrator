@@ -34,7 +34,7 @@ The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysi
 | [`hooks/context-guard.py`](hooks/context-guard.py) | Asks for a handoff before a new work item once context passes about 120k tokens. Holds the first prompt after an hour idle. |
 | [`rules/orchestrator.md`](rules/orchestrator.md) | Short rules for every session, including sessions that never load a skill. It imports [`hygiene.md`](rules/hygiene.md) (handoffs, pickers, data checks, shell) and [`delegation.md`](rules/delegation.md) (when to delegate, second opinions). |
 
-The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands `quota`, `ratings`, `route`, `launch`, `review`, `followup`, `verify`, `status`, `wait`, `diff`, `apply`, `cleanup`, `ask`, `cost` and `report`. It is stdlib-only Python 3.9+. Tunables (models, pools, task weights, `prefer`) are in [`catalog.json`](skills/delegate/scripts/catalog.json), and brief templates are in [`templates/`](skills/delegate/templates/).
+The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands `quota`, `ratings`, `route`, `launch`, `review`, `followup`, `verify`, `status`, `wait`, `diff`, `apply`, `cleanup`, `ask`, `cost`, `rate` and `report`. It is stdlib-only Python 3.9+. Tunables (models, pools, task weights, `prefer`) are in [`catalog.json`](skills/delegate/scripts/catalog.json), and brief templates are in [`templates/`](skills/delegate/templates/).
 
 **How this differs.** The [full orchestrators in the survey](docs/related-projects.md#full-orchestrators-alternatives-heavier) are supervisors a person watches: tmux panes, boards or a desktop app over many agents. Here, Claude Code stays the orchestrator inside one session. The official Codex plugin also delegates from Claude Code, but it works in the current checkout and only with Codex.
 
@@ -77,7 +77,6 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 
 ## Roadmap
 
-- `delegate launch --preflight`: run the `--verify` check once in the fresh worktree before the agent starts, so a broken checker shows up in seconds instead of after a full run.
 - A pre-push guard that blocks secrets (API tokens, private keys, home paths) in outgoing commits, which `install.sh --hooks` can offer.
 - Personal tuning in an optional `catalog.local.json`, merged key by key over `catalog.json`.
 - Machine-readable reviews through `codex exec --output-schema`.

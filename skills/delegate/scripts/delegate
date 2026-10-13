@@ -4,7 +4,7 @@
   delegate quota                      remaining quota + reset per pool
   delegate ratings [--refresh]        AA ratings for catalog models
   delegate route <task>               rank delegates for a task type
-  delegate launch codex|cursor ...    worktree + brief + background run
+  delegate launch codex|cursor ...    worktree + brief + background run (--preflight: verify only)
   delegate review RUN [--agent ...]   read-only review of a run's changes (other vendor by default)
   delegate followup RUN --brief F     next round in the same worktree, resuming the agent session
   delegate verify RUN [--cmd C]       re-run the run's check command in its worktree
@@ -149,6 +149,10 @@ def main():
     s.add_argument("--verify", metavar="CMD",
                    help="shell command run in the worktree after the agent exits (e.g. the test suite); "
                         "result in verify.log / verify_code")
+    s.add_argument("--preflight", action="store_true",
+                   help="create the worktree and --link symlinks, run --verify once in the scrubbed "
+                        "worktree env, print the result, then roll back (no agent); requires --verify; "
+                        "incompatible with --dry-run and --detach")
     s.add_argument("--dry-run", action="store_true", help="print run.sh and prompt, create nothing")
     s.set_defaults(fn=runs.launch)
 
