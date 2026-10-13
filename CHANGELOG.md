@@ -18,12 +18,14 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - `delegate cost --by-mode [--sessions] [--session-log P]` compares the control-session arms, intent-to-treat: only drawn sessions (excluded, forced and unassigned ones are counted apart), assignment from the first start row, last summary and end row win, re-rolls stay in their arm, sessions without a summary show as pending. Per arm: sessions, calls, cost units, USD, delegate commands, joined runs (applied, discarded, tokens per agent) and pool points used where both readings share a reset window. It warns when sessions were drawn under different weights.
 - `delegate rate`: a blinded rater splits each finished, drawn session into items by user-prompt index. Cursor Auto (or `--agent codex`) runs in an empty temp dir and sees only the typed prompts (`/next` marked, command expansions, tool results and assistant text left out), the start-time HANDOFF.md copy and the commits in the session window, with words that reveal the mode redacted. It returns type, size (by requested scope), status (finished, partial, unclear) and continuation per item, validated against rubric `v1`, and appends a `rating` row. `--by-mode` then reports items, finished share and USD per finished item (all USD of rated sessions over finished items), by size and type, with per-item USD split by call timestamps.
 - `hooks/session-mode.py` copies `HANDOFF.md` (git root, else cwd; first 64 KiB) to `~/.cache/claude-delegate/handoffs/<session>.md` at startup and `/clear`, and logs the path (`handoff`) and the draw `weights` in each start row. Run records (`meta.json`, `runs.jsonl`) carry the launching `session`.
+- `delegate report` adds the context at each typed prompt to the skeleton (`Context at typed prompts: 37k, 79k, 111k (idle hold), 242k (guard), 260k.`) and as `prompts` to the `token_usage.jsonl` row, so a report can tell growth inside an item from growth at item boundaries. Prompts are the blinded rater's typed prompts; a context-guard nudge tags the prompt it ran for (none when it ran for a task notification), an idle hold the resent prompt after it.
 
 ### Fixed
 
 - `install.sh --hooks` backs up and rewrites `settings.json` only when it changes, replaces an older registration of its own command (another matcher or timeout) instead of keeping both, tolerates `"hooks": null` groups, stops with a message instead of a traceback on invalid JSON, and never overwrites an earlier backup made in the same second.
 - The context guard ignores events other than `UserPromptSubmit`: cursor-agent runs the hooks in `~/.claude/settings.json` as `beforeSubmitPrompt`.
 - `delegate report` gives copied run rows the session row's `repo` (`owner/name`), so the two rows of one report agree; the folder path stays in `repo_path`.
+- `delegate rate` also reads prompts typed while Claude was working. The transcript records them only as `queued_command` attachments, so the rater missed them (7 in the 68 local transcripts); task notifications and messages from other sessions stay out.
 
 ### Changed
 
@@ -33,6 +35,9 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - Implement template: a byte invariant also says how the output should look.
 - Rules split into `rules/hygiene.md` (every session) and `rules/delegation.md` (when to delegate, second opinions). `rules/orchestrator.md` imports both, so a `--rules` install loads the same text as before; the second-opinion rule is now a bullet of its own.
 - Field results: the 2026-10-13 MEI 5.1 session; README totals now cover 17 sessions.
+- Rules from four 2026-10-13 field reports: `HANDOFF.md` under ~10 KB with state first, committed items cut to a line, and commands that run as written; a sweep request above ~100k counts as a new item, and renders are downscaled before reading; `/field-report` offered while the cache is warm; status lines before any run of 2+ silent calls; ask before accepting terms on the user's behalf; generated IDs normalised before a render diff; stderr kept for warning checks. The second-opinion rule gives the CLI's full path and says that neither `ask` agent can check fresh web facts.
+- SKILL.md: `install.sh --bin` for a bare `delegate`; web access of the `ask` agents.
+- Field results: four more 2026-10-13 sessions and a `mode` column; README totals now cover 21 sessions, and the idle hold has been seen live.
 
 ## [0.1.0] - 2026-10-13
 

@@ -94,16 +94,32 @@ def _truncate(text, limit):
 
 def typed_prompts(rows):
     """Extract only typed user input; the origin rule applies to the whole file."""
+    return [prompt for _, prompt in _typed_prompt_rows(rows)]
+
+
+def _typed_prompt_rows(rows):
+    """Yield row indices with prompts so hook events can identify their delivered input."""
     require_origin = any("origin" in row for row in rows)
-    prompts = []
-    for row in rows:
-        if row.get("type") != "user" or row.get("isMeta") or row.get("isSidechain"):
+    for index, row in enumerate(rows):
+        if row.get("isMeta") or row.get("isSidechain"):
             continue
-        origin = row.get("origin")
-        if require_origin and (not isinstance(origin, dict) or origin.get("kind") != "human"):
+        if row.get("type") == "user":
+            origin = row.get("origin")
+            if require_origin and (not isinstance(origin, dict) or origin.get("kind") != "human"):
+                continue
+            message = row.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+        elif row.get("type") == "attachment":
+            attachment = row.get("attachment")
+            if (not isinstance(attachment, dict) or attachment.get("type") != "queued_command"
+                    or attachment.get("commandMode") != "prompt"):
+                continue
+            origin = attachment.get("origin")
+            if not isinstance(origin, dict) or origin.get("kind") != "human":
+                continue
+            content = attachment.get("prompt")
+        else:
             continue
-        message = row.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
         if isinstance(content, str):
             text = content
         elif isinstance(content, list):
@@ -132,8 +148,7 @@ def typed_prompts(rows):
             rendered = ("[continue from HANDOFF.md; its start-time copy is below]"
                         if name == "/next" else f"[command {name}{' ' + args if args else ''}]")
             text = rendered + ("\n" + remaining if remaining else "")
-        prompts.append({"text": _truncate(text, PROMPT_LIMIT), "timestamp": row.get("timestamp")})
-    return prompts
+        yield index, {"text": _truncate(text, PROMPT_LIMIT), "timestamp": row.get("timestamp")}
 
 
 def session_records(rows):

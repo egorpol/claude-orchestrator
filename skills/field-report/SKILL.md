@@ -17,7 +17,7 @@ A field report records what one orchestrator session did and what it cost, so th
    ```
 
    It reads this session's transcript (via `CLAUDE_CODE_SESSION_ID`) and:
-   - writes the skeleton `feedback/<date>-<project>-<topic>.md`, with calls, tokens, context, cost units, idle rebuilds, quota and delegate runs already filled in;
+   - writes the skeleton `feedback/<date>-<project>-<topic>.md`, with calls, tokens, context, cost units, idle rebuilds, the context at each typed prompt (tagged where the context guard nudged or held it), quota and delegate runs already filled in;
    - upserts the session's row in `feedback/token_usage.jsonl`;
    - copies this session's delegate runs into `feedback/runs.jsonl`.
 
