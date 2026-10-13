@@ -47,6 +47,7 @@ cd claude-orchestrator
 ./install.sh                # symlink skills into ~/.claude/skills (add --bin for `delegate` on PATH)
 ./install.sh --hooks        # optional: register hooks/context-guard.py
 ./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
+./install.sh --timer        # optional: systemd user timer logging pool readings every 10 min while Claude Code is active
 ```
 
 `install.sh` is idempotent. It never deletes an existing skill directory: with `--force`, the old one moves to `~/.claude/skill-backups/`. Use `--copy` where a symlink into the repo is not wanted. A copied install doesn't know where the checkout is, so `/field-report` then needs `CLAUDE_ORCHESTRATOR_FEEDBACK` set to a folder.
@@ -90,7 +91,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 ## Layout
 
 ```text
-install.sh                         link/copy skills, check prerequisites; --hooks, --rules, --bin
+install.sh                         link/copy skills, check prerequisites; --hooks, --rules, --timer, --bin
 hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle
 rules/orchestrator.md              user-level rules for every session (install.sh --rules)
 skills/delegate/SKILL.md           instructions Claude loads

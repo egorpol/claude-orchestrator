@@ -33,6 +33,7 @@ class LifecycleTests(unittest.TestCase):
         self.storage = self.tmp / "runs"
         self.env = {**os.environ, "PATH": str(FAKES) + os.pathsep + os.environ["PATH"],
                     "CLAUDE_DELEGATE_ROOT": str(self.storage), "CLAUDECODE": "fixture",
+                    "CLAUDE_DELEGATE_QUOTA_SNAPSHOT": "0",
                     "VSCODE_FAKE": "fixture", "GIT_CONFIG_GLOBAL": os.devnull,
                     "GIT_CONFIG_NOSYSTEM": "1"}
         self.env.pop("FAKE_AGENT_EXIT", None)
@@ -540,6 +541,64 @@ class LifecycleTests(unittest.TestCase):
             with patch.object(sys, "argv", ["delegate", "route", "implement", "--prefer", "cursor-auto,codex-sol"]):
                 delegate.main()
             self.assertEqual(rank.call_args.kwargs["prefer"], ["cursor-auto", "codex-sol"])
+
+    def test_quota_snapshot_spawn_is_detached_optional_and_best_effort(self):
+        with patch.dict(os.environ, self.env, clear=True), \
+             patch.object(runs.quota.subprocess, "Popen") as popen:
+            runs.quota.spawn_snapshot("launch", run="fixture", session="claude-session")
+            popen.assert_not_called()
+            os.environ["CLAUDE_DELEGATE_QUOTA_SNAPSHOT"] = "1"
+            runs.quota.spawn_snapshot("launch", run="fixture", session="claude-session")
+            popen.assert_called_once_with(
+                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "launch",
+                 "--session", "claude-session", "--run", "fixture"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+            popen.return_value.wait.assert_not_called()
+            popen.return_value.communicate.assert_not_called()
+            popen.reset_mock()
+            popen.side_effect = OSError("fixture spawn failure")
+            runs.quota.spawn_snapshot("launch", run="fixture")
+            self.assertNotIn("--session", popen.call_args.args[0])
+
+    def test_run_entrypoints_snapshot_before_agent_start_and_skip_dry_runs(self):
+        self.launch()  # completed fake run, with snapshots disabled
+        loader = importlib.machinery.SourceFileLoader("delegate_snapshot_cli", str(CLI))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        delegate = importlib.util.module_from_spec(spec)
+        loader.exec_module(delegate)
+        spawn = runs.quota.spawn_snapshot
+        collected = []
+
+        def snapshot(*args, **kwargs):
+            # Scope Popen mocking to the collector, allowing fixture git commands to run.
+            with patch.object(runs.quota.subprocess, "Popen") as popen:
+                spawn(*args, **kwargs)
+                collected.append(popen.call_args.args[0])
+
+        def start(job, detach, name):
+            self.assertEqual(collected[-1],
+                             [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "launch",
+                              "--session", "parent-session", "--run", name])
+
+        commands = (("launch", "codex", "--brief", str(self.brief), "--name", "spawn",
+                     "--repo", str(self.repo)),
+                    ("review", "test"),
+                    ("followup", "test", "--brief", str(self.follow_brief)))
+        with patch.dict(os.environ, {**self.env, "CLAUDE_DELEGATE_QUOTA_SNAPSHOT": "1",
+                                     "CLAUDE_CODE_SESSION_ID": "parent-session"}, clear=True), \
+             patch.object(runs.quota, "spawn_snapshot", side_effect=snapshot), \
+             patch.object(runs, "start", side_effect=start) as agent_start, patch("builtins.print"):
+            for command in commands:
+                with patch.object(sys, "argv", ["delegate", *command, "--dry-run"]):
+                    delegate.main()
+            self.assertEqual(collected, [])
+            agent_start.assert_not_called()
+            for count, command in enumerate(commands, 1):
+                with patch.object(sys, "argv", ["delegate", *command]):
+                    delegate.main()
+                self.assertEqual(len(collected), count)
+                self.assertEqual(agent_start.call_count, count)
 
 
 if __name__ == "__main__":

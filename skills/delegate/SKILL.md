@@ -10,6 +10,7 @@ One CLI: `~/.claude/skills/delegate/scripts/delegate` (stdlib Python; full path)
 | command | does |
 |---|---|
 | `delegate quota [--source direct]` | % left, reset and pace for claude-5h/7d, codex-5h/7d, cursor-auto, cursor-premium |
+| `delegate quota --snapshot --reason R [--if-active]` | appends one direct reading of all pools to `~/.cache/claude-delegate/quota.jsonl`; runs by itself at session start and end, on each run start and from the `install.sh --timer` timer |
 | `delegate route <task> [--prefer IDs]` | ranks for `review`, `refactor`, `implement`, `research`, `bulk-label`; honours catalog `prefer` and `--prefer` |
 | `delegate ratings [--grep RE] [--refresh]` | AA intelligence / coding / tok/s / $ for catalog (or any AA) models |
 | `delegate ask QUESTION [--files F]… [--agent cursor\|codex\|both]` | cheap read-only one-shot (default Cursor auto); cites `path:line` without filling orchestrator context. `both` asks Codex and Cursor in parallel for second opinions |

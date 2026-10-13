@@ -33,7 +33,11 @@ def load_catalog():
 
 
 def cmd_quota(a):
-    res = quota.pools(quota.fetch(a.source))
+    source = a.source or ("direct" if a.snapshot else "auto")
+    if a.snapshot:
+        sys.exit(quota.snapshot(reason=a.reason, session=a.session, run=a.run,
+                                if_active=a.if_active, log=a.log, source=source))
+    res = quota.pools(quota.fetch(source))
     print(json.dumps(res, indent=2) if a.json else quota.render(res))
 
 
@@ -97,8 +101,14 @@ def main():
 
     s = sub.add_parser("quota", help="remaining quota and reset time per pool")
     s.add_argument("--json", action="store_true")
-    s.add_argument("--source", default="auto", choices=["auto", "direct", "daemon"],
+    s.add_argument("--source", choices=["auto", "direct", "daemon"],
                    help="openusage collection source; 'direct' polls providers now (slower, fresher)")
+    s.add_argument("--snapshot", action="store_true", help="append a quota.jsonl reading (default source: direct)")
+    s.add_argument("--reason", choices=["session-start", "session-end", "backfill", "launch", "timer", "manual"])
+    s.add_argument("--session")
+    s.add_argument("--run")
+    s.add_argument("--if-active", action="store_true", help="poll only when a timer reading is due")
+    s.add_argument("--log", help="snapshot JSONL path")
     s.set_defaults(fn=cmd_quota)
 
     s = sub.add_parser("ratings", help="Artificial Analysis ratings for catalog models")
@@ -222,6 +232,8 @@ def main():
     sub.metavar = "{" + ",".join(k for k in sub.choices if not k.startswith("_")) + "}"
 
     a = p.parse_args()
+    if a.cmd == "quota" and a.snapshot and not a.if_active and a.reason is None:
+        p.error("quota --snapshot requires --reason unless --if-active is set")
     a.fn(a)
 
 

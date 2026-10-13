@@ -16,6 +16,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import quota
+
 SCRIPTS = Path(__file__).resolve().parent
 RUNS_ROOT = Path(os.environ.get("CLAUDE_DELEGATE_ROOT",
                                 Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
@@ -323,6 +325,7 @@ def launch(a):
     print(f"last msg: {root / 'last-message.md'}")
     if a.verify:
         print(f"verify:   {a.verify}")
+    quota.spawn_snapshot("launch", run=name, session=os.environ.get("CLAUDE_CODE_SESSION_ID"))
     start(root, a.detach, name)
 
 
@@ -410,6 +413,7 @@ def followup(a):
     print(f"round {k} archived to {archive}")
     print(f"round {k + 1}: {meta['agent']} {model}" + (f" @{effort}" if effort else "")
           + (f", resuming session {sid}" if sid else ", fresh session"))
+    quota.spawn_snapshot("launch", run=meta["name"], session=os.environ.get("CLAUDE_CODE_SESSION_ID"))
     start(root, a.detach, meta["name"])
 
 
@@ -468,6 +472,7 @@ def review(a):
     print(f"review {n} of {meta['name']} (round {meta.get('rounds', 1)}) by {agent} {model}"
           + (f" @{effort}" if effort else ""))
     print(f"result:   {job / 'last-message.md'}")
+    quota.spawn_snapshot("launch", run=meta["name"], session=os.environ.get("CLAUDE_CODE_SESSION_ID"))
     start(job, a.detach, meta["name"])
 
 
