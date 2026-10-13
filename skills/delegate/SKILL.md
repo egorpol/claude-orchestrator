@@ -45,7 +45,7 @@ One work item per orchestrator session. An assessment or a plan counts as an ite
    delegate launch codex  --brief B.md --read-only --name research-z                          # review/research
    ```
    - `--verify CMD` runs after exit in the cleaned worktree env → `verify.log` / `verify_code`. Pass the real test command, not one piped through `tail` (masks exit code). Copy it from the project's CI workflow (`.github/workflows/*.yml`). On 2026-10-12, a bare `pytest -q` collected a release-only test folder: the run reported verify FAIL, and both medium review findings were about the command, not the code.
-   - `--link PATH` symlinks a gitignored path from the main checkout and excludes it in `.git/info/exclude`.
+   - `--link PATH` symlinks a gitignored path from the main checkout and excludes it in `.git/info/exclude`. The path can't be under `.delegate/`, which the worktree uses itself; stage input data in another gitignored folder.
    - **Duration:** Codex @xhigh built a well-specified 1.6k-line module with 48 tests in 16 min (2026-10-12), against a "30–90 minutes" estimate. `delegate ask` on Cursor took from 10 s to 279 s.
    - Parallel runs need disjoint files. `--dry-run` prints `run.sh` and the prompt without creating anything.
    - For a run not launched in this session (before `/clear`, or `--detach`), run `delegate wait NAME` with `run_in_background`, never a hand-written `sleep` or `until` loop: one exited at `verifying`, before verify ended. `status NAME` gives a snapshot; `--full` only when the packet flags something.

@@ -403,6 +403,14 @@ class LifecycleTests(unittest.TestCase):
         out = self.cli("wait", "wait-e2e", "--interval", "0.05", "--timeout", "30")
         self.assertIn("done", out.splitlines()[0])
 
+    def test_rejected_link_leaves_no_worktree_or_branch(self):
+        (self.repo / ".delegate/x").mkdir(parents=True)
+        self.launch("cursor", "badlink", "--link", ".delegate/x", code=1)
+        self.assertFalse(self.root("badlink").exists())
+        self.assertNotIn("badlink", self.git("worktree", "list"))
+        self.assertEqual(self.git("branch", "--list", "delegate/badlink"), "")
+        self.launch("cursor", "badlink")  # the name is free again
+
     def test_followup_preserves_model_accounting_and_existing_links(self):
         (self.repo / "data/cache").mkdir(parents=True)
         (self.repo / "data/cache/input").write_text("fixture\n")

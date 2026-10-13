@@ -1,32 +1,23 @@
-# Handoff (2026-10-13)
+# Handoff (2026-10-13, second session)
 
-**State:** the 2026-10-12/13 camat field reports are processed, and the user's request for decisions in pickers is built. See "Field results, 2026-10-12/13" in [docs/optimization-plan.md](docs/optimization-plan.md).
-- **Rules:** discrete choices go into `AskUserQuestion`, recommended option first. Lasting decisions (design, data policy, public text, publishing; not git yes/no or `/clear`) also get Codex's and Cursor's picks via `delegate ask - --agent both < q.md`, run in the background. Other new rules: a status line before several reads in a row; git approvals as a picker option.
-- **Code:**
-  - `ask --agent both` runs both vendors in parallel and keeps one answer if the other fails.
-  - `cost --session latest` walks up to the nearest parent folder that has a project dir.
-  - 57 tests pass; both changes were tested live (README "Verified behaviour (2026-10-13)").
-- **SKILL.md:** copy `--verify` from the CI workflow; edit the spec before launch when a brief narrows it; duration data points.
+**State:** the repo is public with its full history: this session's commit sits on top of `02a9f87`, a normal push, then a visibility change. This session added:
+- an MIT `LICENSE` ("Copyright (c) 2026 Egor Polyakov", as in the other public repos);
+- a README "How this differs" section, an Install heading and a License section;
+- `docs/related-projects.md` refreshed to 2026-10-13 by Cursor Auto (run `related-refresh`: stats for 23 repos, 10 new entries; claims spot-checked);
+- a fix: a rejected `--link` left an orphan worktree and branch, and `launch` now rolls them back (new test; 58 pass; probed live).
 
-**Open:**
-- This session's edits and the user's two new reports plus JSONL rows are uncommitted. The user is asked at the end of the session.
-- The idle hold has not been seen live yet (unchanged from 2026-10-12).
+**Decided (2026-10-13), as decision — why — cost if wrong:**
+- Publish this repo as it is, with full history and `feedback/` tracked — the user's call: nothing in it is sensitive, and the projects it names are meant to go public. A scan of all 11 commits (139 file versions) found no tokens, keys, private keys or home paths; the only email is `test@example.invalid` — anything in the history is public for good (forks, event archives).
+  - This replaced the earlier plan of a fresh one-commit history in a new repo, with the old repo kept as a private archive. That plan only made sense if the history held something to hide. The fresh commit `162e892` is in the reflog.
+- MIT — matches the 4 other public repos and superpowers (Codex A, Cursor A) — no explicit patent grant.
+- Keep the gmail author email — already public in 4 repos — none.
+- README "How this differs": draft A with Codex's edits (Cursor preferred its own draft) — none.
+- Development stays on public `main`, plus a local pre-push guard (both models) — the checkout stays the live install — a guard backs up review and doesn't replace it.
+- Personal tuning goes in an optional catalog override (both models) — public defaults stay stable — define the merge per key: `prefer` lists and the `delegates` array lose new public entries under a naive replace (Codex).
 
-## Next item: make the repo public
+**Next items (one per session):**
+1. Pre-push guard: an untracked `.git/hooks/pre-push`, optionally offered by `install.sh --hooks`. Since project names aren't sensitive, it should block secrets in outgoing commits: GitHub/OpenAI/Anthropic/AWS token patterns, private keys, `key|token|secret = <long value>`, and home paths. This session's scan patterns are a starting point; they gave no false positives except long path strings.
+2. Catalog override: `catalog.local.json` (gitignored) or `~/.config/claude-delegate/catalog.json`, merged per key over `catalog.json`; tests and docs to match.
+3. Others: `codex exec --output-schema` for machine-readable reviews; ideas in the survey's "Still open" (loop cost scoring, pre-launch approval policies, `.worktreeinclude`).
 
-**Decided (2026-10-13, picker; Codex: A, Cursor: A):** option A.
-- One fresh commit on a new history.
-- `feedback/` and `HANDOFF.md` become gitignored. Nextcloud still syncs them between the user's machines.
-- `docs/optimization-plan.md` keeps the aggregate numbers as the public evidence.
-- Future field reports stay private.
-
-**Risks the second opinions raised, to handle in that item:**
-1. Old clones keep the old history. Before rewriting, keep a `git bundle` of it in a gitignored or out-of-repo place.
-2. README ("Field reports live under `feedback/`"), the plan's "Sources" list and CLAUDE.md all point into `feedback/` or call the remote private. Reword them for readers who don't have the folder.
-3. The plan describes the Webern sessions; that repo (`webern_op27`) is private. The exact repo name is not in the plan (Cursor corrected the question), but it appears in `feedback/token_usage.jsonl`. Review the plan's narrative too, not just the names. The other projects it names are public: eu-pd-composers, PublicDomainSheetMusicFinder, camat_v2, audiospylt, egorpol.github.io (checked with `gh repo view`, 2026-10-13).
-
-**Audit so far (2026-10-13):** no home paths or email addresses in tracked files; the author email appears only in commit metadata; history has 10 commits.
-
-**Still to decide, as pickers:** licence (MIT or Apache-2.0); whether to author the fresh commit with the GitHub noreply email; whether to replace `main` on the same remote (force-push, needs explicit approval) or create a new repo. Licence and README positioning count as lasting decisions, so get second opinions.
-
-**Also in that item:** refresh [docs/related-projects.md](docs/related-projects.md) (survey from 2026-10-09). The README then needs a short "how this differs" paragraph for outside readers. Quick wins not yet taken from that survey: machine-readable reviews via `codex exec --output-schema`, and superpowers' ruling ledger (`decision — why — cost if wrong`) in the handoff's decided cases.
+**Open:** the idle hold has not been seen live yet.
