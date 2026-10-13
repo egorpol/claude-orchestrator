@@ -510,6 +510,9 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("export PYTHONDONTWRITEBYTECODE=1", cursor)
         self.assertFalse(self.storage.exists())
         self.assertIn("--sandbox disabled --force", self.launch("cursor", "x", "--unsandboxed", "--dry-run"))
+        self.assertNotIn("web_search", codex)
+        self.assertIn('web_search="live"', self.launch("codex", "x", "--web-search", "--read-only", "--dry-run"))
+        self.launch("cursor", "x", "--web-search", "--dry-run", code=1)
         self.assertNotIn("_finalize", self.cli("--help"))
         for name in ("cost", "ask"):
             if (CLI.parent / (name + ".py")).exists():

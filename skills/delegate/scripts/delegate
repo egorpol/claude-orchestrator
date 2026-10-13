@@ -131,6 +131,9 @@ def main():
     s.add_argument("--read-only", action="store_true", help="codex -s read-only / cursor --mode ask")
     s.add_argument("--unsandboxed", action="store_true",
                    help="cursor only: --sandbox disabled --force (needed for network, e.g. installs); ask the user first")
+    s.add_argument("--web-search", action="store_true",
+                   help="codex only: enable the live web_search tool (server-side; the shell stays offline), "
+                        "e.g. for research runs")
     s.add_argument("--detach", action="store_true",
                    help="return immediately (default: block until done; run it with run_in_background)")
     s.add_argument("--verify", metavar="CMD",

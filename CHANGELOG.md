@@ -6,6 +6,11 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ## [Unreleased]
 
+### Added
+
+- `delegate launch --web-search` (Codex only) turns on Codex's live `web_search` tool, for research runs that need the web. The tool runs server-side, so the shell stays offline and `--read-only` still applies. Follow-up rounds keep it.
+- `hooks/session-mode.py` for randomised control sessions. On SessionStart it draws `orchestrator`, `claude-only` or `vanilla` (default weights 50/25/25), injects that mode's rules, shows the mode to the user and logs the draw to `~/.cache/claude-delegate/sessions.jsonl`. `resume` and `compact` keep the drawn mode. In the two control modes, PreToolUse denies delegation (`Skill(delegate)`, `codex:*` skills and subagents, Bash calls that run `codex`, `cursor-agent` or `delegate launch|followup|review|ask`) and logs each attempt. SessionEnd logs the call count and a re-roll flag. Repos in `exclude` (default: this one) always get `orchestrator`. `install.sh` does not register it yet.
+
 ### Fixed
 
 - `delegate report` gives copied run rows the session row's `repo` (`owner/name`), so the two rows of one report agree; the folder path stays in `repo_path`.
@@ -14,6 +19,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 - SKILL.md: acceptance scripts in linked folders, each checker branch run once before launch, and seeds pinned for two-run comparisons; known issues marked as handled in `--focus`, and no second review for a small, covered follow-up.
 - Implement template: a byte invariant also says how the output should look.
+- Rules split into `rules/hygiene.md` (every session) and `rules/delegation.md` (when to delegate, second opinions). `rules/orchestrator.md` imports both, so a `--rules` install loads the same text as before; the second-opinion rule is now a bullet of its own.
 - Field results: the 2026-10-13 MEI 5.1 session; README totals now cover 17 sessions.
 
 ## [0.1.0] - 2026-10-13
