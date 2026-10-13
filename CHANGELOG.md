@@ -6,6 +6,16 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ## [Unreleased]
 
+### Fixed
+
+- `delegate report` gives copied run rows the session row's `repo` (`owner/name`), so the two rows of one report agree; the folder path stays in `repo_path`.
+
+### Changed
+
+- SKILL.md: acceptance scripts in linked folders, each checker branch run once before launch, and seeds pinned for two-run comparisons; known issues marked as handled in `--focus`, and no second review for a small, covered follow-up.
+- Implement template: a byte invariant also says how the output should look.
+- Field results: the 2026-10-13 MEI 5.1 session; README totals now cover 17 sessions.
+
 ## [0.1.0] - 2026-10-13
 
 First versioned release. The repo went public on 2026-10-13. The earlier commits are listed under [Before 0.1.0](#before-010).

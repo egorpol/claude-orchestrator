@@ -178,13 +178,13 @@ def matching_runs(directory, first_call):
     return matched
 
 
-def append_runs(data, rows, sid):
+def append_runs(data, rows, sid, repo):
     seen = {(obj.get("run"), obj.get("ts")) for _, obj in _json_rows(data) if obj}
     new = []
     for row in rows:
         pair = (row.get("run"), row.get("ts"))
         if pair not in seen:
-            new.append({**row, "session": sid})
+            new.append({**row, "repo": repo, "session": sid})
             seen.add(pair)
     return _append_bytes(data, b"".join(_encoded_row(row) for row in new)), len(new)
 
@@ -300,7 +300,7 @@ def cmd_report(a):
         usage, action = upsert_usage(_read_bytes(usage_path), row)
         runs = matching_runs(repo_dir, first)
         old_runs = _read_bytes(runs_path)
-        run_data, copied = append_runs(old_runs, runs, row["session"])
+        run_data, copied = append_runs(old_runs, runs, row["session"], repo)
         markdown = render_skeleton(row, summary, runs)
         if not a.dry_run:
             directory.mkdir(parents=True, exist_ok=True)

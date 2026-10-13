@@ -212,7 +212,7 @@ class TestReport(unittest.TestCase):
         for row in copied:
             self.assertEqual(row["session"], SESSION)
             source = next(r for r in rows if r["run"] == row["run"])
-            self.assertEqual(row, {**source, "session": SESSION})
+            self.assertEqual(row, {**source, "repo": "custom/report-label", "session": SESSION})
         old = target.read_bytes()
         self.assertTrue(old.startswith(retained))
         code, out, err = self.invoke("--force", "--repo", "custom/report-label")
