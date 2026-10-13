@@ -40,6 +40,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - Rules from four 2026-10-13 field reports: `HANDOFF.md` under ~10 KB with state first, committed items cut to a line, and commands that run as written; a sweep request above ~100k counts as a new item, and renders are downscaled before reading; `/field-report` offered while the cache is warm; status lines before any run of 2+ silent calls; ask before accepting terms on the user's behalf; generated IDs normalised before a render diff; stderr kept for warning checks. The second-opinion rule gives the CLI's full path and says that neither `ask` agent can check fresh web facts.
 - SKILL.md: `install.sh --bin` for a bare `delegate`; web access of the `ask` agents.
 - Field results: four more 2026-10-13 sessions and a `mode` column; README totals now cover 21 sessions, and the idle hold has been seen live.
+- `docs/related-projects.md` folds in the 2026-10-13 wide survey (Codex with live web search): new orchestrators and routers, a quota-aware routing section, and a measurement section on the ccusage family, Claude Code's OpenTelemetry export and published controlled comparisons. It also records which of the survey's recommendations are done and adds the rest to the open list and the README roadmap.
 
 ## [0.1.0] - 2026-10-13
 
