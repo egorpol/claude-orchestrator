@@ -1,4 +1,5 @@
 """Installer tests isolate home/config and fake both openusage and systemctl."""
+import json
 import os
 import shlex
 import shutil
@@ -9,6 +10,10 @@ import unittest
 from pathlib import Path
 
 INSTALL = Path(__file__).resolve().parents[1] / "install.sh"
+REPO = INSTALL.parent
+RULES_LINE = f"@{REPO}/rules/orchestrator.md"
+GUARD = f'python3 "{REPO}/hooks/context-guard.py"'
+MODE = f'python3 "{REPO}/hooks/session-mode.py"'
 
 
 class InstallTests(unittest.TestCase):
@@ -36,11 +41,140 @@ class InstallTests(unittest.TestCase):
         path.write_text(contents)
         path.chmod(0o755)
 
-    def install(self, *args, env=None):
+    def install(self, *args, env=None, code=0):
         result = subprocess.run(["/bin/bash", str(INSTALL), *args],
                                 env={**self.env, **(env or {})}, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
         return result.stdout
+
+    @property
+    def settings(self):
+        return self.tmp / "claude/settings.json"
+
+    @property
+    def user_md(self):
+        return self.tmp / "claude/CLAUDE.md"
+
+    def test_hooks_alone_register_only_the_context_guard(self):
+        self.install("--rules")
+        self.install("--hooks")
+        self.assertEqual(list(json.loads(self.settings.read_text())["hooks"]), ["UserPromptSubmit"])
+        self.assertIn(RULES_LINE, self.user_md.read_text())
+
+    def test_hooks_and_experiment_register_once_and_keep_existing_settings(self):
+        self.settings.parent.mkdir(parents=True)
+        other = {"hooks": [{"type": "command", "command": "other-hook"}]}
+        self.settings.write_text(json.dumps({"theme": "dark", "hooks": {"UserPromptSubmit": [other]}}))
+        self.install("--hooks", "--experiment")
+        backups = sorted(self.settings.parent.glob("settings.json.bak-*"))
+        self.assertEqual(len(backups), 2)  # one per change, never over the first
+        self.install("--hooks", "--experiment")
+        settings = json.loads(self.settings.read_text())
+        self.assertEqual(settings["theme"], "dark")
+        hooks = settings["hooks"]
+        self.assertEqual(hooks["UserPromptSubmit"][0], other)
+        expected = {"UserPromptSubmit": (None, GUARD, 5), "SessionStart": (None, MODE, 10),
+                    "PreToolUse": ("Skill|Agent|Bash", MODE, 5), "SessionEnd": (None, MODE, 10)}
+        for event, (matcher, command, timeout) in expected.items():
+            ours = [g for g in hooks[event] if any(h["command"] == command for h in g["hooks"])]
+            self.assertEqual(ours, [{**({"matcher": matcher} if matcher else {}),
+                                     "hooks": [{"type": "command", "command": command, "timeout": timeout}]}],
+                             event)
+        # The re-run changed nothing, so it made no backup.
+        self.assertEqual(sorted(self.settings.parent.glob("settings.json.bak-*")), backups)
+
+    def test_hooks_replace_stale_registrations_and_tolerate_null_groups(self):
+        self.settings.parent.mkdir(parents=True)
+        mixed = {"matcher": "Read", "hooks": [{"type": "command", "command": MODE},
+                                                {"type": "command", "command": "mine"}]}
+        self.settings.write_text(json.dumps({"hooks": {
+            "PreToolUse": [mixed], "UserPromptSubmit": [{"hooks": None}],
+            "SessionEnd": [{"hooks": [{"type": "command", "command": MODE, "timeout": 30}]}]}}))
+        self.install("--hooks", "--experiment")
+        hooks = json.loads(self.settings.read_text())["hooks"]
+        self.assertEqual(hooks["PreToolUse"], [
+            {"matcher": "Read", "hooks": [{"type": "command", "command": "mine"}]},
+            {"matcher": "Skill|Agent|Bash", "hooks": [{"type": "command", "command": MODE, "timeout": 5}]}])
+        self.assertEqual(hooks["UserPromptSubmit"][0], {"hooks": None})
+        self.assertEqual(hooks["SessionEnd"], [{"hooks": [{"type": "command", "command": MODE, "timeout": 10}]}])
+
+    def test_hooks_refuse_malformed_settings_without_a_traceback(self):
+        self.settings.parent.mkdir(parents=True)
+        self.settings.write_text("{broken")
+        result = subprocess.run(["/bin/bash", str(INSTALL), "--hooks"], env=self.env,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is not valid JSON", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.settings.read_text(), "{broken")
+        self.assertEqual(list(self.settings.parent.glob("settings.json.bak-*")), [])
+
+    def test_check_ignores_mentions_that_are_not_registrations_or_imports(self):
+        self.settings.parent.mkdir(parents=True)
+        self.settings.write_text(json.dumps({"notes": "hooks/session-mode.py"}))
+        self.user_md.write_text(f"# see {RULES_LINE} for the rules\n")
+        output = self.install("--check")
+        self.assertIn("session-mode hook not registered", output)
+        self.assertIn("orchestrator rules not imported", output)
+        self.install("--rules")
+        self.assertTrue(self.user_md.read_text().endswith(f"\n\n{RULES_LINE}\n"))
+
+    def test_import_removal_keeps_crlf_and_other_lines(self):
+        self.user_md.parent.mkdir(parents=True)
+        self.user_md.write_bytes(f"# mine\r\n\r\n  {RULES_LINE}  \r\n# after\r\n\r\n".encode())
+        self.install("--experiment")
+        self.assertEqual(self.user_md.read_bytes(), b"# mine\r\n\r\n# after\r\n\r\n")
+
+    def test_experiment_replaces_the_rules_import_and_rules_then_skip(self):
+        self.user_md.parent.mkdir(parents=True)
+        self.user_md.write_text("# mine\n")
+        self.install("--rules")
+        self.assertEqual(self.user_md.read_text(), f"# mine\n\n{RULES_LINE}\n")
+        output = self.install("--experiment")
+        self.assertIn("import removed", output)
+        self.assertEqual(self.user_md.read_text(), "# mine\n")
+        self.assertIn("rules not imported", self.install("--rules"))
+        self.assertEqual(self.user_md.read_text(), "# mine\n")
+
+    def test_rules_and_experiment_together_never_import(self):
+        self.install("--rules", "--experiment")
+        self.assertFalse(self.user_md.exists())
+        self.assertIn("SessionStart", json.loads(self.settings.read_text())["hooks"])
+
+    def test_experiment_leaves_an_empty_user_md_when_the_import_was_its_only_line(self):
+        self.install("--rules")
+        self.install("--experiment")
+        self.assertEqual(self.user_md.read_text(), "")
+
+    def test_check_reports_session_mode_import_conflict_and_next(self):
+        output = self.install("--check")
+        self.assertIn("session-mode hook not registered", output)
+        self.assertIn("orchestrator rules not imported", output)
+        self.assertIn("/next command not installed", output)
+        self.install("--rules")
+        output = self.install("--check")
+        self.assertIn("orchestrator rules imported", output)
+        self.assertIn("/next command in", output)
+        self.install("--experiment")
+        output = self.install("--check")
+        self.assertIn("session-mode hook registered", output)
+        self.assertNotIn("also imported", output)
+        with self.user_md.open("a") as stream:
+            stream.write(RULES_LINE + "\n")
+        self.assertIn("also imported", self.install("--check"))
+
+    def test_next_command_is_linked_copied_and_never_overwritten(self):
+        target = self.tmp / "claude/commands/next.md"
+        self.install()
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(target.resolve(), REPO / "commands/next.md")
+        self.install("--copy")
+        self.assertFalse(target.is_symlink())
+        self.assertEqual(target.read_text(), (REPO / "commands/next.md").read_text())
+        self.assertIn("exists and is not a symlink", self.install(code=1))
+        self.install("--force")
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(len(list((self.tmp / "claude/skill-backups").glob("next.md-*"))), 1)
 
     def test_timer_units_commands_and_reinstallation_are_idempotent(self):
         self.install("--timer")
@@ -115,6 +249,9 @@ class InstallTests(unittest.TestCase):
         self.assertIn("systemctl --user disable --now claude-delegate-quota.timer", output)
         self.assertIn("delete claude-delegate-quota.{service,timer}", output)
         self.assertIn("--force", output)
+        self.assertIn("session-mode.json", output)
+        self.assertIn("--experiment  opt in to control sessions", output)
+        self.assertIn("skipped while the session-mode hook is registered", output)
         self.assertNotIn("set -euo", output)
         self.assertFalse(self.units.exists())
 

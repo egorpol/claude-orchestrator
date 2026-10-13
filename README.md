@@ -44,13 +44,16 @@ The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands 
 gh repo clone egorpol/claude-orchestrator
 cd claude-orchestrator
 ./install.sh --check        # what is missing
-./install.sh                # symlink skills into ~/.claude/skills (add --bin for `delegate` on PATH)
+./install.sh                # symlink skills into ~/.claude/skills and /next into ~/.claude/commands (add --bin for `delegate` on PATH)
 ./install.sh --hooks        # optional: register hooks/context-guard.py
 ./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
+./install.sh --experiment   # opt-in: randomised control sessions via hooks/session-mode.py (see below)
 ./install.sh --timer        # optional: systemd user timer logging pool readings every 10 min while Claude Code is active
 ```
 
-`install.sh` is idempotent. It never deletes an existing skill directory: with `--force`, the old one moves to `~/.claude/skill-backups/`. Use `--copy` where a symlink into the repo is not wanted. A copied install doesn't know where the checkout is, so `/field-report` then needs `CLAUDE_ORCHESTRATOR_FEEDBACK` set to a folder.
+`--experiment` is for measuring whether delegation pays off. Each new session draws `orchestrator` (50%), `claude-only` or `vanilla` (25% each; delegation blocked), gets that mode's rules from the hook and logs one summary row to `~/.cache/claude-delegate/sessions.jsonl` (local only). The hook replaces the `--rules` import, so `--experiment` removes it. Weights go in `~/.config/claude-orchestrator/session-mode.json`; to stop, delete the `session-mode.py` entries from `~/.claude/settings.json` and run `--rules` again.
+
+`install.sh` is idempotent. It never deletes an existing skill directory or command file: with `--force`, the old one moves to `~/.claude/skill-backups/`. Use `--copy` where a symlink into the repo is not wanted. A copied install doesn't know where the checkout is, so `/field-report` then needs `CLAUDE_ORCHESTRATOR_FEEDBACK` set to a folder.
 
 Prerequisites (`--check` prints install hints):
 
@@ -91,9 +94,11 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 ## Layout
 
 ```text
-install.sh                         link/copy skills, check prerequisites; --hooks, --rules, --timer, --bin
+install.sh                         link/copy skills and commands, check prerequisites; --hooks, --rules, --experiment, --timer, --bin
+commands/next.md                   /next: continue from HANDOFF.md after /clear
 hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle
-rules/orchestrator.md              user-level rules for every session (install.sh --rules)
+hooks/session-mode.py              SessionStart/PreToolUse/SessionEnd: control-session draw, rules, summary rows
+rules/orchestrator.md              user-level rules for every session (install.sh --rules, or the session-mode hook)
 skills/delegate/SKILL.md           instructions Claude loads
 skills/delegate/templates/         brief templates (implement, mechanical, review, research)
 skills/delegate/scripts/           delegate CLI + catalog.json
