@@ -32,6 +32,7 @@ The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysi
 | [`delegate`](skills/delegate/SKILL.md) skill and CLI | Hands work to **Codex CLI** or **Cursor's headless agent** (`cursor-agent --model auto`). Shows live quota per pool via openusage and ranks models per task type with [Artificial Analysis](https://artificialanalysis.ai/) ratings. Each delegate runs in its own git worktree with a brief, a log and an optional check command. The other vendor reviews the result read-only, and fix rounds resume the same agent session. Claude reviews the diff and applies it uncommitted. |
 | [`/field-report`](skills/field-report/SKILL.md) skill | Writes a field report on the current session from any project's chat: `delegate report` fills in the numbers, then Claude writes the narrative. |
 | [`hooks/context-guard.py`](hooks/context-guard.py) | Asks for a handoff before a new work item once context passes about 120k tokens. Holds the first prompt after an hour idle. |
+| [`hooks/secret-guard.py`](hooks/secret-guard.py) | PreToolUse (Bash) and optional git pre-push: asks before a push that would send API tokens, private keys, home paths or key/env files. In a private repo, `git config secretGuard.homePaths false` turns off the home-path rule. |
 | [`rules/orchestrator.md`](rules/orchestrator.md) | Short rules for every session, including sessions that never load a skill. It imports [`hygiene.md`](rules/hygiene.md) (handoffs, pickers, data checks, shell) and [`delegation.md`](rules/delegation.md) (when to delegate, second opinions). |
 
 The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands `quota`, `ratings`, `route`, `launch`, `review`, `followup`, `verify`, `status`, `wait`, `diff`, `apply`, `cleanup`, `ask`, `cost`, `rate` and `report`. It is stdlib-only Python 3.9+. Tunables (models, pools, task weights, `prefer`) are in [`catalog.json`](skills/delegate/scripts/catalog.json), and brief templates are in [`templates/`](skills/delegate/templates/).
@@ -45,7 +46,8 @@ gh repo clone egorpol/claude-orchestrator
 cd claude-orchestrator
 ./install.sh --check        # what is missing
 ./install.sh                # symlink skills into ~/.claude/skills and /next into ~/.claude/commands (add --bin for `delegate` on PATH)
-./install.sh --hooks        # optional: register hooks/context-guard.py
+./install.sh --hooks        # optional: register hooks/context-guard.py and hooks/secret-guard.py
+./install.sh --git-hook=.   # optional: link secret-guard.py as this repo's git pre-push hook
 ./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
 ./install.sh --experiment   # opt-in: randomised control sessions via hooks/session-mode.py (see below)
 ./install.sh --timer        # optional: systemd user timer logging pool readings every 10 min while Claude Code is active
@@ -77,7 +79,6 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 
 ## Roadmap
 
-- A pre-push guard that blocks secrets (API tokens, private keys, home paths) in outgoing commits, which `install.sh --hooks` can offer.
 - Personal tuning in an optional `catalog.local.json`, merged key by key over `catalog.json`.
 - Machine-readable reviews through `codex exec --output-schema`.
 - The open ideas in the [survey](docs/related-projects.md): loop cost scoring, pre-launch approval policies, `.worktreeinclude`, control-session preregistration and blocked assignment, quota refresh at dispatch.
@@ -93,9 +94,10 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 ## Layout
 
 ```text
-install.sh                         link/copy skills and commands, check prerequisites; --hooks, --rules, --experiment, --timer, --bin
+install.sh                         link/copy skills and commands, check prerequisites; --hooks, --git-hook=DIR, --rules, --experiment, --timer, --bin
 commands/next.md                   /next: continue from HANDOFF.md after /clear
 hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle
+hooks/secret-guard.py              PreToolUse (Bash) + git pre-push / --check: stop secrets leaving on a push
 hooks/session-mode.py              SessionStart/PreToolUse/SessionEnd: control-session draw, rules, summary rows
 rules/orchestrator.md              user-level rules for every session (install.sh --rules, or the session-mode hook)
 skills/delegate/SKILL.md           instructions Claude loads
