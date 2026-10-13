@@ -17,6 +17,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- `delegate cost --session` adds dated list-price USD by model and source, including deduplicated subagents and separate 5m/1h cache writes; `delegate report` logs these totals while preserving historical main-only measurements.
 - SKILL.md: acceptance scripts in linked folders, each checker branch run once before launch, and seeds pinned for two-run comparisons; known issues marked as handled in `--focus`, and no second review for a small, covered follow-up.
 - Implement template: a byte invariant also says how the output should look.
 - Rules split into `rules/hygiene.md` (every session) and `rules/delegation.md` (when to delegate, second opinions). `rules/orchestrator.md` imports both, so a `--rules` install loads the same text as before; the second-opinion rule is now a bullet of its own.

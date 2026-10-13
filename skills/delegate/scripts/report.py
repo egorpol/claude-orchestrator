@@ -269,10 +269,11 @@ def cmd_report(a):
     try:
         directory = feedback_dir(a.feedback_dir)
         path = cost.resolve_session(a.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or "latest")
-        calls = cost.parse_assistant_usage(path)
-        if not calls:
+        calls = cost.parse_session_usage(path)
+        main_calls = [c for c in calls if c["source"] == "main"]
+        if not main_calls:
             _fail(f"no assistant calls in {path}")
-        first, last = _call_time(calls[0]), _call_time(calls[-1])
+        first, last = _call_time(main_calls[0]), _call_time(main_calls[-1])
         repo, repo_dir = repo_identity(a.repo)
         slug = repo.rstrip("/").rsplit("/", 1)[-1].lower()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", a.topic):
@@ -283,12 +284,12 @@ def cmd_report(a):
             _fail(f"{skeleton} exists; use --force to replace it")
         usage_path = _output_path(directory, "token_usage.jsonl")
         runs_path = _output_path(directory, "runs.jsonl")
-        weights, usd = cost.load_catalog_cost()
-        summary = cost.summarise_session(calls, weights, usd)
+        weights, prices = cost.load_catalog_cost()
+        summary = cost.summarise_session(calls, weights, prices)
         row = {
             "date": date, "repo": repo, "item": a.item,
             "kind": "orchestrator_session", "session": session_id(path),
-            "model": calls[0]["model"], "source": "delegate report",
+            "model": main_calls[0]["model"], "source": "delegate report",
             "api_calls": summary["calls"], "fresh_input": summary["input"],
             "output": summary["output"], "cache_read": summary["cache_read"],
             "cache_write": summary["cache_creation"],
@@ -296,6 +297,8 @@ def cmd_report(a):
                                  "max": summary["context_max"]},
             "cost_units": round(summary["cost_units"]),
             "idle_rebuilds": summary["idle_rebuilds"], "quota_end": quota_end(a.no_quota),
+            "usd_list_price": round(summary["usd"], 4) if summary["usd"] is not None else None,
+            "subagent_calls": summary["subagent_calls"], "prices_as_of": summary["prices_as_of"],
         }
         usage, action = upsert_usage(_read_bytes(usage_path), row)
         runs = matching_runs(repo_dir, first)

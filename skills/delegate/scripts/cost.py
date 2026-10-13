@@ -18,6 +18,8 @@ import runs  # noqa: E402
 DEFAULT_LOG = runs.RUNS_ROOT / "runs.jsonl"
 CATALOG = SCRIPTS / "catalog.json"
 DEFAULT_WEIGHTS = {"input": 1, "cache_read": 0.1, "cache_write": 2.0, "output": 5.0}
+TOKEN_CLASSES = ("input", "cache_read", "cache_write_5m", "cache_write_1h",
+                 "cache_write_unsplit", "output")
 
 
 def _claude_config_dir():
@@ -69,18 +71,25 @@ def resolve_session(spec):
 
 
 def load_catalog_cost():
+    """Return historical cost-unit weights and the dated list-price table (or None)."""
     try:
         cat = json.loads(CATALOG.read_text())
     except (OSError, json.JSONDecodeError):
         return DEFAULT_WEIGHTS, None
     oc = cat.get("orchestrator_cost") or {}
     weights = {**DEFAULT_WEIGHTS, **(oc.get("weights") or {})}
-    return weights, oc.get("usd_per_mtok_input")
+    return weights, oc.get("list_prices")
 
 
-def parse_assistant_usage(path):
-    """Dedupe assistant lines by message.id (fallback requestId); skip synthetic."""
-    seen = set()
+def parse_assistant_usage(path, source="main", seen=None):
+    """Parse one transcript without pricing; optionally share deduplication across files.
+
+    Records retain the timestamp, source, pricing modifiers and token classes for
+    reuse in interval analyses. The original cache_creation total is kept for
+    historical cost-unit/context summaries. First occurrence of an id wins.
+    """
+    if seen is None:
+        seen = set()
     calls = []
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -101,15 +110,106 @@ def parse_assistant_usage(path):
                 continue
             seen.add(mid)
             u = msg.get("usage") or {}
+            total_write = int(u.get("cache_creation_input_tokens") or 0)
+            split = u.get("cache_creation") or {}
+            write_5m = int(split.get("ephemeral_5m_input_tokens") or 0)
+            write_1h = int(split.get("ephemeral_1h_input_tokens") or 0)
             calls.append({
+                "id": mid,
                 "model": msg.get("model"),
+                "source": source,
                 "input": int(u.get("input_tokens") or 0),
                 "cache_read": int(u.get("cache_read_input_tokens") or 0),
-                "cache_creation": int(u.get("cache_creation_input_tokens") or 0),
+                "cache_creation": total_write,
+                "cache_write_5m": write_5m,
+                "cache_write_1h": write_1h,
+                "cache_write_unsplit": max(0, total_write - write_5m - write_1h),
                 "output": int(u.get("output_tokens") or 0),
                 "timestamp": obj.get("timestamp"),
+                "speed": u.get("speed"),
+                "inference_geo": u.get("inference_geo"),
             })
     return calls
+
+
+def parse_session_usage(path):
+    """Parse main then agent-*.jsonl with shared ids, attributing duplicates to main.
+
+    Main order is preserved for historical context/idle measurements. Consumers
+    doing interval analysis can filter or sort these records by timestamp.
+    """
+    path = Path(path)
+    seen = set()
+    calls = parse_assistant_usage(path, seen=seen)
+    for agent_path in sorted(path.with_suffix("").glob("subagents/agent-*.jsonl")):
+        calls.extend(parse_assistant_usage(agent_path, source="subagents", seen=seen))
+    return calls
+
+
+def model_price(model, prices):
+    """Exact model id first, otherwise the longest hyphen-delimited prefix."""
+    models = (prices or {}).get("models") or {}
+    if model in models:
+        return models[model]
+    matches = [k for k in models if model and model.startswith(k + "-")]
+    return models[max(matches, key=len)] if matches else None
+
+
+def price_call(call, prices):
+    """Return (list-price USD, unpriced reason); apply prompt tiers per call."""
+    for key, standard in (("speed", "standard"), ("inference_geo", "global")):
+        value = call.get(key)
+        if value not in (None, standard):
+            return None, f"{key}={value}"
+    rates = model_price(call.get("model"), prices)
+    if rates is None:
+        return None, "no price"
+    prompt = call["input"] + call["cache_read"] + call["cache_creation"]
+    threshold = rates.get("above_prompt_tokens")
+    if threshold is not None and prompt > threshold:
+        rates = rates["above"]
+    usd = sum(call[k] * rates[k] for k in TOKEN_CLASSES if k != "cache_write_unsplit")
+    usd += call["cache_write_unsplit"] * rates["cache_write_5m"]
+    return usd / 1e6, None
+
+
+def summarise_list_price(calls, prices):
+    """Aggregate tokens (including unpriced calls) and USD by model/source."""
+    groups = {}
+    unpriced = defaultdict(int)
+    source_usd = {"main": 0.0, "subagents": 0.0}
+    priced_calls = 0
+    for call in calls:
+        source = call.get("source", "main")
+        model = call.get("model")
+        key = (source, model)
+        if key not in groups:
+            groups[key] = {"model": model, "source": source, "calls": 0,
+                           **dict.fromkeys(TOKEN_CLASSES, 0), "usd": None}
+        group = groups[key]
+        group["calls"] += 1
+        for token_class in TOKEN_CLASSES:
+            group[token_class] += call[token_class]
+        usd, reason = price_call(call, prices)
+        if usd is None:
+            unpriced[(source, model, reason)] += 1
+        else:
+            priced_calls += 1
+            group["usd"] = (group["usd"] or 0.0) + usd
+            source_usd[source] += usd
+    # Model can be absent in a transcript; keep that group and its no-price reason.
+    sort_key = lambda key: (key[0] != "main", key[1] or "", *key[2:])
+    return {
+        "subagent_calls": sum(c.get("source") == "subagents" for c in calls),
+        "by_model": [groups[key] for key in sorted(groups, key=sort_key)],
+        "usd": sum(source_usd.values()) if priced_calls else None,
+        "usd_main": source_usd["main"],
+        "usd_subagents": source_usd["subagents"],
+        "usd_unpriced": [{"model": model, "source": source, "calls": count, "reason": reason}
+                         for (source, model, reason), count in sorted(unpriced.items(),
+                                                                    key=lambda kv: sort_key(kv[0]))],
+        "prices_as_of": (prices or {}).get("as_of"),
+    }
 
 
 def idle_rebuilds(calls, cache_write_weight=2.0):
@@ -135,7 +235,10 @@ def idle_rebuilds(calls, cache_write_weight=2.0):
     return rebuilds, units
 
 
-def summarise_session(calls, weights, usd_per_mtok):
+def summarise_session(calls, weights, prices=None):
+    """Keep historical fields main-only; add list-price totals for the whole session."""
+    pricing = summarise_list_price(calls, prices)
+    calls = [c for c in calls if c.get("source", "main") == "main"]
     n = len(calls)
     inp = sum(c["input"] for c in calls)
     cr = sum(c["cache_read"] for c in calls)
@@ -167,10 +270,9 @@ def summarise_session(calls, weights, usd_per_mtok):
         "context_max": mx,
         "cost_units": total,
         "cost_parts": parts,
-        "usd_per_mtok_input": usd_per_mtok,
-        "usd": (total / 1e6) * usd_per_mtok if usd_per_mtok is not None else None,
         "idle_rebuilds": rebuilds,
         "idle_rebuild_units": rebuild_units,
+        **pricing,
     }
 
 
@@ -206,10 +308,23 @@ def render_session(path, summary, as_json=False):
         f"{k} {100 * parts[k] / total:.1f}%"
         for k in ("input", "cache_read", "cache_write", "output")
     )
-    cost_line = f"cost units: {_fmt_int(round(summary['cost_units']))}  ({shares})"
-    if summary.get("usd") is not None:
-        cost_line += f"  ≈ ${summary['usd']:.2f}"
-    lines.append(cost_line)
+    lines.append(f"cost units: {_fmt_int(round(summary['cost_units']))}  ({shares})")
+    usd = f"${summary['usd']:.2f}" if summary["usd"] is not None else "unpriced"
+    dated = f"prices as of {summary['prices_as_of'] or 'unknown'}"
+    lines.append(f"list price: {usd}  (main ${summary['usd_main']:.2f}, "
+                 f"subagents ${summary['usd_subagents']:.2f}; {dated})")
+    lines.append(f"by model: ({dated}; USD)")
+    columns = ("model", "source", "calls", *TOKEN_CLASSES, "usd")
+    table = [columns]
+    for row in summary["by_model"]:
+        table.append((row["model"] or "unknown model", row["source"], _fmt_int(row["calls"]),
+                      *(_fmt_int(row[k]) for k in TOKEN_CLASSES),
+                      f"${row['usd']:.2f}" if row["usd"] is not None else "unpriced"))
+    widths = [max(len(row[i]) for row in table) for i in range(len(columns))]
+    lines += ["  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip() for row in table]
+    for group in summary["usd_unpriced"]:
+        lines.append(f"unpriced: {group['model'] or 'unknown model'}  {group['source']}  "
+                     f"{_fmt_int(group['calls'])} calls  ({group['reason']})")
     rebuilds = summary.get("idle_rebuilds") or []
     if not rebuilds:
         lines.append("idle rebuilds (gap >= 60 min): none")
@@ -350,9 +465,9 @@ def render_runs(rows, groups, since=None, repo=None, log_path=None, as_json=Fals
 def cmd_cost(a):
     if a.session:
         path = resolve_session(a.session)
-        weights, usd = load_catalog_cost()
-        calls = parse_assistant_usage(path)
-        summary = summarise_session(calls, weights, usd)
+        weights, prices = load_catalog_cost()
+        calls = parse_session_usage(path)
+        summary = summarise_session(calls, weights, prices)
         print(render_session(path, summary, as_json=a.json))
         return
     log = Path(a.log) if a.log else DEFAULT_LOG
