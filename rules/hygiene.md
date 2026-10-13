@@ -22,6 +22,7 @@ From the claude-orchestrator field reports (`feedback/`): work items and handoff
   - Check public claims against what is deployed, not the checkout. Tally categorical values by exact match: a substring test (`'eu' in flag`) counted 252 where the source said 65.
 - **Vague reports:** when the first check shows nothing wrong, show it and ask what is missing before widening the test matrix. Ten calls across browsers, widths and themes once failed to reproduce a complaint that was about taste.
 - **Shell:** the Bash tool runs zsh, not the user's fish.
+  - Push in its own Bash call after the commit: the secret guard scans only commits that exist when the call starts.
   - `(cmd)` substitution fails.
   - An unquoted `$var` does not split into words; loop over a file list with `while read`.
   - Write scratch scripts to files rather than nesting heredocs.

@@ -13,6 +13,7 @@ INSTALL = Path(__file__).resolve().parents[1] / "install.sh"
 REPO = INSTALL.parent
 RULES_LINE = f"@{REPO}/rules/orchestrator.md"
 GUARD = f'python3 "{REPO}/hooks/context-guard.py"'
+SECRET = f'python3 "{REPO}/hooks/secret-guard.py"'
 MODE = f'python3 "{REPO}/hooks/session-mode.py"'
 
 
@@ -55,10 +56,15 @@ class InstallTests(unittest.TestCase):
     def user_md(self):
         return self.tmp / "claude/CLAUDE.md"
 
-    def test_hooks_alone_register_only_the_context_guard(self):
+    def test_hooks_alone_register_context_and_secret_guard(self):
         self.install("--rules")
         self.install("--hooks")
-        self.assertEqual(list(json.loads(self.settings.read_text())["hooks"]), ["UserPromptSubmit"])
+        hooks = json.loads(self.settings.read_text())["hooks"]
+        self.assertEqual(set(hooks), {"UserPromptSubmit", "PreToolUse"})
+        self.assertEqual(hooks["UserPromptSubmit"], [
+            {"hooks": [{"type": "command", "command": GUARD, "timeout": 5}]}])
+        self.assertEqual(hooks["PreToolUse"], [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": SECRET, "timeout": 30}]}])
         self.assertIn(RULES_LINE, self.user_md.read_text())
 
     def test_hooks_and_experiment_register_once_and_keep_existing_settings(self):
@@ -73,13 +79,18 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(settings["theme"], "dark")
         hooks = settings["hooks"]
         self.assertEqual(hooks["UserPromptSubmit"][0], other)
-        expected = {"UserPromptSubmit": (None, GUARD, 5), "SessionStart": (None, MODE, 10),
-                    "PreToolUse": ("Skill|Agent|Bash", MODE, 5), "SessionEnd": (None, MODE, 10)}
-        for event, (matcher, command, timeout) in expected.items():
+        expected = [
+            ("UserPromptSubmit", None, GUARD, 5),
+            ("PreToolUse", "Bash", SECRET, 30),
+            ("SessionStart", None, MODE, 10),
+            ("PreToolUse", "Skill|Agent|Bash", MODE, 5),
+            ("SessionEnd", None, MODE, 10),
+        ]
+        for event, matcher, command, timeout in expected:
             ours = [g for g in hooks[event] if any(h["command"] == command for h in g["hooks"])]
             self.assertEqual(ours, [{**({"matcher": matcher} if matcher else {}),
                                      "hooks": [{"type": "command", "command": command, "timeout": timeout}]}],
-                             event)
+                             (event, command))
         # The re-run changed nothing, so it made no backup.
         self.assertEqual(sorted(self.settings.parent.glob("settings.json.bak-*")), backups)
 
@@ -94,9 +105,40 @@ class InstallTests(unittest.TestCase):
         hooks = json.loads(self.settings.read_text())["hooks"]
         self.assertEqual(hooks["PreToolUse"], [
             {"matcher": "Read", "hooks": [{"type": "command", "command": "mine"}]},
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": SECRET, "timeout": 30}]},
             {"matcher": "Skill|Agent|Bash", "hooks": [{"type": "command", "command": MODE, "timeout": 5}]}])
         self.assertEqual(hooks["UserPromptSubmit"][0], {"hooks": None})
         self.assertEqual(hooks["SessionEnd"], [{"hooks": [{"type": "command", "command": MODE, "timeout": 10}]}])
+
+    def test_git_hook_links_idempotent_refuses_and_force_backup(self):
+        repo = self.tmp / "proj"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        dest = Path(subprocess.run(
+            ["git", "rev-parse", "--git-path", "hooks/pre-push"],
+            cwd=repo, check=True, capture_output=True, text=True,
+        ).stdout.strip())
+        if not dest.is_absolute():
+            dest = repo / dest
+        out = self.install(f"--git-hook={repo}")
+        self.assertIn("pre-push", out)
+        self.assertTrue(dest.is_symlink())
+        self.assertEqual(dest.resolve(), REPO / "hooks/secret-guard.py")
+        self.install(f"--git-hook={repo}")  # idempotent
+        self.assertTrue(dest.is_symlink())
+        dest.unlink()
+        dest.write_text("#!/bin/sh\nexit 0\n")
+        dest.chmod(0o755)
+        result = subprocess.run(["/bin/bash", str(INSTALL), f"--git-hook={repo}"],
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exists and is not this secret-guard", result.stdout + result.stderr)
+        self.assertTrue(dest.is_file() and not dest.is_symlink())
+        self.install(f"--git-hook={repo}", "--force")
+        self.assertTrue(dest.is_symlink())
+        self.assertEqual(dest.resolve(), REPO / "hooks/secret-guard.py")
+        backups = list((self.tmp / "claude/skill-backups").glob("pre-push-*"))
+        self.assertEqual(len(backups), 1)
 
     def test_hooks_refuse_malformed_settings_without_a_traceback(self):
         self.settings.parent.mkdir(parents=True)

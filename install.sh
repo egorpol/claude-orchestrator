@@ -7,6 +7,12 @@
 #   ./install.sh --bin      also put `delegate` on PATH via ~/.local/bin
 #   ./install.sh --hooks    also register hooks/context-guard.py as a UserPromptSubmit hook in
 #                           settings.json (handoff nudge at item boundaries past ~120k context)
+#                           and hooks/secret-guard.py as a PreToolUse (Bash) hook (timeout 30)
+#                           that asks before a push that would send secrets
+#   ./install.sh --git-hook=DIR
+#                           link hooks/secret-guard.py as DIR's git pre-push hook
+#                           (respects core.hooksPath / worktrees); refuses a different existing
+#                           pre-push unless --force (then backs it up like a skill)
 #   ./install.sh --rules    also import rules/orchestrator.md from the user-level CLAUDE.md,
 #                           so every session gets the orchestrator rules (stays live from the repo);
 #                           skipped while the session-mode hook is registered
@@ -35,7 +41,7 @@ SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 USER_MD="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/CLAUDE.md"
 RULES_LINE="@$REPO/rules/orchestrator.md"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-mode=link bin=0 hooks=0 experiment=0 rules=0 timer=0 check_only=0 force=0 failed=0
+mode=link bin=0 hooks=0 experiment=0 rules=0 timer=0 check_only=0 force=0 failed=0 git_hook_dir=
 for arg in "$@"; do
   case "$arg" in
     --copy) mode=copy ;;
@@ -46,6 +52,7 @@ for arg in "$@"; do
     --timer) timer=1 ;;
     --check) check_only=1 ;;
     --force) force=1 ;;
+    --git-hook=*) git_hook_dir="${arg#--git-hook=}" ;;
     -h|--help) awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -89,6 +96,8 @@ check_prereqs() {
     || warn "ARTIFICIAL_ANALYSIS_API_KEY unset: ratings come from the AA leaderboard page (coding = proxy)"
   if grep -qs 'hooks/context-guard.py' "$SETTINGS"; then ok "context-guard hook registered in $SETTINGS"
   else warn "optional: context-guard hook not registered (./install.sh --hooks)"; fi
+  if grep -qs 'hooks/secret-guard.py' "$SETTINGS"; then ok "secret-guard hook registered in $SETTINGS"
+  else warn "optional: secret-guard hook not registered (./install.sh --hooks)"; fi
   local imported=0
   rules_imported && imported=1
   if session_mode_registered; then
@@ -235,7 +244,8 @@ if [ "$bin" = 1 ]; then
   ln -sfn "$SKILLS_DIR/delegate/scripts/delegate" "$HOME/.local/bin/delegate"
   ok "delegate on PATH via ~/.local/bin/delegate"
 fi
-# Register hooks/context-guard.py (guard) or hooks/session-mode.py (session) in settings.json.
+# Register hooks/context-guard.py + secret-guard.py (guard) or hooks/session-mode.py (session)
+# in settings.json.
 register_hooks() {
   # merge, never replace: keep every other key and hook; back the file up before a change
   python3 - "$SETTINGS" "$REPO/hooks" "$1" <<'PY_HOOK'
@@ -248,9 +258,11 @@ except ValueError as error:
     sys.exit(f"  miss  {path} is not valid JSON ({error}); fix it and re-run")
 if not isinstance(s, dict) or not isinstance(s.setdefault("hooks", {}), dict):
     sys.exit(f"  miss  {path}: expected an object with a \"hooks\" object; fix it and re-run")
-guard, mode = (f'python3 "{hooks / name}"' for name in ("context-guard.py", "session-mode.py"))
+guard, secret, mode = (f'python3 "{hooks / name}"'
+                       for name in ("context-guard.py", "secret-guard.py", "session-mode.py"))
 # session-mode starts its slow parts (quota reading, summary) detached, so short timeouts do
-entries = {"guard": [("UserPromptSubmit", None, guard, 5)],
+entries = {"guard": [("UserPromptSubmit", None, guard, 5),
+                     ("PreToolUse", "Bash", secret, 30)],
            "session": [("SessionStart", None, mode, 10), ("PreToolUse", "Skill|Agent|Bash", mode, 5),
                        ("SessionEnd", None, mode, 10)]}[which]
 for event, matcher, cmd, timeout in entries:
@@ -281,9 +293,55 @@ if new != text:
 PY_HOOK
 }
 
+install_git_hook() {
+  local dir="$1" target dest
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    miss "--git-hook: not a directory: ${dir:-}"
+    failed=1
+    return
+  fi
+  if ! dest="$(git -C "$dir" rev-parse --git-path hooks/pre-push 2>/dev/null)"; then
+    miss "--git-hook: not a git repository: $dir"
+    failed=1
+    return
+  fi
+  # rev-parse --git-path can be relative to DIR
+  case "$dest" in
+    /*) ;;
+    *) dest="$dir/$dest" ;;
+  esac
+  mkdir -p "$(dirname "$dest")"
+  target="$REPO/hooks/secret-guard.py"
+  if [ -L "$dest" ]; then
+    if [ "$(readlink -f "$dest")" = "$(readlink -f "$target")" ]; then
+      ok "pre-push already linked in $dir"
+      return
+    fi
+    if [ "$force" = 0 ]; then
+      miss "pre-push: $dest exists and is not this secret-guard; re-run with --force to back it up"
+      failed=1
+      return
+    fi
+    mkdir -p "$BACKUP_DIR"
+    mv "$dest" "$BACKUP_DIR/pre-push-$(date +%Y%m%d-%H%M%S)"
+    warn "pre-push: previous link moved to $BACKUP_DIR/"
+  elif [ -e "$dest" ]; then
+    if [ "$force" = 0 ]; then
+      miss "pre-push: $dest exists and is not this secret-guard; re-run with --force to back it up"
+      failed=1
+      return
+    fi
+    mkdir -p "$BACKUP_DIR"
+    mv "$dest" "$BACKUP_DIR/pre-push-$(date +%Y%m%d-%H%M%S)"
+    warn "pre-push: previous hook moved to $BACKUP_DIR/"
+  fi
+  ln -s "$target" "$dest"
+  ok "pre-push -> $target (in $dir)"
+}
+
 if [ "$hooks" = 1 ]; then
   register_hooks guard
-  ok "context-guard hook registered in $SETTINGS"
+  ok "context-guard and secret-guard hooks registered in $SETTINGS"
 fi
 if [ "$experiment" = 1 ]; then
   register_hooks session
@@ -319,5 +377,6 @@ if [ "$rules" = 1 ]; then
   fi
 fi
 if [ "$timer" = 1 ]; then install_timer; fi
+if [ -n "$git_hook_dir" ]; then install_git_hook "$git_hook_dir"; fi
 if [ "$failed" = 1 ]; then echo "some skills were not installed (see above)" >&2; exit 1; fi
 echo "done. Claude Code picks up new skills without a restart."
