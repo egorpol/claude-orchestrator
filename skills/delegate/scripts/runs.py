@@ -235,7 +235,7 @@ def add_links(repo, wt, paths, existing=()):
     for link in paths:
         p = Path(link)
         if p.is_absolute() or ".." in p.parts or not p.parts or p.parts[0] in (".git", ".delegate"):
-            sys.exit(f"--link {link}: expected a repo-relative input path")
+            sys.exit(f"--link {link}: expected a repo-relative input path outside .git and .delegate")
         src, dst = repo / p, wt / p
         if not src.exists():
             sys.exit(f"--link {link}: {src} does not exist")
@@ -297,7 +297,13 @@ def launch(a):
 
     root.mkdir(parents=True, exist_ok=True)
     git("worktree", "add", "-b", branch, str(wt), base_sha, cwd=repo)
-    add_links(repo, wt, a.link)
+    try:
+        add_links(repo, wt, a.link)
+    except SystemExit:  # leave no orphan worktree/branch behind: there is no meta.json for cleanup to find
+        git("worktree", "remove", "--force", str(wt), cwd=repo, check=False)
+        git("branch", "-D", branch, cwd=repo, check=False)
+        shutil.rmtree(root, ignore_errors=True)
+        raise
     (root / "brief.md").write_text(brief)
     (root / "prompt.md").write_text(prompt)
     (root / "run.sh").write_text(run_sh)

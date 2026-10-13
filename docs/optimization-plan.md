@@ -159,7 +159,7 @@ Still open:
 - ~~Cursor's "Models" quota has no openusage metric.~~ Resolved above: it is the Auto pool.
 - ~~Composer's billing pool is unverified.~~ Settled 2026-10-10: Composer and named Grok bill "Cursor Models", which is the Auto pool.
 - Re-measure on the next long session with `delegate cost --session latest`.
-- Orchestrator effort: measured above (lever 4), keep xhigh. If you want proof, run one routine work item at `high` and compare its thinking tokens and rounds against an xhigh item.
+- Orchestrator effort: measured above (lever 4), keep xhigh. For proof, run one routine work item at `high` and compare its thinking tokens and rounds against an xhigh item.
 
 ## What the orchestrator session cost
 
@@ -268,7 +268,7 @@ Brief gaps caused 3 of the 6 extra rounds, and each round also costs orchestrato
 
 ### 7. Routing and small CLI fixes
 
-- **`route` honours preferences:** a catalog `prefer` list or `--prefer`. On eu-pd-composers it picked `codex-astra` despite your pins.
+- **`route` honours preferences:** a catalog `prefer` list or `--prefer`. On eu-pd-composers it picked `codex-astra` despite the user's pins.
 - **Grok in Cursor bills a "Models" quota, not premium (per the user).** openusage exposes no such metric (only `plan_auto_percent_used`, `plan_api_percent_used`, `plan_percent_used`). So add a `cursor-grok` delegate with an unknown pool and fix the docs; don't route it against premium.
 - **`followup --link PATH`.**
 - **Review packet:** add the last `verify.log` (tail) next to `review-N.patch`, so ask-mode reviewers, who can't run shell, can still check claims.
@@ -295,4 +295,4 @@ By measured impact this ranks second, after lever 1. The prompt cache expires af
 | A: run lifecycle | Codex gpt-6.1-sol | `scripts/runs.py`, `scripts/delegate` | exit packet in `run.sh`; compact `status`/`digest` with `--full`; per-round history and usage; Codex `--json`; `followup --link`; review packet with verify tail; `verify` tail and no-worktree handling; run log on `apply` |
 | B: routing and cost | Cursor auto | `scripts/route.py`, `scripts/quota.py`, `scripts/catalog.json`, new `scripts/cost.py` | `prefer` / `--prefer`; Grok pool entry; `delegate cost` over `runs.jsonl` and the orchestrator transcript (the subcommand is registered in A's file, so B ships `cost.main` and A wires it, or A lands first) |
 | C: workflow docs | Cursor auto | `SKILL.md`, `templates/*`, README | session handoff step; "wait for notification, don't poll"; batching; `delegate ask` usage; `AGENTS.md` guidance; prefetch / integrated e2e / docs-claims checks; review policy (pending decision) |
-| D: context guard (optional) | orchestrator | user-level hook or status line | needs your OK, because it changes `~/.claude/settings.json` |
+| D: context guard (optional) | orchestrator | user-level hook or status line | needs the user's OK, because it changes `~/.claude/settings.json` |

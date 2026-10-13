@@ -28,7 +28,7 @@ bash -n install.sh
 - **What the tests cover:**
   - `tests/test_lifecycle.py` drives launch, the exit packet, followup, review, status, diff, apply, the run log and cleanup, using the fake `codex`/`cursor-agent` in `tests/fake_agents/`.
   - `test_route.py`, `test_cost.py` and `test_ask.py` cover routing preferences, cost accounting and `ask`.
-- **Real-data checks** (read-only):
+- **Real-data checks** (read-only, maintainer's machine only):
   - `delegate status <run>` against the old records in `~/.cache/claude-delegate/runs/PublicDomainSheetMusicFinder/`;
   - `delegate cost --session 762dc86f` must print 389 calls and cache_read 174,522,404. The session was resumed for 3 calls after the 2026-10-09 analysis, so older docs quote 386.
 - **Real agent runs spend quota.** Use a throwaway repo in the scratchpad.
@@ -47,8 +47,8 @@ bash -n install.sh
 ## Environment notes
 
 - **Shell:** the Bash tool runs zsh, although the user's terminal is fish. In zsh, `$args` doesn't word-split and a bare `====` is expanded as `=cmd`.
-- **Nextcloud:** the repo lives in Nextcloud, so `.git` syncs too. On each other machine, use either the synced folder or a `gh repo clone`, never both.
-- **Git:** remote `egorpol/claude-orchestrator` is private. Commit messages are imperative, e.g. "Add review, followup and verify rounds; …". Commit and push only when asked.
+- **Nextcloud:** the maintainer's checkout lives in Nextcloud, so `.git` syncs too. On each other machine, use either the synced folder or a `gh repo clone`, never both.
+- **Git:** remote `egorpol/claude-orchestrator` is public since 2026-10-13, with its full history. Commit messages are imperative, e.g. "Add review, followup and verify rounds; …". Commit and push only when asked.
 
 ## Open items
 

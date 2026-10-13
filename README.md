@@ -2,6 +2,10 @@
 
 Claude Code as orchestrator, other agents as workers. This repo holds the user-level skills and scripts. A symlink from `~/.claude/skills/` makes them available in every project on a machine.
 
+## How this differs
+
+The [full orchestrators in the survey](docs/related-projects.md#full-orchestrators-alternatives-heavier) are supervisors a person watches: tmux panes, boards or a desktop app over many agents. Here Claude Code stays the orchestrator inside one session. `delegate` launches Codex or Cursor's headless agent in a separate git worktree, ranks agents by remaining quota and model ratings, has the other vendor review the patch read-only, and leaves the merged result uncommitted. The official Codex plugin also delegates from Claude Code, but it works in the current checkout and is Codex-only. The rules and the context-guard hook come from measured session costs, chiefly one work item per session (see the [plan](docs/optimization-plan.md)).
+
 ## Skills
 
 | skill | what it does |
@@ -13,10 +17,10 @@ CLI entry point: `skills/delegate/scripts/delegate` (`quota`, `ratings`, `route`
 - **`delegate ask`**: cheap read-only one-shot (default Cursor auto `--mode ask`) that answers from files with `path:line` citations without filling the orchestrator context. `--agent both` sends the same question to Codex and Cursor in parallel, for second opinions on a decision.
 - **`delegate cost`**: summarises usage from the run log (`~/.cache/claude-delegate/runs/runs.jsonl`, appended on successful `apply`) or the orchestrator session (`--session latest`).
 
-## New machine
+## Install
 
 ```bash
-gh repo clone egorpol/claude-orchestrator   # private; or use the Nextcloud-synced copy
+gh repo clone egorpol/claude-orchestrator
 cd claude-orchestrator
 ./install.sh --check        # what is missing
 ./install.sh                # symlink skills into ~/.claude/skills (add --bin for `delegate` on PATH)
@@ -74,6 +78,7 @@ mkdir -p .delegate/tmp && TMPDIR=$PWD/.delegate/tmp python3 -m unittest discover
 
 - **`delegate ask --agent both`** returned one block per agent; both cited the right line (Codex 10 s, Cursor 26 s). On a real decision with a 1.5 KB question, Codex took 20 s and Cursor 279 s.
 - **`delegate cost --session latest`** run from a subfolder finds the session through the nearest parent folder that has a Claude project dir.
+- **A rejected `--link`** (here `.delegate/x`) no longer leaves an orphan worktree and branch behind: `launch` removes both and the run dir, so the name is free again. Seen live before the fix, then probed live after it.
 
 ## Related projects
 
@@ -95,3 +100,7 @@ feedback/                          field reports and run/usage JSONL
 ```
 
 Run records live outside the repo, in `~/.cache/claude-delegate/runs/<repo>/<name>/`. The run log is `~/.cache/claude-delegate/runs/runs.jsonl`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
