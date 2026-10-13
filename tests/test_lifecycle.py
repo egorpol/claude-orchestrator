@@ -34,6 +34,7 @@ class LifecycleTests(unittest.TestCase):
         self.env = {**os.environ, "PATH": str(FAKES) + os.pathsep + os.environ["PATH"],
                     "CLAUDE_DELEGATE_ROOT": str(self.storage), "CLAUDECODE": "fixture",
                     "CLAUDE_DELEGATE_QUOTA_SNAPSHOT": "0",
+                    "CLAUDE_SESSION_LOG": str(self.tmp / "sessions.jsonl"),
                     "VSCODE_FAKE": "fixture", "GIT_CONFIG_GLOBAL": os.devnull,
                     "GIT_CONFIG_NOSYSTEM": "1"}
         self.env.pop("FAKE_AGENT_EXIT", None)
@@ -48,9 +49,13 @@ class LifecycleTests(unittest.TestCase):
         self.brief.write_text("# Task\nMake a deterministic change.\n")
         self.follow_brief = self.tmp / "follow.md"
         self.follow_brief.write_text("# Followup\nContinue the change.\n")
-        p = patch.object(runs, "RUNS_ROOT", self.storage)
-        p.start()
-        self.addCleanup(p.stop)
+        for p in (patch.object(runs, "RUNS_ROOT", self.storage),
+                  patch.dict(os.environ, {"CLAUDE_SESSION_LOG": self.env["CLAUDE_SESSION_LOG"]})):
+            p.start()
+            self.addCleanup(p.stop)
+        # Runs from inside Claude Code inherit its session id; tests set one where they need it.
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        self.env.pop("CLAUDE_CODE_SESSION_ID", None)
 
     def git(self, *args, cwd=None):
         r = subprocess.run(["git", *args], cwd=cwd or self.repo, env=self.env,
@@ -599,6 +604,11 @@ class LifecycleTests(unittest.TestCase):
                     delegate.main()
                 self.assertEqual(len(collected), count)
                 self.assertEqual(agent_start.call_count, count)
+        rows = [json.loads(line) for line in (self.tmp / "sessions.jsonl").read_text().splitlines()]
+        self.assertEqual([(r["event"], r["session"], r["command"], r["run"], r["agent"]) for r in rows],
+                         [("delegate", "parent-session", "launch", "spawn", "codex"),
+                          ("delegate", "parent-session", "review", "test", "cursor"),
+                          ("delegate", "parent-session", "followup", "test", "codex")])
 
 
 if __name__ == "__main__":

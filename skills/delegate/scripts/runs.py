@@ -34,6 +34,31 @@ UNSET_EXACT = {"LD_LIBRARY_PATH", "APPDIR", "APPIMAGE", "ARGV0", "OWD", "PERLLIB
 UNSET_PREFIX = ("CLAUDE_CODE_", "VSCODE_", "ELECTRON_", "CURSOR_")
 KEEP = {"CURSOR_API_KEY", "CURSOR_API_ENDPOINT"}
 
+
+def session_log_path(explicit=None):
+    """The session-mode experiment's log (hooks/session-mode.py); quota.jsonl sits next to it."""
+    if explicit:
+        return Path(explicit).expanduser()
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return Path(os.environ.get("CLAUDE_SESSION_LOG") or cache / "claude-delegate/sessions.jsonl")
+
+
+def log_delegation(command, **fields):
+    """Record launch/followup/review/ask under the calling Claude session, for the session summary."""
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not session:
+        return
+    row = {"event": "delegate", "session": session,
+           "ts": datetime.now().astimezone().isoformat(timespec="seconds"), "command": command, **fields}
+    try:
+        path = session_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # One unbuffered O_APPEND write, like the hook's rows, so concurrent writers don't interleave.
+        with path.open("ab", buffering=0) as stream:
+            stream.write((json.dumps(row, ensure_ascii=True) + "\n").encode("utf-8"))
+    except OSError:
+        pass
+
 CONTRACT = """
 
 ---
@@ -326,6 +351,7 @@ def launch(a):
     if a.verify:
         print(f"verify:   {a.verify}")
     quota.spawn_snapshot("launch", run=name, session=os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    log_delegation("launch", run=name, agent=a.agent)
     start(root, a.detach, name)
 
 
@@ -414,6 +440,7 @@ def followup(a):
     print(f"round {k + 1}: {meta['agent']} {model}" + (f" @{effort}" if effort else "")
           + (f", resuming session {sid}" if sid else ", fresh session"))
     quota.spawn_snapshot("launch", run=meta["name"], session=os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    log_delegation("followup", run=meta["name"], agent=meta["agent"])
     start(root, a.detach, meta["name"])
 
 
@@ -473,6 +500,7 @@ def review(a):
           + (f" @{effort}" if effort else ""))
     print(f"result:   {job / 'last-message.md'}")
     quota.spawn_snapshot("launch", run=meta["name"], session=os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    log_delegation("review", run=meta["name"], agent=agent)
     start(job, a.detach, meta["name"])
 
 

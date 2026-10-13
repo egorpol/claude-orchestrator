@@ -241,6 +241,7 @@ def cmd_ask(a):
     if agent == "both" and a.model:
         sys.exit("ask: --model needs a single --agent")
     prompt = build_prompt(question, a.max_words, a.files or [])
+    runs.log_delegation("ask", agent=agent)
     if agent != "both":
         try:
             answer, usage, elapsed, model = _run_one(agent, prompt, a, directory)

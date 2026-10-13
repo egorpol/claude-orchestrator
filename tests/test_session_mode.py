@@ -80,6 +80,7 @@ class SessionModeTests(unittest.TestCase):
                          "CLAUDE_SESSION_MODE_CONFIG": str(self.config),
                          "CLAUDE_SESSION_RULES_DIR": str(self.rules),
                          "CLAUDE_SESSION_QUOTA": "0",
+                         "CLAUDE_SESSION_SUMMARY": "0",
                          "XDG_CACHE_HOME": str(self.tmp / "cache"),
                          "XDG_CONFIG_HOME": str(self.tmp / "config")})
 
@@ -614,6 +615,71 @@ class SessionModeTests(unittest.TestCase):
                        "source": "startup", "cwd": str(self.repo)}, hook=hook)
         self.assertEqual(len(path.read_text().splitlines()), 2)
         self.assertFalse((self.log.parent / "quota").exists())
+
+    def test_summaries_spawn_report_auto_at_end_and_backfill_at_new_starts(self):
+        fake_root = self.tmp / "fake-root"
+        hook = fake_root / "hooks/session-mode.py"
+        hook.parent.mkdir(parents=True)
+        shutil.copyfile(HOOK, hook)
+        delegate = fake_root / "skills/delegate/scripts/delegate"
+        delegate.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "skills/delegate/scripts/quota.py", delegate.parent / "quota.py")
+        calls = self.tmp / "calls.jsonl"
+        delegate.write_text(
+            "import json, os, sys\n"
+            f"with open({str(calls)!r}, 'a') as stream:\n"
+            "    stream.write(json.dumps({'args': sys.argv[1:], 'detached': os.getpid() == os.getsid(0)})"
+            " + '\\n')\n", encoding="utf-8")
+        self.env.pop("CLAUDE_SESSION_SUMMARY")
+        self.env["CLAUDE_SESSION_MODE"] = "orchestrator"
+
+        def spawned(count):
+            deadline = time.monotonic() + 3
+            while True:
+                try:
+                    rows = [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()]
+                    if len(rows) == count:
+                        return rows
+                except (OSError, ValueError):
+                    pass
+                if time.monotonic() >= deadline:
+                    self.fail(f"expected {count} spawned commands in {calls}")
+                time.sleep(0.02)
+
+        base = ["report", "--auto", "--log", str(self.log)]
+        self.run_hook({"hook_event_name": "SessionStart", "session_id": "new", "source": "clear",
+                       "cwd": str(self.repo)}, hook=hook)
+        self.assertEqual(spawned(1)[-1], {"args": base + ["--backfill", "--exclude", "new"],
+                                          "detached": True})
+        self.run_hook({"hook_event_name": "SessionEnd", "session_id": "new", "reason": "clear",
+                       "cwd": str(self.repo), "transcript_path": str(self.transcript)}, hook=hook)
+        self.assertEqual(spawned(2)[-1]["args"], base + ["--trigger", "end", "--session", "new",
+                                                         "--transcript", str(self.transcript), "--no-quota"])
+        for source in ("resume", "compact"):  # same session continues: nothing to back-fill
+            self.run_hook({"hook_event_name": "SessionStart", "session_id": "new", "source": source,
+                           "cwd": str(self.repo)}, hook=hook)
+        self.env.pop("CLAUDE_SESSION_QUOTA")
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(SESSION_MODE, "ROOT", fake_root), \
+                mock.patch.object(SESSION_MODE.subprocess, "Popen") as popen:
+            self.assertTrue(SESSION_MODE.quota_enabled({"quota_snapshot": True}))
+            SESSION_MODE.spawn_summary(self.log, "../bad", ["--backfill"])
+            popen.assert_not_called()
+            popen.side_effect = OSError("fixture spawn failure")
+            SESSION_MODE.spawn_summary(self.log, "fine", ["--backfill"])
+        self.run_hook({"hook_event_name": "SessionEnd", "session_id": "untracked", "reason": "other",
+                       "cwd": str(self.repo)}, hook=hook)
+        # Quota on: the summary takes the end reading itself; no transcript path, no flag.
+        self.assertEqual(spawned(3)[-1]["args"], base + ["--trigger", "end", "--session", "untracked"])
+        self.write_config(summary=False)  # summaries off: back to the plain quota snapshots
+        self.run_hook({"hook_event_name": "SessionEnd", "session_id": "off", "reason": "other",
+                       "cwd": str(self.repo)}, hook=hook)
+        self.run_hook({"hook_event_name": "SessionStart", "session_id": "off2", "source": "startup",
+                       "cwd": str(self.repo)}, hook=hook)
+        quota_log = str(self.log.parent / "quota.jsonl")
+        self.assertEqual([row["args"] for row in spawned(5)[3:]], [
+            ["quota", "--snapshot", "--reason", "session-end", "--session", "off", "--log", quota_log],
+            ["quota", "--snapshot", "--reason", "session-start", "--session", "off2", "--log", quota_log]])
 
 
 if __name__ == "__main__":
