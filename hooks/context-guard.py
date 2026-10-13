@@ -106,7 +106,7 @@ def _idle_block(session, ctx, ts_str):
     reason = (
         f"context guard: idle {idle_min} min, so the cache has expired and this prompt would rewrite ~{k}k "
         f"tokens at twice the input price.\n"
-        f'If the handoff is current, /clear and "continue from the handoff" '
+        f"If the handoff is current, /clear, then /next to continue from it "
         f"(a fresh session starts at ~35k); otherwise send the prompt again to go ahead here."
     )
     print(json.dumps({"decision": "block", "reason": reason}))
@@ -117,6 +117,9 @@ def main():
     if os.environ.get("CONTEXT_GUARD_DISABLE") == "1":
         return
     data = json.load(sys.stdin)
+    # cursor-agent runs ~/.claude/settings.json hooks under its own event names (beforeSubmitPrompt).
+    if data.get("hook_event_name", "UserPromptSubmit") != "UserPromptSubmit":
+        return
     transcript, session = data.get("transcript_path"), data.get("session_id") or "unknown"
     if not transcript or not Path(transcript).is_file():
         return
@@ -141,7 +144,7 @@ def main():
     marker.write_text(str(level))
     k = ctx // 1000
     print(json.dumps({
-        "systemMessage": f"context guard: ~{k}k tokens; a new work item is cheaper after a handoff and /clear.",
+        "systemMessage": f"context guard: ~{k}k tokens; a new work item is cheaper after a handoff, /clear and /next.",
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
@@ -150,8 +153,8 @@ def main():
                 "previous item is committed, merged or handed off, the user turns to a different topic, or a "
                 "finished build turns into Q&A support. If it does, do not start it here, even after 'go on'. "
                 "First write or refresh the handoff (memory files plus a short HANDOFF.md: state, open PRs or "
-                "delegate runs, decided cases, next step), then offer /clear and 'continue from the handoff' in "
-                "one line. Start in place only if the user then says so. If the prompt continues the current "
+                "delegate runs, decided cases, next step), then offer '/clear, then /next' in one line (/next "
+                "continues from HANDOFF.md; a command can't run /clear itself). Start in place only if the user then says so. If the prompt continues the current "
                 "item, carry on: batch independent tool calls, wait for background-run notifications instead "
                 "of polling, and hand mechanical parts with a clear spec (tests from a spec, multi-file doc "
                 "refreshes) to `delegate`."

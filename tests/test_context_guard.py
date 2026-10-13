@@ -31,7 +31,7 @@ class ContextGuardTests(unittest.TestCase):
         self.env["CONTEXT_GUARD_STATE"] = str(self.tmp / "state")
 
     def prompt(self, context, *, timestamp=None, session_id="s1", append=True,
-               is_sidechain=False, model="claude-opus-5-5", text="next step"):
+               is_sidechain=False, model="claude-opus-5-5", text="next step", event=None):
         if append:
             usage = {
                 "input_tokens": 10,
@@ -48,7 +48,7 @@ class ContextGuardTests(unittest.TestCase):
         r = subprocess.run(
             [sys.executable, str(HOOK)],
             input=json.dumps({"transcript_path": str(self.transcript), "session_id": session_id,
-                              "prompt": text}),
+                              "prompt": text, **({"hook_event_name": event} if event else {})}),
             env=self.env, capture_output=True, text=True, check=True,
         )
         return json.loads(r.stdout) if r.stdout.strip() else None
@@ -59,10 +59,15 @@ class ContextGuardTests(unittest.TestCase):
         self.assertIn("~121k", first["systemMessage"])
         context = first["hookSpecificOutput"]["additionalContext"]
         self.assertIn("new work item", context)
-        self.assertIn("/clear", context)
+        self.assertIn("'/clear, then /next'", context)
         self.assertIsNone(self.prompt(170_000))  # same level: no repeat
         self.assertIsNotNone(self.prompt(181_000))
         self.assertIsNone(self.prompt(200_000))
+
+    def test_other_event_names_stay_silent(self):
+        # cursor-agent fires ~/.claude/settings.json hooks as beforeSubmitPrompt.
+        self.assertIsNone(self.prompt(500_000, event="beforeSubmitPrompt"))
+        self.assertIsNotNone(self.prompt(500_000, append=False, event="UserPromptSubmit"))
 
     def test_disable_and_bad_input_stay_silent(self):
         self.env["CONTEXT_GUARD_DISABLE"] = "1"
@@ -79,7 +84,7 @@ class ContextGuardTests(unittest.TestCase):
         self.assertTrue(reason.startswith("context guard: idle "))
         self.assertRegex(reason, r"1[12]\d min")  # ~120 min
         self.assertIn("~150k", reason)
-        self.assertIn("/clear", reason)
+        self.assertIn("/clear, then /next", reason)
         # Same assistant record (resend): idle must pass; size guard fires at 150k.
         resent = self.prompt(150_000, append=False)
         self.assertNotIn("decision", resent or {})
