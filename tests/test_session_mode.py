@@ -548,11 +548,15 @@ class SessionModeTests(unittest.TestCase):
         shutil.copyfile(HOOK, hook)
         delegate = fake_root / "skills/delegate/scripts/delegate"
         delegate.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "skills/delegate/scripts/quota.py", delegate.parent / "quota.py")
         delegate.write_text(
-            "import json, os, sys, time\n"
+            "import json, os, pathlib, sys, time\n"
             "time.sleep(0.1)\n"
-            "print(json.dumps({'args': sys.argv[1:], 'pid': os.getpid(), "
-            "'sid': os.getsid(0), 'stdin': sys.stdin.read()}))\n", encoding="utf-8")
+            "path = pathlib.Path(sys.argv[sys.argv.index('--log') + 1])\n"
+            "path.parent.mkdir(parents=True, exist_ok=True)\n"
+            "with path.open('a') as stream:\n"
+            "    stream.write(json.dumps({'args': sys.argv[1:], 'pid': os.getpid(), "
+            "'sid': os.getsid(0), 'stdin': sys.stdin.read()}) + '\\n')\n", encoding="utf-8")
         self.env.pop("CLAUDE_SESSION_QUOTA")
         self.env["CLAUDE_SESSION_MODE"] = "orchestrator"
         with mock.patch.dict(os.environ, self.env, clear=True), \
@@ -560,42 +564,56 @@ class SessionModeTests(unittest.TestCase):
                 mock.patch.object(SESSION_MODE.subprocess, "Popen") as popen:
             SESSION_MODE.quota_snapshot(self.log, "mocked", "start", {"quota_snapshot": True})
             args, kwargs = popen.call_args
-            self.assertEqual(args[0], [sys.executable, str(delegate), "quota", "--json"])
+            self.assertEqual(args[0], [sys.executable, str(delegate), "quota", "--snapshot",
+                                      "--reason", "session-start", "--session", "mocked",
+                                      "--log", str(self.log.parent / "quota.jsonl")])
             self.assertIs(kwargs["start_new_session"], True)
             self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+            self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
             self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
             popen.return_value.wait.assert_not_called()
             popen.return_value.communicate.assert_not_called()
-        for event, fields, suffix in (("SessionStart", {"source": "startup"}, "start"),
-                                      ("SessionEnd", {"reason": "clear"}, "end")):
+            popen.reset_mock()
+            SESSION_MODE.quota_snapshot(self.log, "../bad", "start", {"quota_snapshot": True})
+            popen.assert_not_called()
+            popen.side_effect = OSError("fixture spawn failure")
+            SESSION_MODE.quota_snapshot(self.log, "failure", "start", {"quota_snapshot": True})
+        path = self.log.parent / "quota.jsonl"
+        for count, (event, fields, suffix) in enumerate(
+                (("SessionStart", {"source": "startup"}, "start"),
+                 ("SessionEnd", {"reason": "clear"}, "end")), 1):
             self.run_hook({"hook_event_name": event, "session_id": "snapshot", "cwd": str(self.repo),
                            "transcript_path": str(self.transcript), **fields}, hook=hook)
-            path = self.log.parent / "quota" / f"snapshot-{suffix}.json"
             deadline = time.monotonic() + 3
             while True:
                 try:
-                    snapshot = json.loads(path.read_text(encoding="utf-8"))
+                    snapshots = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+                    if len(snapshots) != count:
+                        raise ValueError("snapshot still pending")
+                    snapshot = snapshots[-1]
                     break
                 except (OSError, ValueError):
                     if time.monotonic() >= deadline:
                         self.fail(f"snapshot did not finish: {path}")
                     time.sleep(0.02)
-            self.assertEqual(snapshot["args"], ["quota", "--json"])
+            self.assertEqual(snapshot["args"], ["quota", "--snapshot", "--reason", "session-" + suffix,
+                                                "--session", "snapshot", "--log", str(path)])
             self.assertEqual(snapshot["pid"], snapshot["sid"])
             self.assertEqual(snapshot["stdin"], "")
         for source in ("resume", "compact"):
             self.run_hook({"hook_event_name": "SessionStart", "session_id": source,
                            "source": source, "cwd": str(self.repo)}, hook=hook)
-            self.assertFalse((self.log.parent / "quota" / f"{source}-start.json").exists())
+            self.assertEqual(len(path.read_text().splitlines()), 2)
         self.write_config(quota_snapshot=False)
         self.run_hook({"hook_event_name": "SessionStart", "session_id": "disabled",
                        "source": "startup", "cwd": str(self.repo)}, hook=hook)
-        self.assertFalse((self.log.parent / "quota/disabled-start.json").exists())
+        self.assertEqual(len(path.read_text().splitlines()), 2)
         self.write_config(quota_snapshot=True)
         self.env["CLAUDE_SESSION_QUOTA"] = "0"
         self.run_hook({"hook_event_name": "SessionStart", "session_id": "env-disabled",
                        "source": "startup", "cwd": str(self.repo)}, hook=hook)
-        self.assertFalse((self.log.parent / "quota/env-disabled-start.json").exists())
+        self.assertEqual(len(path.read_text().splitlines()), 2)
+        self.assertFalse((self.log.parent / "quota").exists())
 
 
 if __name__ == "__main__":

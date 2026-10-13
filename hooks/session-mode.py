@@ -5,7 +5,7 @@ SessionStart draws once, injects that mode's rules, and records the assignment.
 Resume/compact recover it from the JSONL log, so intent-to-treat accounting keeps
 the original mode even after compaction. PreToolUse blocks new Codex/Cursor work
 in controls; SessionEnd records distinct main-thread calls and possible rerolls.
-Log/config/rules errors stay silent, and quota snapshots run detached: a broken
+Log/config/rules errors stay silent, and quota.jsonl snapshots run detached: a broken
 measurement hook must never get in the way of a session.
 
 Env: CLAUDE_SESSION_LOG (XDG_CACHE_HOME/claude-delegate/sessions.jsonl),
@@ -210,19 +210,19 @@ def session_context(mode):
 def quota_snapshot(path, session, suffix, config):
     if os.environ.get("CLAUDE_SESSION_QUOTA") == "0" or not config["quota_snapshot"]:
         return
-    # Session ids are filenames, not paths. Malformed hook input must not escape quota/.
+    # Ignore malformed session ids even though they no longer become filenames.
     if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session):
         return
     delegate = ROOT / "skills/delegate/scripts/delegate"
     try:
         if not delegate.is_file():
             return
-        directory = path.parent / "quota"
-        directory.mkdir(parents=True, exist_ok=True)
-        with (directory / f"{session}-{suffix}.json").open("wb") as output:
-            subprocess.Popen([sys.executable, str(delegate), "quota", "--json"],
-                             start_new_session=True, stdin=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, stdout=output)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("session_quota", delegate.parent / "quota.py")
+        quota = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(quota)
+        quota.spawn_snapshot("session-" + suffix, session=session,
+                             log=path.parent / "quota.jsonl", delegate=delegate)
     except (OSError, ValueError):
         pass
 

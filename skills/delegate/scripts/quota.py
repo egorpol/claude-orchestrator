@@ -1,8 +1,12 @@
 """Remaining quota per delegation pool, read from `openusage export`."""
+import fcntl
 import json
+import os
 import re
 import subprocess
-from datetime import datetime, timezone
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 # pool id -> where openusage keeps it. window_h is the window length when the
 # pool rolls on a fixed period; billing-cycle pools use billing_cycle_progress.
@@ -89,6 +93,172 @@ def pools(envelope, now=None):
         entry["time_left_frac"] = tlf
         entry["pace"] = (entry["left_pct"] / 100) / max(tlf, 0.05) if tlf is not None else None
     return result
+
+
+def spawn_snapshot(reason, session=None, run=None, log=None, delegate=None):
+    """Start a detached collector; measurements must never block a session/run."""
+    if reason == "launch" and os.environ.get("CLAUDE_DELEGATE_QUOTA_SNAPSHOT") == "0":
+        return
+    delegate = delegate or Path(__file__).resolve().parent / "delegate"
+    cmd = [sys.executable, str(delegate), "quota", "--snapshot", "--reason", reason]
+    for flag, value in (("--session", session), ("--run", run), ("--log", log)):
+        if value is not None:
+            cmd.extend([flag, str(value)])
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def _safe_ts(value):
+    try:
+        return parse_ts(value)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _last_good(path):
+    """Ignore failed attempts and malformed rows when finding the watermark."""
+    latest, latest_ts = None, None
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or "error" in row:
+                    continue
+                entries = row.get("pools")
+                if not isinstance(entries, dict) or not all(
+                        isinstance(entries.get(pid), dict) and "used_pct" in entries[pid]
+                        for pid in ("claude-5h", "claude-7d")):
+                    continue
+                ts = _safe_ts(row.get("ts"))
+                if ts:
+                    latest, latest_ts = row, ts
+    except FileNotFoundError:
+        pass
+    return latest, latest_ts
+
+
+def _last_write():
+    projects = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    newest = None
+    for path in projects.rglob("*.jsonl"):
+        try:
+            if not path.is_file():
+                continue
+            stamp = path.stat().st_mtime
+        except OSError:  # a transcript may disappear during the walk
+            continue
+        newest = stamp if newest is None else max(newest, stamp)
+    return datetime.fromtimestamp(newest, timezone.utc) if newest is not None else None
+
+
+def _activity_gate(path, now):
+    row, good = _last_good(path)
+    write = _last_write()
+    gate = {"last_good": good.isoformat() if good else None,
+            "last_write": write.isoformat() if write else None}
+    if good is None:
+        return "timer", gate, None
+    if write and write > good:
+        return "timer", gate, None
+    for entry in row["pools"].values():
+        reset = _safe_ts(entry.get("resets_at")) if isinstance(entry, dict) else None
+        if reset and good < reset <= now:
+            return "reset", gate, None
+    if write and good < write + timedelta(seconds=600) <= now:
+        return "trailing", gate, None
+    return None, gate, "no activity, reset, or trailing reading due"
+
+
+def _snapshot_pools(envelope, ts):
+    snaps = {s.get("provider_id"): s for s in envelope.get("snapshots", [])}
+    result = {}
+    for pid, entry in pools(envelope, now=ts).items():
+        if "error" in entry:
+            result[pid] = {"error": entry["error"]}
+            continue
+        observed = snaps[POOLS[pid]["provider"]].get("timestamp")
+        observed_ts = _safe_ts(observed)
+        result[pid] = {"used_pct": round(float(100 - entry["left_pct"]), 4),
+                       "resets_at": entry["resets_at"], "observed_at": observed,
+                       "stale": observed_ts is None or (ts - observed_ts).total_seconds() > 120}
+        if entry.get("stale_reset"):
+            result[pid]["stale_reset"] = True
+    return result
+
+
+def _fetch_error(exc):
+    if isinstance(exc, FileNotFoundError):
+        cause = "openusage not found"
+    elif isinstance(exc, subprocess.TimeoutExpired):
+        cause = "openusage timed out"
+    elif isinstance(exc, subprocess.CalledProcessError):
+        cause = f"openusage exited with status {exc.returncode}"
+    elif isinstance(exc, (ValueError, TypeError, AttributeError, KeyError)):
+        cause = "invalid openusage JSON/export"
+    else:
+        cause = f"openusage failed: {str(exc)[:200]}"
+    stderr = getattr(exc, "stderr", None) or ""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    return cause + (": " + stderr.strip()[-300:] if stderr.strip() else "")
+
+
+def _fetch_snapshot(source, timeout):
+    # Keep fetch()'s legacy behavior, but retain stderr on a JSON decoding error.
+    output = subprocess.run(
+        ["openusage", "export", "--output", "-", "--format", "json", "--source", source],
+        capture_output=True, text=True, timeout=timeout, check=True,
+    )
+    try:
+        return json.loads(output.stdout)
+    except ValueError as exc:
+        exc.stderr = output.stderr
+        raise
+
+
+def snapshot(reason=None, session=None, run=None, if_active=False, log=None,
+             source="direct", timeout=90):
+    """Append one durable quota reading, serializing the gate and provider poll."""
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    path = Path(log or os.environ.get("CLAUDE_DELEGATE_QUOTA_LOG")
+                or cache / "claude-delegate/quota.jsonl").expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with Path(str(path) + ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        gate = None
+        if if_active:
+            reason, gate, skip = _activity_gate(path, datetime.now(timezone.utc))
+            if skip:
+                print("skip: " + skip)
+                return 0
+        ts = datetime.now(timezone.utc).replace(microsecond=0)
+        row = {"ts": ts.isoformat(), "source": source, "reason": reason,
+               "session": session if isinstance(session, str)
+               and re.fullmatch(r"[A-Za-z0-9_-]+", session) else None, "run": run}
+        if gate is not None:
+            row["gate"] = gate
+        try:
+            row["pools"] = _snapshot_pools(_fetch_snapshot(source, timeout), ts)
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            row["error"] = _fetch_error(exc)
+        line = json.dumps(row)
+        with path.open("ab+") as stream:
+            # Keep a truncated/malformed final line from swallowing this reading.
+            if stream.tell():
+                stream.seek(-1, os.SEEK_END)
+                if stream.read(1) != b"\n":
+                    stream.write(b"\n")
+            stream.write((line + "\n").encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        print(line)
+        return 1 if "error" in row else 0
 
 
 def human_delta(dt, now):

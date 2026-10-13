@@ -13,7 +13,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
   - `runs.py`: worktree/launch/followup/review/verify/status/wait/diff/apply/cleanup, `meta.json`, environment scrubbing
   - `cost.py`, `ask.py`, `report.py`: session and run-log cost, read-only questions, field-report skeletons and JSONL rows
 - `skills/delegate/scripts/catalog.json`: user-editable delegates, pools, task weights, `min_quota_pct`, subagent penalty.
-- `install.sh`: links or copies skills into `~/.claude/skills`; `--check` checks prerequisites; `--hooks` registers `hooks/context-guard.py`; `--rules` imports `rules/orchestrator.md` into the user-level `CLAUDE.md`.
+- `install.sh`: links or copies skills into `~/.claude/skills`; `--check` checks prerequisites; `--hooks` registers `hooks/context-guard.py`; `--rules` imports `rules/orchestrator.md` into the user-level `CLAUDE.md`; `--timer` installs the systemd user timer for `delegate quota --snapshot --if-active` (test with a scratch `XDG_CONFIG_HOME` and a fake `systemctl`).
 - `hooks/context-guard.py`: a UserPromptSubmit hook. From about 120k context tokens, it asks Claude to hand off before starting a new work item. After 60 min idle at 100k+ context, the prompt cache has expired, so it holds the first typed prompt once and suggests `/clear`. Tested in `tests/test_context_guard.py`.
 - `rules/hygiene.md` (every session) and `rules/delegation.md` (when to delegate): short rules; `rules/orchestrator.md` imports both. SKILL.md only reaches sessions that invoke the skill, and the sessions that sprawl often don't.
 - `skills/field-report/SKILL.md`: `/field-report [topic]` from any project; calls `delegate report`, then Claude writes the narrative.

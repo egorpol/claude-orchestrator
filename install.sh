@@ -9,6 +9,10 @@
 #                           hook in settings.json (handoff nudge at item boundaries past ~120k)
 #   ./install.sh --rules    also import rules/orchestrator.md from the user-level CLAUDE.md,
 #                           so every session gets the orchestrator rules (stays live from the repo)
+#   ./install.sh --timer    install an activity-gated quota timer (every 10 minutes)
+#                           remove: systemctl --user disable --now claude-delegate-quota.timer
+#                           then delete claude-delegate-quota.{service,timer} from
+#                           ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/
 #   ./install.sh --check    only check prerequisites
 #   ./install.sh --force    replace an existing non-symlinked skill dir (it is
 #                           moved to ~/.claude/skill-backups/, never deleted)
@@ -19,16 +23,18 @@ SKILLS_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"
 BACKUP_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skill-backups"
 SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 USER_MD="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/CLAUDE.md"
-mode=link bin=0 hooks=0 rules=0 check_only=0 force=0 failed=0
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+mode=link bin=0 hooks=0 rules=0 timer=0 check_only=0 force=0 failed=0
 for arg in "$@"; do
   case "$arg" in
     --copy) mode=copy ;;
     --bin) bin=1 ;;
     --hooks) hooks=1 ;;
     --rules) rules=1 ;;
+    --timer) timer=1 ;;
     --check) check_only=1 ;;
     --force) force=1 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -75,6 +81,63 @@ check_prereqs() {
   else warn "optional: orchestrator rules not imported (./install.sh --rules)"; fi
 }
 
+check_timer() {
+  if command -v systemctl >/dev/null; then
+    if systemctl --user is-enabled claude-delegate-quota.timer >/dev/null 2>&1; then
+      ok "quota timer enabled"
+    else
+      warn "optional: quota timer not enabled (./install.sh --timer)"
+    fi
+  elif [ -f "$UNIT_DIR/claude-delegate-quota.timer" ]; then
+    ok "quota timer unit exists (systemctl unavailable)"
+  else
+    warn "optional: quota timer unit not installed (./install.sh --timer)"
+  fi
+}
+
+install_timer() {
+  local python provider_bin unit_path
+  python="$(python3 -c 'import os, sys; print(os.path.abspath(sys.executable))')"
+  unit_path="/usr/local/bin:/usr/bin:/bin"
+  if provider_bin="$(command -v openusage)"; then
+    unit_path="$(cd "$(dirname "$provider_bin")" && pwd -P):$unit_path"
+  else
+    warn "openusage not found; quota timer PATH uses system directories only"
+  fi
+  mkdir -p "$UNIT_DIR"
+  # Quote and escape systemd arguments, including paths containing spaces or %.
+  python3 - "$UNIT_DIR" "$python" "$SKILLS_DIR/delegate/scripts/delegate" "$unit_path" <<'PY_TIMER'
+from pathlib import Path
+import os
+import sys
+
+directory, python, delegate, path = sys.argv[1:]
+def quoted(value):
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+# The timer must watch the same transcripts and write the same log as the session hook.
+assignments = ["PATH=" + path] + [
+    f"{key}={os.path.abspath(os.path.expanduser(os.environ[key]))}"
+    for key in ("CLAUDE_CONFIG_DIR", "XDG_CACHE_HOME", "CLAUDE_DELEGATE_QUOTA_LOG") if os.environ.get(key)]
+Path(directory, "claude-delegate-quota.service").write_text(
+    "[Unit]\nDescription=Claude delegate quota snapshot\n\n"
+    "[Service]\nType=oneshot\nNice=10\n"
+    f"ExecStart={quoted(python)} {quoted(str(Path(delegate).absolute()))} quota --snapshot --if-active\n"
+    f"Environment={' '.join(quoted(a) for a in assignments)}\n", encoding="utf-8")
+Path(directory, "claude-delegate-quota.timer").write_text(
+    "[Unit]\nDescription=Poll quota while Claude Code is active\n\n"
+    "[Timer]\nOnCalendar=*:0/10\nAccuracySec=1min\nPersistent=false\n\n"
+    "[Install]\nWantedBy=timers.target\n", encoding="utf-8")
+PY_TIMER
+  ok "quota timer units written to $UNIT_DIR"
+  if command -v systemctl >/dev/null; then
+    systemctl --user daemon-reload
+    systemctl --user enable --now claude-delegate-quota.timer
+    ok "quota timer enabled"
+  else
+    warn "systemctl not found; quota timer units written but not enabled"
+  fi
+}
+
 install_skill() {
   local src="$1" name target
   name="$(basename "$src")"
@@ -105,7 +168,7 @@ install_skill() {
 }
 
 check_prereqs
-[ "$check_only" = 1 ] && exit 0
+if [ "$check_only" = 1 ]; then check_timer; exit 0; fi
 
 echo "skills ($mode into $SKILLS_DIR):"
 mkdir -p "$SKILLS_DIR"
@@ -145,5 +208,6 @@ if [ "$rules" = 1 ]; then
     ok "orchestrator rules imported in $USER_MD"
   fi
 fi
+if [ "$timer" = 1 ]; then install_timer; fi
 if [ "$failed" = 1 ]; then echo "some skills were not installed (see above)" >&2; exit 1; fi
 echo "done. Claude Code picks up new skills without a restart."
