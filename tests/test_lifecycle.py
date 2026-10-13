@@ -1,9 +1,11 @@
 """End-to-end delegate lifecycle; no installed agents or agent quota required."""
+import argparse
 import importlib.machinery
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -438,6 +440,108 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn("badlink", self.git("worktree", "list"))
         self.assertEqual(self.git("branch", "--list", "delegate/badlink"), "")
         self.launch("cursor", "badlink")  # the name is free again
+
+    def _assert_preflight_clean(self, name):
+        self.assertFalse(self.root(name).exists())
+        self.assertNotIn(name, self.git("worktree", "list"))
+        self.assertEqual(self.git("branch", "--list", f"delegate/{name}"), "")
+        runs_log = self.storage / "runs.jsonl"
+        self.assertFalse(runs_log.exists() and runs_log.read_text().strip())
+        session = Path(self.env["CLAUDE_SESSION_LOG"])
+        self.assertFalse(session.exists() and session.read_text().strip())
+
+    def test_preflight_pass_rolls_back_and_skips_agent(self):
+        base = self.git("rev-parse", "HEAD")[:9]
+        # A session id makes log_delegation write rows, so the "no session row" check below bites.
+        out = self.launch("codex", "pf-ok", "--verify", "printf 'ok\\n'", "--preflight",
+                          extra_env={"CLAUDE_CODE_SESSION_ID": "pf-session"})
+        self.assertIn("$ printf 'ok\\n'", out)
+        self.assertIn("ok", out)
+        self.assertRegex(out, rf"preflight: verify pass in \d+\.\d s at base {re.escape(base)}")
+        self.assertNotIn("hint:", out)
+        self._assert_preflight_clean("pf-ok")
+        self.launch("codex", "pf-ok")  # same name launches normally after preflight
+        self.assertTrue((self.root("pf-ok") / "log").exists())
+        self.assertIn("fake-codex-thread", (self.root("pf-ok") / "log").read_text())
+
+    def test_preflight_fail_with_untracked_writes_still_rolls_back(self):
+        cmd = "printf 'dirty\\n' > leftover.txt; echo boom >&2; exit 7"
+        out = self.launch("codex", "pf-dirty", "--verify", cmd, "--preflight", code=7)
+        self.assertIn("$ " + cmd, out)
+        self.assertIn("boom", out)
+        self.assertRegex(out, r"preflight: verify FAIL rc=7 in \d+\.\d s at base ")
+        self.assertIn("hint:", out)
+        self.assertIn("checker or a --link is broken", out)
+        self._assert_preflight_clean("pf-dirty")
+        # worktree --force removed leftover.txt with the tree; main checkout stayed clean
+        self.assertNotIn("leftover.txt", self.git("status", "--porcelain", "--untracked-files=all"))
+
+    def test_preflight_sees_linked_content_and_scrubs_parent_env(self):
+        (self.repo / "data/cache").mkdir(parents=True)
+        (self.repo / "data/cache/input").write_text("from-main\n")
+        cmd = ("test \"$(cat data/cache/input)\" = from-main && "
+               "test -z \"${VSCODE_FAKE+x}\" && printf 'linked-and-clean\\n'")
+        out = self.launch("codex", "pf-link", "--link", "data/cache", "--verify", cmd, "--preflight")
+        self.assertIn("linked-and-clean", out)
+        self.assertIn("preflight: verify pass", out)
+        self._assert_preflight_clean("pf-link")
+
+    def _launch_args(self, name, preflight=True, verify="true"):
+        return argparse.Namespace(
+            agent="codex", brief=str(self.brief), name=name, repo=str(self.repo),
+            root=None, base=None, link=[], read_only=False, unsandboxed=False, web_search=False,
+            detach=False, dry_run=False, verify=verify, preflight=preflight, model=None, effort=None)
+
+    def test_preflight_keyboard_interrupt_rolls_back(self):
+        args = self._launch_args("pf-int")
+        with patch.dict(os.environ, self.env, clear=True), \
+             patch.object(runs, "run_verify_in_worktree", side_effect=KeyboardInterrupt), \
+             self.assertRaises(KeyboardInterrupt):
+            runs.launch(args)
+        self._assert_preflight_clean("pf-int")
+
+    def test_preflight_refuses_without_verify_or_with_dry_run_detach(self):
+        r = subprocess.run([sys.executable, str(CLI), "launch", "codex", "--brief", str(self.brief),
+                            "--name", "pf-bad", "--preflight"], cwd=self.repo, env=self.env,
+                           text=True, capture_output=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("requires --verify", r.stderr)
+        self.assertIn("foreground check", r.stderr)
+        for extra in ("--dry-run", "--detach"):
+            r = subprocess.run([sys.executable, str(CLI), "launch", "codex", "--brief", str(self.brief),
+                                "--name", "pf-bad", "--verify", "true", "--preflight", extra],
+                               cwd=self.repo, env=self.env, text=True, capture_output=True)
+            self.assertEqual(r.returncode, 1, extra)
+            self.assertIn("foreground check", r.stderr)
+            self.assertIn(extra, r.stderr)
+        self._assert_preflight_clean("pf-bad")
+
+    def test_setup_exception_rolls_back_launch_and_preflight(self):
+        for name, preflight in (("setup-err", False), ("pf-setup-err", True)):
+            with patch.dict(os.environ, self.env, clear=True), \
+                 patch.object(runs, "add_links", side_effect=PermissionError("denied")), \
+                 self.assertRaises(PermissionError):
+                runs.launch(self._launch_args(name, preflight=preflight))
+            self._assert_preflight_clean(name)
+
+    def test_preflight_skips_agent_start_and_quota_snapshot(self):
+        with patch.dict(os.environ, {**self.env, "CLAUDE_CODE_SESSION_ID": "pf-session"}, clear=True), \
+             patch.object(runs, "start") as start, \
+             patch.object(runs.quota, "spawn_snapshot") as snapshot, \
+             patch("builtins.print"), self.assertRaises(SystemExit) as exit_:
+            runs.launch(self._launch_args("pf-direct"))
+        self.assertEqual(exit_.exception.code, 0)
+        start.assert_not_called()
+        snapshot.assert_not_called()
+        self._assert_preflight_clean("pf-direct")
+
+    def test_preflight_does_not_start_agent(self):
+        out = self.launch("cursor", "pf-noagent", "--verify", "printf 'only-verify\\n'", "--preflight")
+        self.assertIn("only-verify", out)
+        self.assertIn("preflight: verify pass", out)
+        self._assert_preflight_clean("pf-noagent")
+        # no run root means no log / fake-agent marker; also confirm help exposes the flag
+        self.assertIn("--preflight", self.cli("launch", "--help"))
 
     def test_followup_preserves_model_accounting_and_existing_links(self):
         (self.repo / "data/cache").mkdir(parents=True)

@@ -190,6 +190,29 @@ def build_cmd(agent, model, effort, wt, job, read_only, unsandboxed=False, resum
     sys.exit(f"unknown agent {agent!r}")
 
 
+def verify_bash_fragment(verify):
+    """Inner `{ echo; bash -c }` used by run.sh's verify step and by --preflight."""
+    q = shlex.quote
+    return f"{{ echo {q('$ ' + verify)}; bash -c {q(verify)}; }}"
+
+
+def run_verify_in_worktree(repo, wt, verify):
+    """Run --verify the same way run.sh does: scrubbed env, cwd=wt, bash -c, stdin closed.
+
+    Returns (rc, combined_output, seconds). rc is the verify exit code, or 1 if killed by a signal.
+    """
+    q = shlex.quote
+    script = "\n".join([*clean_env_lines(repo),
+                        f"cd {q(str(wt))} || exit 1",
+                        f"{verify_bash_fragment(verify)} 2>&1"])
+    t0 = time.monotonic()
+    r = subprocess.run(["bash", "-c", script], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True)
+    elapsed = time.monotonic() - t0
+    rc = r.returncode if r.returncode >= 0 else 1
+    return rc, (r.stdout or "") + (r.stderr or ""), elapsed
+
+
 def job_script(job, label, repo, wt, cmd, agent, verify=None, digest_base=None):
     """run.sh for one agent job: clean env, run, record exit code, verify."""
     q = shlex.quote
@@ -212,7 +235,7 @@ def job_script(job, label, repo, wt, cmd, agent, verify=None, digest_base=None):
     if digest:
         lines.append(f"{digest} > {J('post_digest')}")
     if verify:
-        lines.append(f"{{ echo {q('$ ' + verify)}; bash -c {q(verify)}; }} > {J('verify.log')} 2>&1; "
+        lines.append(f"{verify_bash_fragment(verify)} > {J('verify.log')} 2>&1; "
                      f"echo $? > {J('verify_code')}")
     lines += [f"date -Is > {J('finished_at')}",
               f"python3 {q(str(SCRIPTS / 'delegate'))} _finalize {q(str(job))}", 'exit "$rc"', ""]
@@ -281,6 +304,13 @@ def add_links(repo, wt, paths, existing=()):
     _exclude(repo, ["/" + l.strip("/") for l in paths] + ["/.delegate"])
 
 
+def _abandon_launch(repo, root, wt, branch):
+    """Drop a half-created launch (bad --link or --preflight); exclude lines may stay."""
+    git("worktree", "remove", "--force", str(wt), cwd=repo, check=False)
+    git("branch", "-D", branch, cwd=repo, check=False)
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def launch(a):
     repo = Path(git("rev-parse", "--show-toplevel", cwd=a.repo or os.getcwd()))
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -297,6 +327,13 @@ def launch(a):
         sys.exit("--unsandboxed applies to cursor only (codex: pick -s yourself in run.sh)")
     if getattr(a, "web_search", False) and a.agent != "codex":
         sys.exit("--web-search applies to codex only")
+    preflight = getattr(a, "preflight", False)
+    if preflight:
+        if not a.verify:
+            sys.exit("--preflight requires --verify; a preflight is always a foreground check")
+        if a.dry_run or a.detach:
+            sys.exit("--preflight cannot be combined with --dry-run or --detach; "
+                     "a preflight is always a foreground check")
     base_sha = git("rev-parse", a.base or "HEAD", cwd=repo)
     brief = Path(a.brief).expanduser().read_text()
     model = a.model or DEFAULTS[a.agent][0]
@@ -334,11 +371,21 @@ def launch(a):
     git("worktree", "add", "-b", branch, str(wt), base_sha, cwd=repo)
     try:
         add_links(repo, wt, a.link)
-    except SystemExit:  # leave no orphan worktree/branch behind: there is no meta.json for cleanup to find
-        git("worktree", "remove", "--force", str(wt), cwd=repo, check=False)
-        git("branch", "-D", branch, cwd=repo, check=False)
-        shutil.rmtree(root, ignore_errors=True)
+        if preflight:
+            rc, output, elapsed = run_verify_in_worktree(repo, wt, a.verify)
+    except BaseException:  # leave no orphan worktree/branch behind: there is no meta.json for cleanup to find
+        _abandon_launch(repo, root, wt, branch)
         raise
+    if preflight:
+        _abandon_launch(repo, root, wt, branch)
+        print("\n".join(output.rstrip().splitlines()[-30:]))
+        status = ("pass" if rc == 0 else f"FAIL rc={rc}")
+        print(f"preflight: verify {status} in {elapsed:.1f} s at base {base_sha[:9]}")
+        if rc != 0:
+            print("hint: a check of the not-yet-built work is expected to fail at base, while an error "
+                  "before any check runs (path, import, missing input or link) means the checker or a "
+                  "--link is broken.")
+        sys.exit(rc)
     (root / "brief.md").write_text(brief)
     (root / "prompt.md").write_text(prompt)
     (root / "run.sh").write_text(run_sh)
