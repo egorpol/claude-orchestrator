@@ -37,9 +37,15 @@ def resolve_session(spec):
         return p.resolve()
     root = _claude_config_dir() / "projects"
     if spec == "latest":
-        proj = root / munge_cwd()
-        if not proj.is_dir():
-            sys.exit(f"no project dir {proj}")
+        # After a stray `cd` into a subfolder, cwd has no project dir of its own;
+        # the session's dir belongs to one of its parents (2026-10-13 field report).
+        cwd = Path(os.path.abspath(os.getcwd()))
+        for d in (cwd, *cwd.parents):
+            proj = root / munge_cwd(str(d))
+            if proj.is_dir():
+                break
+        else:
+            sys.exit(f"no project dir for {cwd} or its parents under {root}")
         files = sorted(proj.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
         if not files:
             sys.exit(f"no *.jsonl in {proj}")

@@ -10,7 +10,7 @@ Claude Code as orchestrator, other agents as workers. This repo holds the user-l
 
 CLI entry point: `skills/delegate/scripts/delegate` (`quota`, `ratings`, `route`, `launch`, `review`, `followup`, `verify`, `status`, `diff`, `apply`, `cleanup`, `ask`, `cost`). It is stdlib-only Python 3.9+. Tunables (models, pools, task weights, `prefer`) are in [`skills/delegate/scripts/catalog.json`](skills/delegate/scripts/catalog.json). Brief templates live in [`skills/delegate/templates/`](skills/delegate/templates/).
 
-- **`delegate ask`**: cheap read-only one-shot (default Cursor auto `--mode ask`) that answers from files with `path:line` citations without filling the orchestrator context.
+- **`delegate ask`**: cheap read-only one-shot (default Cursor auto `--mode ask`) that answers from files with `path:line` citations without filling the orchestrator context. `--agent both` sends the same question to Codex and Cursor in parallel, for second opinions on a decision.
 - **`delegate cost`**: summarises usage from the run log (`~/.cache/claude-delegate/runs/runs.jsonl`, appended on successful `apply`) or the orchestrator session (`--session latest`).
 
 ## New machine
@@ -69,6 +69,11 @@ mkdir -p .delegate/tmp && TMPDIR=$PWD/.delegate/tmp python3 -m unittest discover
 
 - **Idle cache rebuilds:** `delegate cost --session` now lists them. On the real transcripts it matched an independent scan exactly: 9b03e065 has 1 rebuild (91 min, 141,484 written, 15.9% of cost units), 762dc86f has 4 (19.7%) and still counts 389 calls.
 - **Context guard, idle hold:** fed a real 192k transcript whose last call was a day old, the hook held the prompt, and let the same prompt through on the second run. It never holds a prompt that starts with `<` or `/`, because UserPromptSubmit also fires for task notifications (seen live: the size guard fired on one) and `/loop` turns (Claude Code hooks docs), and a held one never reaches Claude. Not yet seen in a live session.
+
+## Verified behaviour (2026-10-13)
+
+- **`delegate ask --agent both`** returned one block per agent; both cited the right line (Codex 10 s, Cursor 26 s). On a real decision with a 1.5 KB question, Codex took 20 s and Cursor 279 s.
+- **`delegate cost --session latest`** run from a subfolder finds the session through the nearest parent folder that has a Claude project dir.
 
 ## Related projects
 

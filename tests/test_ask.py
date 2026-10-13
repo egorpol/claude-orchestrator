@@ -116,6 +116,41 @@ class TestAsk(unittest.TestCase):
         self.assertEqual(cm.exception.code, 3)
         self.assertIn("line2", err.getvalue())
 
+    def _both_ns(self, **kw):
+        base = dict(question="Pick A or B?", agent="both", model=None, effort=None,
+                    dir=str(self.workspace), max_words=100, timeout=30, files=None)
+        base.update(kw)
+        return argparse_ns(**base)
+
+    def test_both_prints_one_block_per_agent(self):
+        from io import StringIO
+        buf = StringIO()
+        with mock.patch("sys.stdout", buf):
+            ask.cmd_ask(self._both_ns())
+        out = buf.getvalue()
+        self.assertLess(out.index("## codex"), out.index("## cursor"))
+        self.assertIn("foo.py:3", out)
+        self.assertIn("answer from cursor", out)
+        self.assertIn("(codex gpt-6.1-sol ·", out)
+        self.assertIn("(cursor auto ·", out)
+
+    def test_both_keeps_the_other_answer_on_failure(self):
+        self._write_exe("cursor-agent", "#!/bin/sh\necho quota exhausted >&2; exit 3\n")
+        from io import StringIO
+        buf = StringIO()
+        with mock.patch("sys.stdout", buf):
+            with self.assertRaises(SystemExit) as cm:
+                ask.cmd_ask(self._both_ns())
+        self.assertEqual(cm.exception.code, 3)
+        out = buf.getvalue()
+        self.assertIn("foo.py:3", out)
+        self.assertIn("(failed, exit 3) quota exhausted", out)
+
+    def test_both_rejects_model(self):
+        with self.assertRaises(SystemExit) as cm:
+            ask.cmd_ask(self._both_ns(model="auto"))
+        self.assertIn("single --agent", str(cm.exception))
+
     def test_never_passes_force(self):
         seen = []
 

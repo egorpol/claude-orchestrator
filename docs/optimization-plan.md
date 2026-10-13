@@ -133,6 +133,28 @@ All three started after `/clear` from a `HANDOFF.md`. Numbers from `delegate cos
 - **SKILL.md and templates:** visual checks use orchestrator-made screenshots handed to every reviewer, because Codex's headless Firefox crashed in its sandbox; research briefs for public writing ask for a privacy-flags section and a second count per headline number, capped at about 15 KB.
 - **Not in this repo's scope:** a dark-mode `user.js` pref for headless Firefox, Brave's `--no-sandbox`, Verovio SVG position parsing, the Wikidata API as a fallback when DNB and lobid show a bot wall, revision histories from timestamps.
 
+### Field results, 2026-10-12/13 (two camat_v2 handoff sessions)
+
+Both started after `/clear` from the project's `HANDOFF.md`. Numbers from `delegate cost --session`, including the calls that wrote each report.
+
+| session | work | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---|---:|---:|---:|---:|---|---|
+| 9ce4e364, PDF facsimile module from a written guide | 1 item | Codex build, Cursor review | 60 | 224k | 1.67M | 27.8k | none | 7 → 6 |
+| 6a4f5d31, upstream issues: re-check, post, follow up | 1 item | none | 79 | 193k | 1.67M | 21.1k | none | 98 at end (weekly refill) |
+
+- **Round 1 passed on a data module.** Codex @xhigh built `camat.pdf_facsimile` (887 lines, 48 tests) in 16 min. Expected values came from an acceptance fixture that the orchestrator built from the edition's own files, independently of the code being ported; all checks passed with no fix round. Cursor's review and the orchestrator's full read each found one bug the other missed.
+- **27.8k units per call** in 9ce4e364 came from staying past the ~150k picker for the review, up to 224k. It was the same item, so that is the intended use, and the late calls' re-reads are its price.
+- **Verify must match CI.** A bare `pytest -q` collected a release-only test folder, so the run reported verify FAIL, and both medium review findings were about the command. SKILL.md now says to copy `--verify` from the CI workflow, and to edit the spec before launch when a brief deliberately narrows it.
+- **Status-update prompts:** the harness asked for a status update 9 times across the two sessions, each time during a run of several reads or probes. The rules now ask for one line before such a run.
+- **A stray `cd` broke `cost --session latest`** at the end of 6a4f5d31. It now walks up to the nearest parent folder that has a project dir.
+- **Decisions in pickers (user request, 2026-10-13).** Decisions had often been asked in prose. The rules now say discrete choices go into `AskUserQuestion` with the recommended option first. Lasting decisions also get Codex's and Cursor's picks through `delegate ask --agent both`. First use, on how to open-source this repo: both picked the same option, their risks did not overlap, and Cursor corrected a fact in the question.
+- **Not in this repo's scope:**
+  - Re-read every cited thread in full before posting a day-old draft: it found 4 errors.
+  - `gh api markdown -f mode=gfm` as a pre-post render probe, and diffing the posted body after posting.
+  - Issue images at 2× with `<img width>` set to half the pixel width.
+  - Verovio's Python log capture through fd redirection.
+  - Sanity-check an automated schema traversal against a known member: it first reported 326 elements instead of 17.
+
 Still open:
 - ~~Cursor's "Models" quota has no openusage metric.~~ Resolved above: it is the Auto pool.
 - ~~Composer's billing pool is unverified.~~ Settled 2026-10-10: Composer and named Grok bill "Cursor Models", which is the Auto pool.
