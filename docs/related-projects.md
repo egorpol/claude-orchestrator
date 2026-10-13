@@ -1,6 +1,6 @@
 # Related projects
 
-Survey from 2026-10-09, refreshed on 2026-10-13. Star counts, licences and last-push dates come from the GitHub API on 2026-10-13. New entries came from eight GitHub searches; for each of them, the first 12 KB of its README was read.
+Combines the 2026-10-09 survey, its 2026-10-13 refresh and a 2026-10-13 wide survey (Codex gpt-6.1-sol @xhigh with live web search). Stars are as observed on 2026-10-13, and a date next to them is the last push. For the first two, stars, licences and dates come from the GitHub API, and the first 12 KB of each new entry's README was read. Wide-survey entries take them from that survey's `gh search` table or the repo page, and their capabilities are source or documentation findings, not local installs.
 
 ## Worth adopting or borrowing from
 
@@ -41,7 +41,7 @@ A plugin marketplace whose agents and skills install into Claude Code, Codex, Cu
 
 ## New since the first survey
 
-Repos below were not linked in the 2026-10-09 doc. They are the closest matches from eight GitHub searches (pushed after 2026-07-01), capped at ten.
+Entries below were not linked in the 2026-10-09 doc (refresh through `claude-delegator`; wide-survey additions from Claude Octopus onward).
 
 ### [cobusgreyling/loop-engineering](https://github.com/cobusgreyling/loop-engineering)
 11.5k★ · MIT · last push 2026-10-12
@@ -60,58 +60,65 @@ Repos below were not linked in the 2026-10-09 doc. They are the closest matches 
 ### [SeemSeam/claude_codex_bridge](https://github.com/SeemSeam/claude_codex_bridge)
 3.6k★ · NOASSERTION · last push 2026-10-10
 
-- TUI “CCB” hub: many CLI agents (including Codex, Claude, Cursor, Copilot) with stable inter-agent message queues, daemon-backed state, and mobile remote control.
-- **Overlap:** multi-vendor coding CLIs in parallel; no quota-aware routing or orchestrator-side brief/verify contract like `delegate`.
-- **Worth borrowing:** explicit message-queue graphs (`A → B → C`) if `delegate` ever chains agents in one item; nothing new for worktree isolation.
+- TUI hub for many CLI agents (Codex, Claude, Cursor, Copilot) with inter-agent queues and mobile remote.
+- **Overlap:** multi-vendor CLIs in parallel; no quota routing or brief/verify contract.
+- **Worth borrowing:** message-queue graphs (`A → B → C`) if agents ever chain in one item.
 
 ### [happier-dev/happier](https://github.com/happier-dev/happier)
 1.9k★ · MIT · last push 2026-10-12
 
-- Self-hostable desktop, web and mobile control room for 100+ coding agents; sessions can spawn subagents across agents (e.g. Claude asking Codex for review); end-to-end encrypted.
-- **Overlap:** cross-agent delegation and review; Happier targets many concurrent sessions on your machines, not Claude-as-orchestrator with a single patch to merge.
-- **Worth borrowing:** nothing new for the CLI skill shape; optional inspiration for notifying the user away from the desk while `delegate wait` runs.
+- Self-hostable control room for 100+ coding agents; cross-agent subagents (e.g. Claude asking Codex for review).
+- **Overlap:** cross-agent delegation; targets many concurrent sessions, not one patch to merge.
+- **Worth borrowing:** notify the user away from the desk while `delegate wait` runs.
 
 ### [zhnt/loushang](https://github.com/zhnt/loushang)
 1.7k★ · Apache-2.0 · last push 2026-10-12
 
-- Python “method-native” harness (`loushang code`): persistent sessions, tool governance, provider routing across many LLM backends, method-guided delivery.
-- **Overlap:** routing and verified delivery; Loushang is its own CLI/workbench, not delegation from Claude Code to external CLIs.
-- **Worth borrowing:** treating methods and acceptance as runtime objects; early for `delegate`, which already encodes verify in `--verify`.
-
-### [tddworks/ClaudeBar](https://github.com/tddworks/ClaudeBar)
-1.5k★ · Apache-2.0 · last push 2026-10-12
-
-- macOS menu bar app tracking quota and reset windows for Claude, Codex, Cursor and many other coding providers, with alerts and optional session hooks.
-- **Overlap:** quota visibility; `delegate quota` uses openusage on the CLI and drives routing, not a menu bar.
-- **Worth borrowing:** low-quota notifications before starting a long `--verify` run; no change to routing math.
+- Method-native harness with tool governance and provider routing; its own CLI, not Claude→external CLI delegation.
+- **Worth borrowing:** methods and acceptance as runtime objects (early; `delegate` already has `--verify`).
 
 ### [skills-directory/skill-codex](https://github.com/skills-directory/skill-codex)
 1.5k★ · MIT · last push 2026-09-13
 
-- Claude Code plugin/skill that wraps `codex exec` and session resume, with model and sandbox prompts and stderr suppressed by default so thinking tokens do not bloat context.
-- **Overlap:** Codex-only delegation from Claude Code; no Cursor, worktrees, or cross-vendor review.
-- **Worth borrowing:** default `2>/dev/null` on Codex stderr when only the summary should return to the orchestrator (plugin README).
+- Claude Code skill wrapping `codex exec`/resume; stderr suppressed so thinking tokens do not bloat context.
+- **Overlap:** Codex-only; no Cursor, worktrees, or cross-vendor review.
+- **Worth borrowing:** default `2>/dev/null` on Codex stderr when only the summary returns.
 
 ### [awslabs/cli-agent-orchestrator](https://github.com/awslabs/cli-agent-orchestrator)
 1.4k★ · Apache-2.0 · last push 2026-10-12
 
-- “CAO”: local `cao-server` starts provider CLIs (Claude Code, Codex, Cursor, Kiro, Copilot, OpenCode, and others) in isolated tmux sessions for a human supervisor.
-- **Overlap:** multi-CLI coordination; CAO is tmux-first with a supervisor UI, not background worktrees launched from Claude with an exit packet.
-- **Worth borrowing:** per-provider setup docs in-repo (Cursor CLI guide pattern); nothing new for quota routing.
+- Local `cao-server` starts provider CLIs in isolated tmux sessions for a human supervisor.
+- **Overlap:** multi-CLI coordination; tmux/UI, not background worktrees with an exit packet.
+- **Worth borrowing:** per-provider setup docs in-repo.
 
 ### [kbwo/ccmanager](https://github.com/kbwo/ccmanager)
 1.3k★ · MIT · last push 2026-10-12
 
-- Terminal session manager for Claude Code, Codex, Cursor Agent and others across git worktrees and multiple repos; copies Claude session data between worktrees; `.worktreeinclude` for gitignored files in new worktrees.
-- **Overlap:** worktree-per-agent parallelism; CCManager is interactive multiplexing, not brief/review/apply from the orchestrator.
-- **Worth borrowing:** `.worktreeinclude` as a complement to `delegate launch --link` for env files the brief assumes exist.
+- Session manager across worktrees/repos; copies Claude session data; `.worktreeinclude` for gitignored files.
+- **Overlap:** worktree parallelism; interactive multiplexing, not brief/review/apply.
+- **Worth borrowing:** `.worktreeinclude` beside `delegate launch --link`.
 
 ### [jarrodwatts/claude-delegator](https://github.com/jarrodwatts/claude-delegator)
 1.0k★ · MIT · last push 2026-10-12 · archived
 
-- Claude Code plugin routing to GPT/Gemini experts via MCP; five specialist roles with read-only or write modes. README states Codex MCP removal broke Codex delegation; points users at `openai/codex-plugin-cc`.
-- **Overlap:** Claude delegates outward to another vendor; no Cursor, worktrees, or structured review rounds.
-- **Worth borrowing:** nothing new; historical precedent for expert routing before the official Codex plugin.
+- Claude plugin routing to GPT/Gemini experts via MCP; Codex path broken after MCP removal; points at `openai/codex-plugin-cc`.
+- **Worth borrowing:** nothing new; historical expert-routing precedent.
+
+### [nyldn/claude-octopus](https://github.com/nyldn/claude-octopus)
+4.2k★ · last push 2026-10-11 · wide survey 2026-10-13
+
+- Claude Code plugin that dispatches external CLI providers with distinct roles, adversarial review, and consensus gates (includes Cursor).
+- **Overlap:** closest larger skill/plugin alternative to `delegate`.
+- **Worth borrowing:** bounded disagreement resolution and provider-contribution reporting.
+
+### [majiayu000/harness](https://github.com/majiayu000/harness)
+84★ · last push 2026-10-11 · wide survey 2026-10-13
+
+- Rust fleet control plane: agent lifecycles, independent reviews, execution policies, queues, observability around Claude/Codex.
+- **Overlap:** review and governance; heavier than a Claude skill.
+- **Worth borrowing:** enforce reviewer independence in code.
+
+macOS menu-bar quota widgets (e.g. [tddworks/ClaudeBar](https://github.com/tddworks/ClaudeBar), 1.5k★) track reset windows for Claude, Codex, Cursor and others; little use on Linux. For a Linux quota CLI see [Quotio](https://github.com/nguyenphutrong/quotio/blob/master/apps/cli/README.md) (4.9k★, last push 2026-10-12): versioned JSON snapshots and a loopback REST API.
 
 ## Full orchestrators (alternatives, heavier)
 
@@ -119,6 +126,7 @@ These are interactive supervisors, mostly GUI or tmux based, where a human watch
 
 | repo | ★ | license | notes |
 |---|---|---|---|
+| [ruvnet/ruflo](https://github.com/ruvnet/ruflo) | 74.5k | — | formerly claude-flow; Claude/Codex swarms, memory, MCP, routing, policy (last push 2026-10-13) |
 | [Yeachan-Heo/oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) | 39.8k | MIT | "teams-first" multi-agent orchestration for Claude Code; Codex and Cursor workers in tmux panes |
 | [BloopAI/vibe-kanban](https://github.com/BloopAI/vibe-kanban) | 28.3k | Apache-2.0 | kanban board of agent tasks, worktree per task |
 | [superset-sh/superset](https://github.com/superset-sh/superset) | 15.1k | other | agentic IDE, many agents in parallel |
@@ -127,18 +135,67 @@ These are interactive supervisors, mostly GUI or tmux based, where a human watch
 | [standardagents/dmux](https://github.com/standardagents/dmux) | 1.8k | MIT | worktree agent multiplexer |
 | [johannesjo/parallel-code](https://github.com/johannesjo/parallel-code) | 1.0k | MIT | Claude Code, Codex and Gemini side by side in worktrees (no Cursor) |
 | [Enderfga/claw-orchestrator](https://github.com/Enderfga/claw-orchestrator) | 0.6k | MIT | one runtime for Claude Code, Codex, Cursor Agent and more; "a run only counts as done when checks pass" |
+| [LilithGames/a2wave](https://github.com/LilithGames/a2wave) | 27 | — | governed services over agent CLIs; queues, A2A, isolated eval worktrees (last push 2026-10-13) |
 
 ## Model routing and bridges (not needed now)
 
 - [musistudio/claude-code-router](https://github.com/musistudio/claude-code-router) (37.6k★, MIT): points Claude Code itself at other models. This replaces the orchestrator's model; it does not delegate.
+- [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (55.0k★, last push 2026-10-13): subscription-backed providers through compatible APIs; changes transport rather than delegating CLI work.
+- [kaitranntt/ccs](https://github.com/kaitranntt/ccs) (2.9k★, last push 2026-10-01): provider profiles, isolated accounts, quota visibility, CLIProxy account-pool routing (fill-first plus affinity).
 - [BeehiveInnovations/pal-mcp-server](https://github.com/BeehiveInnovations/pal-mcp-server) (11.8k★; the former zen-mcp-server): MCP tools for multi-model consensus and a bridge to Codex/Gemini CLIs. Its last push was 2025-12, so it looks stale.
 - cursor-agent bridges: [raphaelluethy/cursor-acp](https://github.com/raphaelluethy/cursor-acp) (ACP client), [Azhi-ss/cursorcli2api](https://github.com/Azhi-ss/cursorcli2api) (HTTP API shim).
 - [coder/agentapi](https://github.com/coder/agentapi) is archived.
+
+## Quota-aware routing
+
+Routers that read live subscription headroom before choosing a worker or account. No production-ready selector covering Claude, Codex, Cursor and Gemini together was verified (wide survey 2026-10-13).
+
+- [wr/quota-router](https://github.com/wr/quota-router) (0★, retained): injects Claude/Codex quota snapshots before Agent calls; rejects expired snapshots; reads Codex rollout rate-limit events without launching Codex. **Take:** treat stale quota as unknown.
+- [IuCC123/CLIProxyAPI-Rust](https://github.com/IuCC123/CLIProxyAPI-Rust) (35★): routes API sessions by subscription headroom, renewal, weekly allowance, concurrent load and session affinity. **Take:** keep sessions sticky to preserve caches.
+- [Quotio](https://github.com/nguyenphutrong/quotio/blob/master/apps/cli/README.md) (4.9k★): Linux CLI with versioned JSON snapshots; its beta Claude/Gemini/Cursor catalog routes have offline test coverage; live acceptance is unverified. **Take:** explicit confidence, freshness and schema versions.
 
 ## Observability
 
 - [disler/claude-code-hooks-multi-agent-observability](https://github.com/disler/claude-code-hooks-multi-agent-observability) (1.5k★, last push 2026-02)
 - [donvito/agent-monitor](https://github.com/donvito/agent-monitor) (83★): traces, tokens and cost for Codex and Claude Code subagents
+- [junyeong-ai/hatel](https://github.com/junyeong-ai/hatel/blob/main/README.en.md) (0★, retained): joins native OTel and lifecycle hooks into local session/project/agent-type usage. **Take:** respect cumulative versus delta metric temporality.
+
+## Measurement and evaluation
+
+### ccusage family
+
+Use [ccusage](https://github.com/ccusage/ccusage) ([v20.0.30](https://github.com/ccusage/ccusage/releases/tag/v20.0.30), 19.0k★ on 2026-10-13) as the pinned offline reference for Claude session totals including subagents: it maps `<session>/subagents/*.jsonl` to the parent, dedupes requestless `msg_…` IDs across timestamps (fixed in v20.0.27; v20.0.26 can double-count), and prices 5-minute vs 1-hour cache writes separately. Read `totalCost`, not the sum of `entries[].costUSD`. External Codex/Cursor delegates still need the run ledger.
+
+```bash
+ccusage claude session --id <UUID> --json --mode calculate --offline
+```
+
+- [Piebald-AI/splitrail](https://github.com/Piebald-AI/splitrail): reads subagents but identifies conversations by transcript-path hash (no parent attribution); no TTL pricing.
+- [cobra91/better-ccusage](https://github.com/cobra91/better-ccusage): reads subagents as separate filename sessions; no parent rollup; no TTL pricing.
+
+### Claude Code OpenTelemetry
+
+Anthropic's [monitoring docs](https://code.claude.com/docs/en/monitoring-usage#available-metrics-and-events): `claude_code.cost.usage` (USD); `claude_code.token.usage` (`input`, `output`, `cacheRead`, `cacheCreation`; input excludes cache). `api_request` adds estimated cost, four token counts, model, duration, request ID and query source. Cost and token metrics carry `query_source=main|subagent|auxiliary` plus agent, skill, plugin and MCP names. [Beta traces](https://code.claude.com/docs/en/monitoring-usage#span-attributes) nest subagents (`agent_id`/`parent_agent_id`). [`subagent_completed.total_tokens`](https://code.claude.com/docs/en/monitoring-usage#subagent-completed-event) is final-request only. No cache-TTL split in standard metrics; use transcripts for TTL. VS Code `app.entrypoint=claude-vscode` is [documented](https://code.claude.com/docs/en/vs-code#configure-settings); Cursor-hosted export is unverified.
+
+### Controlled comparisons
+
+**[Evaluating AGENTS.md](https://arxiv.org/html/2602.11988v1).** Ablation on 300 SWE-bench Lite + 138 AGENTbench; resolution, steps, cost. Generated context +20–23% cost, lower resolution. Copy matched repo state and independent tests; extra standing instructions are not free wins.
+
+**[SkillsBench](https://arxiv.org/html/2602.12670v1)** ([repo](https://github.com/benchflow-ai/skillsbench), 1.8k★). 84 tasks, seven configs, 7,308 trajectories, deterministic verifiers. Curated skills +16.2 pp; self-generated negligible. Copy repeats, hidden verifiers, leakage checks; measure activation (paper has internal count inconsistencies).
+
+**[Analyzing and Mitigating Cost-Inefficient Behaviors](https://arxiv.org/html/2609.30725v1).** 1,200 trajectories diagnosed; 200 Verified + 100 Pro held out, three baseline reps. Skills cut cost 7.88–41.73% in 6/8 settings. Copy held-out split and cost-per-success; do not treat its best % as expected saving.
+
+**[Harness or Model?](https://arxiv.org/html/2609.11987v1).** Same-model native vs neutral: 80 tasks/contrast, 792/800 graded. Neither average solve-rate contrast established an advantage; corrected observed-usage costs favoured native harnesses, but billed ordering stays unresolved without Anthropic usage. Copy raw events and separate success/completion; avoid one usage normalizer (cache semantics broke their first cost analysis).
+
+**[Dealwatch three-arm benchmark](https://github.com/Dealwatch/claude-code-orchestration-benchmark)** (0★, retained). Three arms × two bundles, one run/cell; Opus orchestration $5.79 vs solo $6.15 within 29% pilot noise; configured workers ran 0× in ten main runs. Copy fixture self-tests, denied Agent tools in solo, anonymized reviews, realized-delegation checks. ~10 sessions/arm is a pilot.
+
+**[Reveneau’s token benchmark](https://reveneau.com/guides/claude-code-token-benchmark).** 45 runs (9×5) on a 30-line task. Extra 301-line CLAUDE.md: median $0.161→$0.239. Copy fresh fixtures and external checks; do not extrapolate to long sessions.
+
+**[Context Mode evidence](https://context-mode.com/benchmarks/data/v4-opus55-W1-W2-W3-W4.json).** Alternating A/B; its multi-agent workload: 20 pairs, −15.2% cost. Copy frozen deployments. Avoid its policy: the [index](https://context-mode.com/benchmarks/data/index.json) withholds non-winners and this set has zero per-call tokens.
+
+**[METR early-2025 study](https://metr.org/blog/2025-07-10-early-2025-ai-experienced-os-dev-study/).** 16 developers, 246 issues, randomised to AI allowed or disallowed; elapsed time +19% with AI. Copy assignment before work. A [later update](https://metr.org/blog/2026-02-24-uplift-update/) flags selection bias and bad timing for concurrent agents.
+
+**[Claude Code `plugin eval`](https://code.claude.com/docs/en/plugin-evals#score-against-the-no-plugin-baseline).** `--ablation with-without`; default 3 runs/arm; grader Δ and cost. Use for bounded skill/rule checks; assert outcomes and activation.
 
 ## Lists to browse
 
@@ -153,8 +210,15 @@ Done on 2026-10-09:
 4. The brief guidance in SKILL.md now includes the Codex plugin's tagged-contract advice.
 5. `openai/codex-plugin-cc` is installed (user scope); the review gate is left off.
 
+Done on 2026-10-13 (wide-survey recommendations):
+1. `7bc654a`: `delegate cost --session` prices at list price including subagent transcripts (`<session>/subagents/agent-*.jsonl`, deduped), with 5-minute and 1-hour cache writes priced separately; matches `ccusage@20.0.30` to 1e-6 on two sessions (`docs/verified-behaviour.md`). Covers survey recommendations 1 and 2.
+2. `184bde7`: quota snapshots (`~/.cache/claude-delegate/quota.jsonl`) at session start/end, each run start, and from a timer; each reading has a `stale` flag. `delegate route` still uses openusage (can lag ~1 h, shown as DATA AGE); `--source direct` reads live. Recommendation 5 partly done.
+3. `698e857`, `b705445`: per-session summary rows log delegate commands; `delegate cost --by-mode` counts launches/runs per arm; `delegate rate` is a blinded item rater. Covers recommendation 4.
+
 Still open:
 - Machine-readable reviews via `codex exec --output-schema` (the plugin ships `review-output.schema.json`).
 - Loop cost / readiness scoring for repeated delegate cycles (`cobusgreyling/loop-engineering`, `loop-cost` / `loop-audit`).
 - Optional pre-launch spend or approval policies before destructive delegate actions (`omnigent-ai/omnigent`).
 - Carry gitignored env files into new worktrees via a `.worktreeinclude` convention (`kbwo/ccmanager`).
+- Control-session design is decided (per-session 50/25/25 orchestrator / claude-only / vanilla, intent-to-treat, metric = USD per finished item; no project/task-class blocking; nothing preregistered publicly). Recommendation 3 remains open apart from the randomisation: preregister the pilot, block assignment by project/task class, and report cost, success, regressions and elapsed time with uncertainty.
+- Refresh quota at dispatch and refuse to treat stale readings as unused allowance (remainder of recommendation 5; see quota-router).

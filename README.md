@@ -80,7 +80,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 - A pre-push guard that blocks secrets (API tokens, private keys, home paths) in outgoing commits, which `install.sh --hooks` can offer.
 - Personal tuning in an optional `catalog.local.json`, merged key by key over `catalog.json`.
 - Machine-readable reviews through `codex exec --output-schema`.
-- The open ideas in the [survey](docs/related-projects.md): loop cost scoring, pre-launch approval policies, `.worktreeinclude`.
+- The open ideas in the [survey](docs/related-projects.md): loop cost scoring, pre-launch approval policies, `.worktreeinclude`, control-session preregistration and blocked assignment, quota refresh at dispatch.
 
 ## Docs
 
