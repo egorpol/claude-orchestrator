@@ -140,6 +140,74 @@ class InstallTests(unittest.TestCase):
         backups = list((self.tmp / "claude/skill-backups").glob("pre-push-*"))
         self.assertEqual(len(backups), 1)
 
+    def test_both_git_hooks_link_and_rerun_is_idempotent(self):
+        repo = self.tmp / "both-hooks"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        out = self.install(f"--git-hook={repo}")
+        for hook in ("pre-push", "pre-commit"):
+            self.assertIn(f"{hook} ->", out)
+            dest = repo / ".git/hooks" / hook
+            self.assertTrue(dest.is_symlink())
+            self.assertEqual(dest.resolve(), REPO / "hooks/secret-guard.py")
+        out = self.install(f"--git-hook={repo}")
+        self.assertIn("pre-push already linked", out)
+        self.assertIn("pre-commit already linked", out)
+        self.assertFalse((self.tmp / "claude/skill-backups").exists())
+
+    def test_foreign_pre_commit_is_independent_and_force_backs_it_up(self):
+        repo = self.tmp / "foreign-hook"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        dest = repo / ".git/hooks/pre-commit"
+        contents = "#!/bin/sh\nexit 0\n"
+        dest.write_text(contents)
+        dest.chmod(0o755)
+        out = self.install(f"--git-hook={repo}", code=1)
+        self.assertIn("pre-commit:", out)
+        self.assertIn("exists and is not this secret-guard", out)
+        self.assertEqual(dest.read_text(), contents)
+        self.assertTrue((repo / ".git/hooks/pre-push").is_symlink())
+        self.install(f"--git-hook={repo}", "--force")
+        self.assertTrue(dest.is_symlink())
+        backups = list((self.tmp / "claude/skill-backups").glob("pre-commit-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), contents)
+
+    def test_check_reports_deny_list_missing_entries_and_worktree_warning(self):
+        config = self.tmp / "config"
+        config.mkdir()
+        # TMPDIR is inside the checkout: stop discovery above our scratch config.
+        env = {"GIT_CEILING_DIRECTORIES": str(self.tmp)}
+        path = config / "claude-orchestrator/private-names.txt"
+        out = self.install("--check", env=env)
+        self.assertIn("private-name deny list missing", out)
+        self.assertIn(str(path), out)
+        path.parent.mkdir()
+        names = ("fictional-private-repo", "acme-secret-thing")
+        path.write_text(f"# only local names\n\n  {names[0]}  \n{names[1]}\n")
+        out = self.install("--check", env=env)
+        self.assertIn(str(path), out)
+        self.assertIn("2 entries", out)
+        self.assertNotIn("inside a git work tree", out)
+        for name in names:
+            self.assertNotIn(name.lower(), out.lower())
+        subprocess.run(["git", "init"], cwd=config, check=True, capture_output=True)
+        out = self.install("--check", env=env)
+        self.assertIn("inside a git work tree", out)
+        self.assertIn("one git add could publish it", out)
+        for name in names:
+            self.assertNotIn(name.lower(), out.lower())
+
+    def test_check_deny_list_empty_xdg_falls_back_to_home(self):
+        path = self.tmp / "home/.config/claude-orchestrator/private-names.txt"
+        path.parent.mkdir(parents=True)
+        path.write_text("fictional-private-repo\n")
+        out = self.install("--check", env={"XDG_CONFIG_HOME": ""})
+        self.assertIn(str(path), out)
+        self.assertIn("1 entries", out)
+        self.assertNotIn("fictional-private-repo", out)
+
     def test_hooks_refuse_malformed_settings_without_a_traceback(self):
         self.settings.parent.mkdir(parents=True)
         self.settings.write_text("{broken")

@@ -32,7 +32,7 @@ The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysi
 | [`delegate`](skills/delegate/SKILL.md) skill and CLI | Hands work to **Codex CLI** or **Cursor's headless agent** (`cursor-agent --model auto`). Shows live quota per pool via openusage and ranks models per task type with [Artificial Analysis](https://artificialanalysis.ai/) ratings. Each delegate runs in its own git worktree with a brief, a log and an optional check command. The other vendor reviews the result read-only, and fix rounds resume the same agent session. Claude reviews the diff and applies it uncommitted. |
 | [`/field-report`](skills/field-report/SKILL.md) skill | Writes a field report on the current session from any project's chat: `delegate report` fills in the numbers, then Claude writes the narrative. |
 | [`hooks/context-guard.py`](hooks/context-guard.py) | Asks for a handoff before a new work item once context passes about 120k tokens. Holds the first prompt after an hour idle. |
-| [`hooks/secret-guard.py`](hooks/secret-guard.py) | PreToolUse (Bash) and optional git pre-push: asks before a push that would send API tokens, private keys, home paths or key/env files. In a private repo, `git config secretGuard.homePaths false` turns off the home-path rule. |
+| [`hooks/secret-guard.py`](hooks/secret-guard.py) | PreToolUse (Bash) and optional git pre-commit/pre-push: catches API tokens, private keys, home paths, key/env files, private names and added working files (`HANDOFF.md`, direct `feedback/*.md` or `*.jsonl`). Private literals go in `${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/private-names.txt`, one per line (blanks and `#` comments ignored); output masks names. Per-repo opt-outs: `git config secretGuard.homePaths false`, `git config secretGuard.privateNames false`, `git config secretGuard.workingFiles false`. |
 | [`rules/orchestrator.md`](rules/orchestrator.md) | Short rules for every session, including sessions that never load a skill. It imports [`hygiene.md`](rules/hygiene.md) (handoffs, pickers, data checks, shell) and [`delegation.md`](rules/delegation.md) (when to delegate, second opinions). |
 
 The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands `quota`, `ratings`, `route`, `launch`, `review`, `followup`, `verify`, `status`, `wait`, `diff`, `apply`, `cleanup`, `ask`, `cost`, `rate` and `report`. It is stdlib-only Python 3.9+. Tunables (models, pools, task weights, `prefer`) are in [`catalog.json`](skills/delegate/scripts/catalog.json), and brief templates are in [`templates/`](skills/delegate/templates/).
@@ -44,10 +44,10 @@ The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands 
 ```bash
 gh repo clone egorpol/claude-orchestrator
 cd claude-orchestrator
-./install.sh --check        # what is missing
+./install.sh --check        # what is missing; deny-list path/count and warning if inside a git work tree
 ./install.sh                # symlink skills into ~/.claude/skills and /next into ~/.claude/commands (add --bin for `delegate` on PATH)
 ./install.sh --hooks        # optional: register hooks/context-guard.py and hooks/secret-guard.py
-./install.sh --git-hook=.   # optional: link secret-guard.py as this repo's git pre-push hook
+./install.sh --git-hook=.   # optional: link secret-guard.py as this repo's pre-commit and pre-push hooks
 ./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
 ./install.sh --experiment   # opt-in: randomised control sessions via hooks/session-mode.py (see below)
 ./install.sh --timer        # optional: systemd user timer logging pool readings every 10 min while Claude Code is active
@@ -56,6 +56,8 @@ cd claude-orchestrator
 `--experiment` is for measuring whether delegation pays off. Each new session draws `orchestrator` (50%), `claude-only` or `vanilla` (25% each; delegation blocked), gets that mode's rules from the hook and logs one summary row to `~/.cache/claude-delegate/sessions.jsonl` (local only). The hook replaces the `--rules` import, so `--experiment` removes it. `delegate rate` has Cursor Auto split each finished session into items from your prompts, HANDOFF.md and commits, without seeing the mode, and `delegate cost --by-mode` compares the arms: cost per finished item, by size and type. Weights go in `~/.config/claude-orchestrator/session-mode.json`; to stop, delete the `session-mode.py` entries from `~/.claude/settings.json` and run `--rules` again.
 
 `install.sh` is idempotent. It never deletes an existing skill directory or command file: with `--force`, the old one moves to `~/.claude/skill-backups/`. Use `--copy` where a symlink into the repo is not wanted. A copied install doesn't know where the checkout is, so `/field-report` then needs `CLAUDE_ORCHESTRATOR_FEEDBACK` set to a folder.
+
+The secret guard asks in Claude Code and stops commits/pushes in the git hooks. An approved ask still reaches an installed git hook; rerunning with `--no-verify` is scanned and asked again. A missing deny list turns that rule off; an unreadable or invalid UTF-8 list stops the scan. Keep the list outside git work trees. Command-line `-c` overrides cannot disable the per-repo rules for the scanned command.
 
 Prerequisites (`--check` prints install hints):
 
@@ -97,7 +99,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 install.sh                         link/copy skills and commands, check prerequisites; --hooks, --git-hook=DIR, --rules, --experiment, --timer, --bin
 commands/next.md                   /next: continue from HANDOFF.md after /clear
 hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle
-hooks/secret-guard.py              PreToolUse (Bash) + git pre-push / --check: stop secrets leaving on a push
+hooks/secret-guard.py              PreToolUse (Bash), git pre-commit/pre-push, --check: secrets, private names, working files
 hooks/session-mode.py              SessionStart/PreToolUse/SessionEnd: control-session draw, rules, summary rows
 rules/orchestrator.md              user-level rules for every session (install.sh --rules, or the session-mode hook)
 skills/delegate/SKILL.md           instructions Claude loads

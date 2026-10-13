@@ -1332,5 +1332,369 @@ class SecretGuardHomePathSwitchTests(_SecretGuardHarness, unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class SecretGuardP2Tests(_SecretGuardHarness, unittest.TestCase):
+    NAME = "fictional-private-repo"
+
+    def setUp(self):
+        super().setUp()
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp / "config")
+        self.names = self.tmp / "config/claude-orchestrator/private-names.txt"
+
+    def deny_list(self, text=None):
+        self.names.parent.mkdir(parents=True, exist_ok=True)
+        self.names.write_text(text if text is not None else f"# local literals\n\n  {self.NAME}  \n",
+                              encoding="utf-8")
+
+    def repo(self, name="project"):
+        local = self.tmp / name
+        _init_repo(local)
+        return local
+
+    def stage(self, local, path, text="ok\n"):
+        target = local / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        _git(local, "add", "--", path)
+
+    def decision(self, result, expected="ask"):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], expected)
+        self.assertEqual(result.stderr, "")
+        return out["permissionDecisionReason"]
+
+    def masked(self, result, name=None):
+        for stream in (result.stdout, result.stderr):
+            self.assertNotIn((name or self.NAME).lower(), stream.lower())
+
+    def commit_hook(self, local):
+        dest = local / ".git/hooks/pre-commit"
+        dest.symlink_to(HOOK)
+        return dest
+
+    def real_commit(self, local, *args):
+        return subprocess.run(["git", "commit", *args], cwd=local, env=self.env,
+                              capture_output=True, text=True)
+
+    def test_real_pre_commit_symlink_staged_token_and_clean(self):
+        local = self.repo()
+        token = _fake_token("ghp_", 36)
+        self.stage(local, "f.txt", token + "\n")
+        self.commit_hook(local)
+        result = self.real_commit(local, "-m", "first")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("GitHub token", result.stderr)
+        self.assertIn("ghp_…40", result.stderr)
+        self.assertNotIn(token, result.stdout + result.stderr)
+        self.assertIn("override: git commit --no-verify", result.stderr)
+        self.stage(local, "f.txt", "clean\n")
+        sub = local / "sub"
+        sub.mkdir()
+        result = self.real_commit(sub, "-m", "first")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_real_pre_commit_all_and_path_honour_temporary_index(self):
+        for args in (("-a",), ("f.txt",)):
+            with self.subTest(args=args):
+                local = self.repo("all" if args[0] == "-a" else "path")
+                self.stage(local, "f.txt")
+                _git(local, "commit", "-m", "base")
+                self.commit_hook(local)
+                (local / "f.txt").write_text(_fake_token("ghp_", 36) + "\n")
+                self.assertEqual(_git(local, "diff", "--cached").stdout, "")
+                result = self.real_commit(local, "-m", "update", *args)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("GitHub token", result.stderr)
+
+    def test_pre_commit_explicit_only_scans_staged(self):
+        local = self.repo()
+        self.stage(local, "f.txt")
+        _git(local, "commit", "-m", "base")
+        (local / "f.txt").write_text(_fake_token("ghp_", 36))
+        (local / "HANDOFF.md").write_text("local\n")
+        result = self.run_hook(argv=["--pre-commit", str(local)])
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.stage(local, "added.txt", _fake_token("ghp_", 36))
+        result = self.run_hook(argv=["--pre-commit", str(local)])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("GitHub token", result.stderr)
+        self.assertNotIn("working file", result.stderr)
+
+    def test_private_names_added_lines_comments_line_number_and_boundaries(self):
+        self.deny_list(f"# acme-secret-thing\n\n  {self.NAME}  \n\n")
+        local = self.repo()
+        for text, hits in ((self.NAME.upper(), True), (self.NAME + "_v2", True),
+                           ("owner/" + self.NAME + ".git", True), ("x" + self.NAME, False),
+                           (self.NAME + "7", False), ("é" + self.NAME, False),
+                           (self.NAME + "中", False), ("acme-secret-thing", False)):
+            with self.subTest(text=text):
+                self.stage(local, "f.txt", text + "\n")
+                result = self.run_hook(argv=["--pre-commit", str(local)])
+                self.assertEqual(result.returncode, int(hits), result.stderr)
+                self.masked(result)
+                if hits:
+                    self.assertIn("private name", result.stderr)
+                    self.assertIn("private-names.txt:3", result.stderr)
+
+    def test_private_names_messages_and_added_paths_in_history(self):
+        self.deny_list()
+        local = self.repo()
+        self.stage(local, "docs/" + self.NAME + "_v2.txt")
+        staged = self.run_hook(argv=["--pre-commit", str(local)])
+        self.assertEqual(staged.returncode, 1)
+        self.assertIn("private-names.txt:3", staged.stderr)
+        self.masked(staged)
+        _git(local, "commit", "-m", self.NAME.upper())
+        result = self.run_hook(argv=["--check", str(local)])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("(commit message)", result.stdout)
+        self.assertIn("docs/<private name 3>_v2.txt", result.stdout)
+        self.masked(result)
+        sha = _git(local, "rev-parse", "HEAD").stdout.strip()
+        result = self.run_hook(argv=["origin", "unused"], cwd=local,
+                               stdin_text=f"refs/heads/main {sha} refs/heads/main {'0' * 40}\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("(commit message)", result.stderr)
+        self.masked(result)
+
+    def test_private_names_missing_and_empty_xdg_fallback(self):
+        local = self.repo()
+        self.stage(local, "f.txt", self.NAME)
+        self.assertEqual(self.run_hook(argv=["--pre-commit", str(local)]).returncode, 0)
+        fallback = self.tmp / "home/.config/claude-orchestrator/private-names.txt"
+        fallback.parent.mkdir(parents=True)
+        fallback.write_text(self.NAME + "\n")
+        result = self.run_hook(argv=["--pre-commit", str(local)], env={"XDG_CONFIG_HOME": ""})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("private-names.txt:1", result.stderr)
+        self.masked(result)
+
+    def test_broken_deny_list_fails_closed_in_every_entry_point(self):
+        local = self.repo()
+        self.stage(local, "f.txt")
+        _git(local, "commit", "-m", "base")
+        self.deny_list()
+        for invalid in (False, True):
+            with self.subTest(invalid_utf8=invalid):
+                if invalid:
+                    self.names.write_bytes(b"\xff\n")
+                else:
+                    self.names.chmod(0o000)
+                    if os.access(self.names, os.R_OK):
+                        self.names.chmod(0o600)
+                        self.skipTest("unreadable file requires an unprivileged user")
+                try:
+                    for argv in (["--pre-commit", str(local)], ["--check", str(local)],
+                                 ["origin", "unused"]):
+                        result = self.run_hook(argv=argv, cwd=local)
+                        self.assertEqual(result.returncode, 1)
+                        self.assertIn("could not finish", result.stderr)
+                        self.assertIn(str(self.names), result.stderr)
+                        self.assertNotIn("\xff", result.stdout + result.stderr)
+                    for command in ("git commit -m x", "git push origin HEAD"):
+                        result = self.claude(command, cwd=local)
+                        self.assertIn("could not finish", self.decision(result))
+                    # A broken list must not weaken the commit-then-push deny to ask.
+                    result = self.claude("git commit -m x && git push origin HEAD", cwd=local)
+                    self.assertIn("creates a commit and then pushes",
+                                  self.decision(result, "deny"))
+                finally:
+                    self.names.chmod(0o600)
+
+    def test_masking_all_modes_paths_targets_and_inside_longer_words(self):
+        self.deny_list()
+        local = self.repo("x" + self.NAME.upper() + "y")
+        path = "x" + self.NAME.upper() + "y.txt"
+        self.stage(local, path, _fake_token("ghp_", 36) + " x" + self.NAME + "y\n")
+        result = self.run_hook(argv=["--pre-commit", str(local)])
+        self.masked(result)
+        self.assertIn("<private name 3>", result.stderr)
+        for command in ("git commit --no-verify -m x", "git commit -m x && git push"):
+            result = self.claude(command, cwd=local)
+            self.masked(result)
+            self.decision(result, "deny" if "push" in command else "ask")
+        _git(local, "commit", "-m", "base")
+        result = self.run_hook(argv=["--check", str(local)])
+        self.assertEqual(result.returncode, 1)
+        self.masked(result)
+        sha = _git(local, "rev-parse", "HEAD").stdout.strip()
+        remote = "https://example.com/x" + self.NAME.upper() + "y.git"
+        result = self.run_hook(argv=[remote, remote], cwd=local,
+                               stdin_text=f"refs/heads/main {sha} refs/heads/main {'0' * 40}\n")
+        self.assertEqual(result.returncode, 1)
+        self.masked(result)
+        result = self.claude("git push " + remote + " HEAD", cwd=local)
+        self.masked(result)
+        self.assertIn("<private name 3>", self.decision(result))
+
+    def test_masking_could_not_finish_hints_every_mode(self):
+        self.deny_list()
+        local = self.repo("x" + self.NAME + "y")
+        self.stage(local, "f.txt")
+        _git(local, "commit", "-m", "base")
+        sha = _git(local, "rev-parse", "HEAD").stdout.strip()
+        for argv in (["--pre-commit", str(local)], ["--check", str(local)],
+                     ["origin", "unused"]):
+            result = self.run_hook(argv=argv, cwd=local, env={"SECRET_GUARD_BUDGET_S": "0"},
+                                   stdin_text=f"refs/heads/main {sha} refs/heads/main {'0' * 40}\n")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("could not finish", result.stderr)
+            self.assertIn("--check", result.stderr)
+            self.assertIn("<private name 3>", result.stderr)
+            self.masked(result)
+        for command in ("git commit -m x", "git push origin HEAD"):
+            result = self.claude(command, cwd=local, env={"SECRET_GUARD_BUDGET_S": "0"})
+            reason = self.decision(result)
+            self.assertIn("could not finish", reason)
+            self.assertIn("<private name 3>", reason)
+            self.masked(result)
+
+    def test_masking_longest_name_first_and_opt_out_still_masks(self):
+        self.deny_list(f"fictional\n{self.NAME}\n")
+        local = self.repo()
+        _git(local, "config", "secretGuard.privateNames", "false")
+        self.stage(local, "x" + self.NAME + "y.txt", _fake_token("ghp_", 36))
+        result = self.run_hook(argv=["--pre-commit", str(local)])
+        self.assertIn("x<private name 2>y.txt", result.stderr)
+        self.assertNotIn("private-names.txt:", result.stderr)
+        self.masked(result)
+        self.masked(result, "fictional")
+
+    def test_new_repo_opt_outs_and_command_overrides_ignored(self):
+        self.deny_list()
+        for key, path, text, label in (("privateNames", "f.txt", self.NAME, "private name"),
+                                       ("workingFiles", "HANDOFF.md", "ok", "working file")):
+            with self.subTest(key=key):
+                local = self.repo(key)
+                self.stage(local, path, text)
+                result = self.claude(f"git -c secretGuard.{key}=false commit -m x", cwd=local)
+                self.assertIn(label, self.decision(result))
+                _git(local, "commit", "-m", "base")
+                result = self.claude(f"git -c secretGuard.{key}=false push origin HEAD", cwd=local)
+                self.assertIn(label, self.decision(result))
+                _git(local, "config", f"secretGuard.{key}", "false")
+                self.assertEqual(self.claude("git push origin HEAD", cwd=local).stdout, "")
+                self.assertEqual(self.run_hook(argv=["--check", str(local)]).returncode, 0)
+                self.stage(local, path, text + "\nnew\n")
+                self.assertEqual(self.run_hook(argv=["--pre-commit", str(local)]).returncode, 0)
+                self.assertEqual(self.claude("git commit -m x", cwd=local).stdout, "")
+
+    def test_working_file_additions_only(self):
+        local = self.repo()
+        for path in ("HANDOFF.md", "nested/hAnDoFf.Md", "feedback/x.md", "feedback/x.jsonl",
+                     "feedback/sub/x.md", "docs/HANDOFF-notes.md"):
+            self.stage(local, path)
+        result = self.run_hook(argv=["--pre-commit", str(local)])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("4 findings", result.stderr)
+        self.assertNotIn("feedback/sub", result.stderr)
+        self.assertNotIn("HANDOFF-notes", result.stderr)
+        _git(local, "commit", "-m", "base")
+        self.stage(local, "HANDOFF.md", "changed\n")
+        _git(local, "rm", "feedback/x.md")
+        result = self.run_hook(argv=["--pre-commit", str(local)])
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_renamed_destinations_and_untracked_paths(self):
+        self.deny_list()
+        local = self.repo()
+        self.stage(local, "ordinary.txt")
+        _git(local, "commit", "-m", "base")
+        _git(local, "mv", "ordinary.txt", "HANDOFF.md")
+        result = self.run_hook(argv=["--pre-commit", str(local)])
+        self.assertIn("working file", result.stderr)
+        (local / (self.NAME + ".txt")).write_text("ok\n")
+        result = self.run_hook(argv=["--check", str(local)])
+        self.assertIn("(untracked)", result.stdout)
+        self.assertIn("private-names.txt:3", result.stdout)
+        self.masked(result)
+
+    def test_pretool_commit_staged_and_add_before_commit(self):
+        local = self.repo()
+        (local / "HANDOFF.md").write_text("work\n")
+        result = self.claude("git commit -m x", cwd=local)
+        self.assertEqual(result.stdout, "")
+        result = self.claude("git add -A && git commit -m wip", cwd=local)
+        self.assertIn("working file", self.decision(result))
+        self.stage(local, "f.txt", _fake_token("ghp_", 36))
+        self.assertIn("GitHub token", self.decision(self.claude("git commit -m x", cwd=local)))
+        self.decision(self.claude("git commit -m x && git push", cwd=local), "deny")
+
+    def test_pretool_full_scan_from_subdirectory_uses_root_relative_paths(self):
+        local = self.repo()
+        (local / "feedback").mkdir()
+        (local / "feedback/x.md").write_text("local notes\n")
+        sub = local / "sub"
+        sub.mkdir()
+        result = self.claude("git add -A && git commit -m wip", cwd=sub)
+        reason = self.decision(result)
+        self.assertIn("working file", reason)
+        self.assertIn("feedback/x.md", reason)
+
+    def test_check_keeps_existing_untracked_locations_from_subdirectory(self):
+        local = self.repo()
+        sub = local / "sub"
+        sub.mkdir()
+        (sub / "f.txt").write_text(_fake_token("ghp_", 36))
+        result = self.run_hook(argv=["--check", str(sub)])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("GitHub token  f.txt:1", result.stdout)
+        self.assertNotIn("sub/f.txt", result.stdout)
+
+    def test_pretool_commit_worktree_flags_pathspecs_and_prior_script(self):
+        local = self.repo()
+        self.stage(local, "f.txt")
+        _git(local, "commit", "-m", "base")
+        (local / "f.txt").write_text(_fake_token("ghp_", 36))
+        for args in ("-a", "--all", "--include", "-i", "--only", "-o", "-am x", "f.txt",
+                     "-- f.txt", "--pathspec-from-file=paths"):
+            with self.subTest(args=args):
+                self.assertIn("GitHub token", self.decision(
+                    self.claude(f"git commit {args} -m x", cwd=local)))
+        self.assertEqual(self.claude("git commit -m all", cwd=local).stdout, "")
+        self.assertEqual(self.claude("git commit -mall", cwd=local).stdout, "")
+        self.assertIn("GitHub token", self.decision(
+            self.claude("./prepare.sh && git commit -m x", cwd=local)))
+
+    def test_pretool_raw_heredoc_message_and_tokens_without_home_rule(self):
+        self.deny_list()
+        local = self.repo()
+        command = "git commit -m \"$(cat <<'EOF'\n" + self.NAME.upper() + "\nEOF\n)\""
+        result = self.claude(command, cwd=local)
+        self.assertIn("(command)", self.decision(result))
+        self.assertIn("private-names.txt:3", result.stdout)
+        self.masked(result)
+        command = "git commit -m \"$(cat <<'EOF'\n" + _fake_token("ghp_", 36) + "\nEOF\n)\""
+        self.assertIn("GitHub token", self.decision(self.claude(command, cwd=local)))
+        home = "/" + "home" + "/alice/file"
+        self.assertEqual(self.claude("git commit -m '" + home + "'", cwd=local).stdout, "")
+
+    def test_pretool_commit_wrappers_and_directory_tracking(self):
+        import shlex
+        local = self.repo()
+        other = self.repo("clean")
+        self.stage(local, "f.txt", _fake_token("ghp_", 36))
+        q = shlex.quote(str(local))
+        for command in (f"cd {q} && git commit -m x", f"git -C {q} commit -m x",
+                        f"env -C {q} command git commit -m x",
+                        f"env -S 'git -C {q} commit -m x'",
+                        f"bash -c 'cd {q}; git commit -m x'",
+                        f"eval 'cd {q}'; git commit -m x",
+                        f"git --git-dir={q}/.git --work-tree={q} commit -m x",
+                        f"(cd {q}; git commit -m x); git status"):
+            with self.subTest(command=command):
+                self.assertIn("GitHub token", self.decision(self.claude(command, cwd=other)))
+        self.assertEqual(self.claude(f"(cd {q}); git commit -m x", cwd=other).stdout, "")
+
+    def test_non_commit_verbs_and_plain_commands_stay_silent(self):
+        local = self.repo()
+        self.stage(local, "f.txt", _fake_token("ghp_", 36))
+        for command in ("git merge x", "git rebase x", "git cherry-pick x", "git revert x",
+                        "git am x", "git status", "git log", "git diff", "echo commit"):
+            with self.subTest(command=command):
+                result = self.claude(command, cwd=local, env={"PATH": str(self.tmp / "no-git")})
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

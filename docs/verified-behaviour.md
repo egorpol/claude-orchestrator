@@ -34,6 +34,7 @@ Facts tested live, dated, so a reader can tell what may have changed since.
 
 ## 2026-10-13
 
+- **Git pre-commit, git 2.56.0.** A Python hook symlink named `pre-commit` receives `sys.argv[0] = '.git/hooks/pre-commit'` (unresolved), no further args, empty non-tty stdin and the work-tree root as cwd, even from a subdirectory. Git sets `GIT_INDEX_FILE`: normally `.git/index`, a temporary `index.lock` or `next-index-*.lock` for `commit -a` or `commit <path>`; inherited `git diff --cached` shows the exact pending commit. The guard uses that index.
 - **`delegate ask --agent both`** returned one block per agent; both cited the right line (Codex 10 s, Cursor 26 s). On a real decision with a 1.5 KB question, Codex took 20 s and Cursor 279 s.
 - **`delegate cost --session latest`** run from a subfolder finds the session through the nearest parent folder that has a Claude project dir.
 - **A rejected `--link`** (here `.delegate/x`) no longer leaves an orphan worktree and branch behind: `launch` removes both and the run dir, so the name is free again. Seen live before the fix, then probed live after it.
