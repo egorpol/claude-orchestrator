@@ -123,6 +123,7 @@ class TestReport(unittest.TestCase):
                                  "max": summary["context_max"]},
             "cost_units": round(summary["cost_units"]),
             "idle_rebuilds": summary["idle_rebuilds"], "quota_end": None,
+            "usd_list_price": None, "subagent_calls": 0, "prices_as_of": "2026-10-06",
         })
         self.assertEqual(row["api_calls"], 3)
         self.assertEqual(row["cache_read"], 1206000)
@@ -343,6 +344,30 @@ class TestReport(unittest.TestCase):
         expected = cost.summarise_session(cost.parse_assistant_usage(self.transcript), weights, None)
         self.assertEqual(self.usage_row()["cost_units"], round(expected["cost_units"]))
         self.assertIsInstance(self.usage_row()["cost_units"], int)
+
+    def test_list_price_includes_subagents_and_preserves_existing_row_values(self):
+        self.calls[0]["message"]["model"] = "claude-opus-5-5"
+        self.transcript.write_text("".join(json.dumps(call) + "\n" for call in self.calls),
+                                   encoding="utf-8")
+        code, out, err = self.invoke("--dry-run", "--json")
+        self.assertEqual((code, err), (0, ""))
+        before = json.loads(out)["row"]
+        self.assertEqual(before["usd_list_price"], 0.249)
+        agent_dir = self.transcript.with_suffix("") / "subagents"
+        agent_dir.mkdir(parents=True)
+        # A later subagent call must not change the main session date/model/context.
+        agent = assistant("agent", "2026-10-12T12:00:00Z", 10, 1000, 100, 2000, "claude-haiku-5-5")
+        (agent_dir / "agent-a.jsonl").write_text(json.dumps(agent) + "\n" +
+                                                json.dumps(self.calls[0]) + "\n", encoding="utf-8")
+        self.assertEqual(self.invoke()[0], 0)
+        row = self.usage_row()
+        for key, value in before.items():
+            if key not in ("usd_list_price", "subagent_calls"):
+                self.assertEqual(row[key], value, key)
+        self.assertEqual(row["subagent_calls"], 1)
+        self.assertEqual(row["usd_list_price"], 0.2501)  # round only the final 0.2500635 total
+        self.assertEqual(row["prices_as_of"], "2026-10-06")
+        self.assertIsInstance(row["usd_list_price"], float)
 
     def test_cli_registration_and_default_log_env(self):
         env = os.environ.copy()

@@ -4,7 +4,8 @@
     "pools are ids from quota.py: claude-5h, claude-7d, codex-5h, codex-7d, cursor-auto, cursor-premium. cursor-auto is Cursor's whole Auto + 'Cursor Models' (Grok, Composer) pool: openusage plan_auto_percent_used = their spend / $450 (verified 2026-10-10).",
     "prior: hand-set stand-in numbers for models AA does not rate; aa_proxy: true means `aa` is a stand-in model's rating, not the delegate's own.",
     "prefer: list (all tasks) or {task: [delegate ids...]}; preferred delegates that clear min_quota rank first in listed order.",
-    "tasks[].weights apply to intelligence, coding, speed (output tok/s) and price (cheaper scores higher; inside a subscription it approximates how fast a model drains its pool)."
+    "tasks[].weights apply to intelligence, coding, speed (output tok/s) and price (cheaper scores higher; inside a subscription it approximates how fast a model drains its pool).",
+    "orchestrator_cost.list_prices: dated standard/global API list prices in USD per million tokens, used as a subscription accounting unit, not a bill; unsplit cache writes use the 5m rate."
   ],
   "min_quota_pct": 10,
   "orchestrator_pool_penalty": 0.8,
@@ -15,7 +16,34 @@
       "cache_write": 2.0,
       "output": 5.0
     },
-    "usd_per_mtok_input": null
+    "list_prices": {
+      "as_of": "2026-10-06",
+      "source": "claude-api skill table cached 2026-10-06; Opus/Haiku 5.5 cross-checked against LiteLLM on 2026-10-13.",
+      "models": {
+        "claude-opus-5-5": {
+          "input": 4.00,
+          "output": 20.00,
+          "cache_read": 0.20,
+          "cache_write_5m": 5.00,
+          "cache_write_1h": 8.00
+        },
+        "claude-haiku-5-5": {
+          "input": 0.10,
+          "output": 0.50,
+          "cache_read": 0.01,
+          "cache_write_5m": 0.125,
+          "cache_write_1h": 0.20,
+          "above_prompt_tokens": 100000,
+          "above": {
+            "input": 0.50,
+            "output": 2.50,
+            "cache_read": 0.05,
+            "cache_write_5m": 0.625,
+            "cache_write_1h": 1.00
+          }
+        }
+      }
+    }
   },
   "prefer": {
     "implement": ["cursor-auto", "codex-sol"],

@@ -13,7 +13,7 @@ One CLI: `~/.claude/skills/delegate/scripts/delegate` (stdlib Python; full path)
 | `delegate route <task> [--prefer IDs]` | ranks for `review`, `refactor`, `implement`, `research`, `bulk-label`; honours catalog `prefer` and `--prefer` |
 | `delegate ratings [--grep RE] [--refresh]` | AA intelligence / coding / tok/s / $ for catalog (or any AA) models |
 | `delegate ask QUESTION [--files F]… [--agent cursor\|codex\|both]` | cheap read-only one-shot (default Cursor auto); cites `path:line` without filling orchestrator context. `both` asks Codex and Cursor in parallel for second opinions |
-| `delegate cost [--session latest] [--since D] [--repo R]` (D is a local date) | summarises run-log usage (`runs.jsonl`) or the orchestrator session's size and cost |
+| `delegate cost [--session latest] [--since D] [--repo R]` (D is a local date) | summarises run-log usage (`runs.jsonl`) or the orchestrator session's size, cost units and dated list-price USD including subagents |
 | `delegate report [--topic SLUG] [--item TEXT] [--dry-run]` | field-report skeleton for this session (numbers filled in) plus its `token_usage.jsonl` row and delegate runs, in claude-orchestrator's `feedback/`; used by `/field-report` |
 | `delegate launch codex\|cursor --brief F [--verify CMD] ...` | worktree on `delegate/<name>`, brief + contract, background run, log, last message, checks |
 | `delegate review NAME [--agent ...] [--focus TEXT]` | read-only review; by default the *other* vendor |
