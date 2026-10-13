@@ -1,28 +1,32 @@
 # Field results
 
-Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in.
+Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. `mode` is the session's drawn mode in the control-session experiment (hook registered 2026-10-13 10:29); — means the session started before it. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in.
 
-| date | session | calls | context at end | cost units | units per call | idle rebuild share |
-|---|---|---:|---:|---:|---:|---:|
-| 2026-10-09 | 762dc86f (marathon) | 389 | 779k | 26.22M | 67.4k | 19.7% |
-| 2026-10-10 | 55a11d16 | 88 | 158k | 1.91M | 21.7k | 26.1% |
-| 2026-10-10 | 9a59a1f6 | 104 | 334k | 3.80M | 36.5k | 7.4% |
-| 2026-10-10 | fc63a0c8 | 67 | 162k | 1.24M | 18.5k | 0 |
-| 2026-10-10 | e06990b8 | 103 | 251k | 2.52M | 24.4k | 0 |
-| 2026-10-10 | 48800fa0 | 112 | 283k | 3.01M | 26.9k | 0 |
-| 2026-10-10 | 96cb4576 | 116 | 286k | 3.36M | 28.9k | 0 |
-| 2026-10-10 | 4994250f | 141 | 290k | 4.07M | 28.9k | 10.6% |
-| 2026-10-11 | 52e13958 | 66 | 160k | 1.21M | 18.3k | 0 |
-| 2026-10-11 | a79562ac | 65 | 158k | 1.15M | 17.7k | 0 |
-| 2026-10-11 | 7272c8d9 | 71 | 183k | 1.48M | 20.9k | 0 |
-| 2026-10-11 | 9b03e065 | 67 | 192k | 1.78M | 26.6k | 15.9% |
-| 2026-10-11 | 12c68dfa | 129 | 223k | 3.04M | 23.5k | 12.1% |
-| 2026-10-12 | 032191ec | 80 | 175k | 1.50M | 18.8k | 9.0% |
-| 2026-10-12 | 9ce4e364 | 60 | 224k | 1.67M | 27.8k | 0 |
-| 2026-10-13 | 6a4f5d31 | 79 | 193k | 1.67M | 21.1k | 0 |
-| 2026-10-13 | 40ff2d3a | 77 | 185k | 1.60M | 20.8k | 0 |
+| date | session | mode | calls | context at end | cost units | units per call | idle rebuild share |
+|---|---|---|---:|---:|---:|---:|---:|
+| 2026-10-09 | 762dc86f (marathon) | — | 389 | 779k | 26.22M | 67.4k | 19.7% |
+| 2026-10-10 | 55a11d16 | — | 88 | 158k | 1.91M | 21.7k | 26.1% |
+| 2026-10-10 | 9a59a1f6 | — | 104 | 334k | 3.80M | 36.5k | 7.4% |
+| 2026-10-10 | fc63a0c8 | — | 67 | 162k | 1.24M | 18.5k | 0 |
+| 2026-10-10 | e06990b8 | — | 103 | 251k | 2.52M | 24.4k | 0 |
+| 2026-10-10 | 48800fa0 | — | 112 | 283k | 3.01M | 26.9k | 0 |
+| 2026-10-10 | 96cb4576 | — | 116 | 286k | 3.36M | 28.9k | 0 |
+| 2026-10-10 | 4994250f | — | 141 | 290k | 4.07M | 28.9k | 10.6% |
+| 2026-10-11 | 52e13958 | — | 66 | 160k | 1.21M | 18.3k | 0 |
+| 2026-10-11 | a79562ac | — | 65 | 158k | 1.15M | 17.7k | 0 |
+| 2026-10-11 | 7272c8d9 | — | 71 | 183k | 1.48M | 20.9k | 0 |
+| 2026-10-11 | 9b03e065 | — | 67 | 192k | 1.78M | 26.6k | 15.9% |
+| 2026-10-11 | 12c68dfa | — | 129 | 223k | 3.04M | 23.5k | 12.1% |
+| 2026-10-12 | 032191ec | — | 80 | 175k | 1.50M | 18.8k | 9.0% |
+| 2026-10-12 | 9ce4e364 | — | 60 | 224k | 1.67M | 27.8k | 0 |
+| 2026-10-13 | 6a4f5d31 | — | 79 | 193k | 1.67M | 21.1k | 0 |
+| 2026-10-13 | 40ff2d3a | — | 77 | 185k | 1.60M | 20.8k | 0 |
+| 2026-10-13 | 1e5ff45c | — | 56 | 172k | 1.67M | 29.9k | 17.3% |
+| 2026-10-13 | ae30942b | — | 48 | 144k | 0.94M | 19.6k | 0 |
+| 2026-10-13 | 7c19e13a | — | 121 | 261k | 3.30M | 27.3k | 13.7% |
+| 2026-10-13 | 3240a01e | claude-only | 67 | 177k | 1.67M | 24.9k | 17.9% |
 
-17 sessions, 1,814 calls, 61.2M cost units; idle rebuilds 7.2M (11.7%). The 16 sessions after the marathon averaged 24.6k units per call.
+21 sessions, 2,106 calls, 68.8M cost units; idle rebuilds 8.2M (11.9%). The 20 sessions after the marathon averaged 24.8k units per call.
 
 ## 2026-10-10
 
@@ -164,6 +168,26 @@ Started after `/clear` from the project's `HANDOFF.md`; the first report written
 - **`delegate report` worked on its first live use:** skeleton, one `token_usage.jsonl` row, one copied run row, mode 644. The copied row kept the run log's folder name (`camat_v2`) while the session row had `egorpol/camat_v2`; copied rows now take the session row's `repo`.
 - **Context reached 185k within one item.** The guard fired at ~145k mid-item, which is its intended use. The two waits (18 and 8 min) went into handoff and memory updates, so the item stayed resumable. One stray `cd` broke the rule again, without damage.
 - **Not in this repo's scope:** a converter that resolves manifest entries against the cwd instead of the manifest's folder; Verovio's default `xmlIdSeed=0`, which makes conversions differ byte for byte between runs; the bundled MEI 5.1 schema rejecting Verovio's `meiversion="6.0-dev"`.
+
+## 2026-10-13: camat_v2 and Webern Op. 27
+
+Four sessions, each closed with `/field-report`. Numbers from `delegate cost --session <id>`, so they include the calls after each report. 3240a01e is the first session with a drawn mode (`claude-only`: rules and hook on, delegation blocked); the other three started before the session-mode hook was registered. Claude 7d is the share left when the report was written.
+
+| session | work | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---|---:|---:|---:|---:|---|---|
+| 1e5ff45c, camat_v2: namespace bug fixed test-first, an earlier run's fix committed, upstream comment checked | 3 items | none | 56 | 172k | 1.67M | 29.9k | 281 min (17.3%) | 84 |
+| ae30942b, camat_v2: tutorial example source chosen, build spec written | 1 decision | `ask --agent both` | 48 | 144k | 0.94M | 19.6k | none | 82 |
+| 7c19e13a, Webern Op. 27 movement I: placement fixes, then a consistency pass, over three days | 3 items | none | 121 | 261k | 3.30M | 27.3k | 643, 1457, 466 min (13.7%) | 76 |
+| 3240a01e, Webern Op. 27: four proofreading scripts promoted from scratch, tempo marks | 1 item | none (claude-only) | 67 | 177k | 1.67M | 24.9k | 77 min (17.9%) | 73 |
+
+- **A late `/field-report` pays an idle rebuild.** In 1e5ff45c and 3240a01e the report was typed after 281 and 77 min idle at 164–168k context, so it rewrote the whole cache: 17–18% of each session's cost units. The guard lets slash commands through. The rules now say to offer `/field-report` in the picker that closes an item, while the cache is warm.
+- **The idle hold fired live for the first time** (7c19e13a, 464 min idle at 110k). The user resent the prompt, which started a consistency pass that reached 240k before the next prompt, with about 30 image reads. Its two earlier idle resumes, at 77k and 99k, were below the 100k threshold. A sweep request above ~100k now counts as a new item, and renders get downscaled before reading.
+- **Handoffs had grown to 29–31 KB** in the camat_v2 sessions (~8k tokens at every resume, mostly done-item history); one overflowed `cat` and was read twice. The rule now asks for under ~10 KB, with committed items cut to one line, and for commands that run as written: `delegate` was not on PATH in two sessions (2 calls in one, a 6k-token skill load in the other), and a full `pytest -x` stopped at test 188 of 531 on a known failure.
+- **Status requests kept coming:** 7 in two sessions, each after 2–4 silent calls during probe chains, test/fix loops or reads. The rule had been applied to read phases only; it now covers any run of 2+ calls without text.
+- **Second opinions, second use** (ae30942b): both models picked the recommended option again, Codex added a risk the question had missed, and Cursor corrected a fixture count (51 s and 59 s). Both said they could not check web facts; probes afterwards showed that Cursor's ask mode has no web tools and Codex's reads only a cache ([verified behaviour](verified-behaviour.md)).
+- **What worked:** one probe over six real files settled a fix's scope before any design; tests written first surfaced a second symptom; one side-by-side render of 3–4 encodings settled each placement question; promoted scripts were checked against the previous tool's output on the same input; a doc claim ("beamSpan is not drawn") was probed (41 of 41 drawn) and removed instead of copied forward. A before/after render diff needs generated IDs normalised first (now in the rules).
+- **The first control session** (3240a01e, claude-only) did a near-copy job, promoting scratch scripts, which the delegation rule would otherwise hand off. One session says nothing about the comparison; `delegate cost --by-mode` will, once ratings accumulate.
+- **Not adopted:** a hook that lints `echo =` in Bash commands (the zsh rule exists; a check on every Bash call isn't worth it for a one-call error), and letting the user pick a delegate-enabled session for mechanical items, which would break the random assignment.
 
 ## Still open
 

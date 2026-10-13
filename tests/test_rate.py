@@ -29,6 +29,12 @@ def user(text="do the work", ts="2026-10-13T09:00:00Z", **fields):
     return {"type": "user", "message": {"content": text}, "timestamp": ts, **fields}
 
 
+def queued_prompt(text="queued work", ts="2026-10-13T09:30:00Z", kind="human", mode="prompt", **fields):
+    return {"type": "attachment", "timestamp": ts, "isSidechain": False, "attachment": {
+        "type": "queued_command", "prompt": text, "commandMode": mode,
+        "origin": {"kind": kind}, "timestamp": "2026-10-13T08:59:00Z"}, **fields}
+
+
 def item(start=0, **fields):
     return {"start": start, "type": "code", "size": "M", "status": "finished",
             "continuation": False, "note": "Committed and accepted", **fields}
@@ -95,6 +101,48 @@ class RateTests(unittest.TestCase):
                 user("malformed", origin="human"), {"type": "progress", "origin": {}}]
         self.assertEqual([p["text"] for p in rate.typed_prompts(rows)], ["human"])
         self.assertEqual(rate.typed_prompts([user(), {"type": "assistant", "origin": {}}]), [])
+
+    def test_human_queued_prompts_use_delivery_time_in_file_order(self):
+        rows = [user("first"), queued_prompt(kind="task-notification", mode="task-notification"),
+                queued_prompt(kind="peer"), queued_prompt("typed mid-turn"),
+                queued_prompt("sidechain", isSidechain=True), queued_prompt("meta", isMeta=True),
+                user("last", "2026-10-13T10:00:00Z")]
+        self.assertEqual(rate.typed_prompts(rows), [
+            {"text": "first", "timestamp": "2026-10-13T09:00:00Z"},
+            {"text": "typed mid-turn", "timestamp": "2026-10-13T09:30:00Z"},
+            {"text": "last", "timestamp": "2026-10-13T10:00:00Z"},
+        ])
+
+    def test_queued_prompts_require_human_origin_and_prompt_mode(self):
+        for origin in (None, "human", {}, {"kind": "peer"}, {"kind": "task-notification"}):
+            with self.subTest(origin=origin):
+                row = queued_prompt()
+                row["attachment"]["origin"] = origin
+                self.assertEqual(rate.typed_prompts([row]), [])
+        self.assertEqual(rate.typed_prompts([queued_prompt(mode="task-notification")]), [])
+
+    def test_queued_prompts_share_user_text_cleanup_and_truncation(self):
+        text = "<ide_selection>secret\nselection</ide_selection>\n" \
+               "<system-reminder>secret\nreminder</system-reminder>" + "x" * 5000
+        prompt = rate.typed_prompts([queued_prompt(text)])[0]
+        self.assertEqual(prompt, {"text": "x" * (2000 - len(rate.TRUNCATED)) + rate.TRUNCATED,
+                                  "timestamp": "2026-10-13T09:30:00Z"})
+        self.assertEqual(rate.typed_prompts([queued_prompt("<command-name>/clear</command-name>")]), [])
+        self.assertEqual(rate.typed_prompts([queued_prompt("<command-name>/next</command-name>")])[0]["text"],
+                         "[continue from HANDOFF.md; its start-time copy is below]")
+
+    def test_queued_delivery_time_keeps_rating_and_item_boundaries_nondecreasing(self):
+        self.write_rows(self.transcript, [
+            user("first"), assistant("first-call", "2026-10-13T09:01:00Z"),
+            queued_prompt(), assistant("queued-call", "2026-10-13T09:31:00Z"),
+            user("last", "2026-10-13T10:00:00Z"), assistant("last-call", "2026-10-13T10:01:00Z"),
+        ])
+        rating = rate.rating_row(self.record(), "packet", [item(0), item(1), item(2)], "cursor", "auto")
+        self.assertEqual(rating["rubric"], "v1")
+        self.assertEqual(rating["prompt_ts"], ["2026-10-13T09:00:00Z", "2026-10-13T09:30:00Z",
+                                              "2026-10-13T10:00:00Z"])
+        totals = rate.item_costs(rating, self.transcript, cost.DEFAULT_WEIGHTS, None)
+        self.assertEqual([total["calls"] for total in totals], [1, 1, 1])
 
     def test_clear_local_commands_and_command_expansions_are_not_prompts(self):
         rows = [user("<command-message>clear</command-message>\n<command-name>/clear</command-name>"),

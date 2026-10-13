@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from bisect import bisect_left
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ if str(SCRIPTS) not in sys.path:
 
 import cost  # noqa: E402
 import quota  # noqa: E402
+import rate  # noqa: E402
 import runs  # noqa: E402
 
 IDLE_SECONDS = 3600  # back-fill treats a session whose start and transcript are this quiet as over
@@ -199,6 +201,77 @@ def _fmt_tokens(n):
     return f"{n / 1e6:.1f}M" if n >= 1e6 else cost._fmt_k(n)
 
 
+def prompt_contexts(path, calls=None):
+    """Context of the first main call answering each typed prompt, plus guard events."""
+    rows = rate.json_rows(path)
+    prompt_rows = list(rate._typed_prompt_rows(rows))
+    prompts = [prompt for _, prompt in prompt_rows]
+    prompt_indices = {row_index: i for i, (row_index, _) in enumerate(prompt_rows)}
+    calls = cost.parse_session_usage(path) if calls is None else calls
+    main_calls = [c for c in calls if c["source"] == "main"]
+    timed_calls = sorted(((ts, c) for c in main_calls
+                          if (ts := _aware(c.get("timestamp"))) is not None),
+                         key=lambda pair: pair[0])
+    call_times = [ts for ts, _ in timed_calls]
+    prompt_times = [_aware(p["timestamp"]) for p in prompts]
+    entries = []
+    for prompt, ts in zip(prompts, prompt_times):
+        # Legacy untimed prompts remain visible, using the first available call.
+        index = bisect_left(call_times, ts) if ts is not None else 0
+        call = timed_calls[min(index, len(timed_calls) - 1)][1] if timed_calls else \
+            (main_calls[0] if main_calls else None)
+        entries.append({"timestamp": prompt["timestamp"],
+                        "context": sum(call[k] for k in ("input", "cache_read", "cache_creation"))
+                        if call else 0, "guard": None})
+    for row_index, row in enumerate(rows):
+        if row.get("isSidechain"):
+            continue
+        guard = None
+        content = row.get("content")
+        attachment = row.get("attachment")
+        if (row.get("type") == "attachment" and isinstance(attachment, dict)
+                and attachment.get("type") == "hook_system_message"
+                and attachment.get("hookEvent") == "UserPromptSubmit"):
+            content = attachment.get("content")
+            guard = "nudge"
+        elif (row.get("type") == "system" and row.get("subtype") == "informational"
+              and row.get("preventContinuation") and isinstance(content, str)
+              and content.startswith("UserPromptSubmit operation blocked by hook:")):
+            guard = "idle_hold"
+        if not guard or not isinstance(content, str) or "context guard:" not in content:
+            continue
+        # The immediately delivered input may be a notification, not typed input.
+        if guard == "nudge":
+            index = None
+            for previous_index in range(row_index - 1, -1, -1):
+                previous = rows[previous_index]
+                attached = previous.get("attachment")
+                queued = (previous.get("type") == "attachment" and isinstance(attached, dict)
+                          and attached.get("type") == "queued_command")
+                if previous.get("type") == "user" and previous.get("isMeta"):
+                    continue  # a skill or command expansion of the prompt before it
+                if previous.get("type") == "user" or queued:
+                    index = prompt_indices.get(previous_index)
+                    break
+                if previous.get("type") not in ("attachment", "system"):
+                    break
+        else:
+            event_time = _aware(row.get("timestamp"))
+            if event_time is None:
+                continue
+            index = next((i for i, ts in enumerate(prompt_times)
+                          if ts is not None and ts >= event_time), None)
+        if index is not None and entries[index]["guard"] != "idle_hold":
+            entries[index]["guard"] = guard
+    return entries
+
+
+def render_prompt_contexts(prompts):
+    tags = {None: "", "nudge": " (guard)", "idle_hold": " (idle hold)"}
+    contexts = ", ".join(cost._fmt_k(p["context"]) + tags[p["guard"]] for p in prompts)
+    return f"Context at typed prompts: {contexts or 'none'}."
+
+
 def render_skeleton(row, summary, runs):
     total = summary["cost_units"] or 1
     parts = summary["cost_parts"]
@@ -233,6 +306,8 @@ Orchestrator: {row['model'] or 'unknown model'} (session `{row['session'][:8]}`)
 | 1 | <!-- step --> | <!-- outcome --> |
 
 Session up to this log: {row['api_calls']} calls, {_fmt_tokens(row['cache_read'])} cache read, {_fmt_tokens(row['cache_write'])} cache write, {_fmt_tokens(row['output'])} output; context {cost._fmt_k(summary['context_first'])} → {cost._fmt_k(summary['context_last'])}; {cost._fmt_int(row['cost_units'])} cost units ({shares}). Idle rebuilds: {idle}.
+
+{render_prompt_contexts(row['prompts'])}
 
 Quota at the end: {quota_text}.
 
@@ -312,6 +387,7 @@ def cmd_report(a):
             "idle_rebuilds": summary["idle_rebuilds"], "quota_end": quota_end(a.no_quota),
             "usd_list_price": round(summary["usd"], 4) if summary["usd"] is not None else None,
             "subagent_calls": summary["subagent_calls"], "prices_as_of": summary["prices_as_of"],
+            "prompts": prompt_contexts(path, calls),
         }
         usage, action = upsert_usage(_read_bytes(usage_path), row)
         runs = matching_runs(repo_dir, first)

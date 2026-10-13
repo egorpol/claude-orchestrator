@@ -31,6 +31,28 @@ def assistant(mid, timestamp, inp, read, write, output, model="claude-z-sonnet")
     }
 
 
+def typed_prompt(timestamp, text="do the work", **overrides):
+    return {"type": "user", "timestamp": timestamp, "message": {"content": text}, **overrides}
+
+
+def queued_prompt(timestamp, kind="human", mode="prompt"):
+    return {"type": "attachment", "timestamp": timestamp, "isSidechain": False,
+            "attachment": {"type": "queued_command", "prompt": "queued work", "commandMode": mode,
+                           "origin": {"kind": kind}, "timestamp": "2026-10-10T20:58:00Z"}}
+
+
+def guard_event(timestamp, guard, **overrides):
+    if guard == "nudge":
+        row = {"type": "attachment", "attachment": {"type": "hook_system_message",
+               "content": "context guard: ~240k tokens; a new work item is cheaper after a handoff",
+               "hookEvent": "UserPromptSubmit"}}
+    else:
+        row = {"type": "system", "subtype": "informational", "level": "warning",
+               "preventContinuation": True,
+               "content": "UserPromptSubmit operation blocked by hook:\ncontext guard: idle 464 min"}
+    return {**row, "timestamp": timestamp, "isSidechain": False, **overrides}
+
+
 class TestReport(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -51,10 +73,13 @@ class TestReport(unittest.TestCase):
             assistant("m2", "2026-10-10T21:59:00Z", 5, 2000, 50, 30, "claude-a-opus"),
             assistant("m3", "2026-10-10T23:00:00Z", 7, 4000, 3000, 40),
         ]
-        lines = [{"type": "user", "message": {"content": "do the work"}},
+        lines = [typed_prompt("2026-10-10T20:59:00Z"),
                  self.calls[0], self.calls[0],
                  assistant("synthetic", "2026-10-10T21:30:00Z", 999, 999, 999, 999, "<synthetic>"),
-                 self.calls[1], self.calls[2]]
+                 typed_prompt("2026-10-10T21:58:01Z", "continue"),
+                 guard_event("2026-10-10T21:58:01.030Z", "nudge"), self.calls[1],
+                 guard_event("2026-10-10T22:59:00Z", "idle_hold"),
+                 typed_prompt("2026-10-10T22:59:01Z", "go ahead"), self.calls[2]]
         self.transcript.write_text("bad json\n" + "".join(json.dumps(obj) + "\n" for obj in lines), encoding="utf-8")
         self.feedback = self.root / "fb"
         self.log = self.root / "delegate-runs.jsonl"
@@ -124,6 +149,11 @@ class TestReport(unittest.TestCase):
             "cost_units": round(summary["cost_units"]),
             "idle_rebuilds": summary["idle_rebuilds"], "quota_end": None,
             "usd_list_price": None, "subagent_calls": 0, "prices_as_of": "2026-10-06",
+            "prompts": [
+                {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+                {"timestamp": "2026-10-10T21:58:01Z", "context": 2055, "guard": "nudge"},
+                {"timestamp": "2026-10-10T22:59:01Z", "context": 7007, "guard": "idle_hold"},
+            ],
         })
         self.assertEqual(row["api_calls"], 3)
         self.assertEqual(row["cache_read"], 1206000)
@@ -135,6 +165,10 @@ class TestReport(unittest.TestCase):
         self.assertIn("context 1201k → 7.0k", text)
         self.assertIn(f"{cost._fmt_int(row['cost_units'])} cost units", text)
         self.assertIn("Idle rebuilds: 1 (61 min; 3.0k written", text)
+        context_line = "Context at typed prompts: 1201k, 2.1k (guard), 7.0k (idle hold)."
+        self.assertIn(context_line, text)
+        paragraphs = text.split("\n\n")
+        self.assertTrue(paragraphs[paragraphs.index(context_line) - 1].startswith("Session up to this log: "))
         self.assertIn("Quota at the end: not measured.", text)
         self.assertIn("Delegate runs: none.", text)
         total = summary["cost_units"]
@@ -143,6 +177,198 @@ class TestReport(unittest.TestCase):
         self.assertIn(f"{100 * summary['idle_rebuild_units'] / total:.1f}% of cost units", text)
         for heading in ("What worked", "Friction", "Suggestions for claude-orchestrator", "Not in this repo's scope"):
             self.assertIn(f"## {heading}", text)
+
+    def test_no_typed_prompts(self):
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z", isMeta=True),
+            typed_prompt("2026-10-10T20:59:01Z", isSidechain=True),
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": "done"}]}},
+            *self.calls,
+        ])
+        code, _, err = self.invoke()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.usage_row()["prompts"], [])
+        self.assertIn("Context at typed prompts: none.\n",
+                      self.skeleton().read_text(encoding="utf-8"))
+
+    def test_prompt_at_end_uses_last_main_call(self):
+        timestamp = "2026-10-10T23:01:00Z"
+        self.write_log(self.transcript, [*self.calls, typed_prompt(timestamp)])
+        code, out, err = self.invoke("--dry-run", "--json")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out)["row"]["prompts"], [
+            {"timestamp": timestamp, "context": 7007, "guard": None},
+        ])
+
+    def test_sidechain_guard_events_are_ignored(self):
+        self.write_log(self.transcript, [
+            guard_event("2026-10-10T20:58:01Z", "idle_hold", isSidechain=True),
+            typed_prompt("2026-10-10T20:59:00Z"),
+            guard_event("2026-10-10T20:59:00.030Z", "nudge", isSidechain=True), *self.calls,
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+        ])
+
+    def test_idle_hold_between_calls_tags_next_typed_prompt(self):
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+            guard_event("2026-10-10T21:30:00Z", "idle_hold"), self.calls[1],
+            typed_prompt("2026-10-10T22:59:00Z"), self.calls[2],
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+            {"timestamp": "2026-10-10T22:59:00Z", "context": 7007, "guard": "idle_hold"},
+        ])
+
+    def test_nudge_after_prompt_tags_it_instead_of_the_next_prompt(self):
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"),
+            guard_event("2026-10-10T20:59:00.030Z", "nudge"),
+            {**self.calls[0], "timestamp": "2026-10-10T20:59:01Z"},
+            typed_prompt("2026-10-10T21:00:00Z"), self.calls[1],
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": "nudge"},
+            {"timestamp": "2026-10-10T21:00:00Z", "context": 2055, "guard": None},
+        ])
+
+    def test_nudge_after_skill_expansion_tags_the_command_prompt(self):
+        # /field-report: the command row, then its isMeta skill body, then the nudge (3240a01e).
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"),
+            typed_prompt("2026-10-10T20:59:00.001Z", isMeta=True),
+            guard_event("2026-10-10T20:59:00.030Z", "nudge"), *self.calls,
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": "nudge"},
+        ])
+
+    def test_nudge_before_any_typed_prompt_is_dropped(self):
+        self.write_log(self.transcript, [
+            guard_event("2026-10-10T20:58:00Z", "nudge"),
+            typed_prompt("2026-10-10T20:59:00Z"), *self.calls,
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+        ])
+
+    def test_nudge_after_final_prompt_is_retained(self):
+        self.write_log(self.transcript, [
+            *self.calls, typed_prompt("2026-10-10T23:01:00Z"),
+            guard_event("2026-10-10T23:01:00.030Z", "nudge"),
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T23:01:00Z", "context": 7007, "guard": "nudge"},
+        ])
+
+    def test_nudge_after_task_notification_or_peer_queue_is_dropped(self):
+        for kind, mode in (("task-notification", "task-notification"), ("peer", "prompt")):
+            with self.subTest(kind=kind):
+                self.write_log(self.transcript, [
+                    typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+                    queued_prompt("2026-10-10T21:58:00Z", kind, mode),
+                    {"type": "attachment", "attachment": {"type": "skill_listing"}},
+                    {"type": "system", "subtype": "informational", "content": "hook completed"},
+                    guard_event("2026-10-10T21:58:00.030Z", "nudge"), *self.calls[1:],
+                ])
+                self.assertEqual(report.prompt_contexts(self.transcript), [
+                    {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+                ])
+
+    def test_nudge_after_human_queued_prompt_tags_it_at_delivery_time(self):
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+            queued_prompt("2026-10-10T21:58:00Z"),
+            {"type": "attachment", "attachment": {"type": "skill_listing"}},
+            {"type": "system", "subtype": "informational", "content": "hook completed"},
+            guard_event("2026-10-10T21:58:00.030Z", "nudge", parentUuid="unrelated attachment"),
+            *self.calls[1:],
+        ])
+        code, _, err = self.invoke()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.usage_row()["prompts"], [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+            {"timestamp": "2026-10-10T21:58:00Z", "context": 2055, "guard": "nudge"},
+        ])
+        self.assertIn("Context at typed prompts: 1201k, 2.1k (guard).",
+                      self.skeleton().read_text(encoding="utf-8"))
+
+    def test_nudge_after_tool_result_or_peer_user_is_dropped(self):
+        timestamp = "2026-10-10T20:59:00Z"
+        for non_typed in (
+            {"type": "user", "timestamp": timestamp,
+             "message": {"content": [{"type": "tool_result", "content": "done"}]}},
+            typed_prompt(timestamp, "peer message", origin={"kind": "peer"}),
+        ):
+            with self.subTest(non_typed=non_typed):
+                self.write_log(self.transcript, [
+                    typed_prompt(timestamp, origin={"kind": "human"}), non_typed,
+                    guard_event("2026-10-10T20:59:00.030Z", "nudge"), *self.calls,
+                ])
+                self.assertEqual(report.prompt_contexts(self.transcript), [
+                    {"timestamp": timestamp, "context": 1201010, "guard": None},
+                ])
+
+    def test_idle_hold_wins_and_unmatched_idle_holds_are_dropped(self):
+        for first, second in (("idle_hold", "nudge"), ("nudge", "idle_hold")):
+            with self.subTest(first=first):
+                self.write_log(self.transcript, [
+                    typed_prompt("2026-10-10T20:59:00Z"),
+                    guard_event("2026-10-10T20:59:00Z", first),
+                    guard_event("2026-10-10T20:59:00Z", second),
+                    *self.calls,
+                    guard_event("2026-10-10T23:01:00Z", "idle_hold"),
+                ])
+                self.assertEqual(report.prompt_contexts(self.transcript), [
+                    {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": "idle_hold"},
+                ])
+
+    def test_context_guard_text_in_other_shapes_is_ignored(self):
+        wrong_hook = guard_event("2026-10-10T20:59:00.030Z", "nudge")
+        wrong_hook["attachment"]["hookEvent"] = "PostToolUse"
+        self.write_log(self.transcript, [
+            guard_event("2026-10-10T20:58:01Z", "idle_hold", preventContinuation=False),
+            guard_event("2026-10-10T20:58:02Z", "idle_hold", subtype="other"),
+            {"type": "system", "subtype": "informational", "preventContinuation": True,
+             "content": "context guard: quoted text", "timestamp": "2026-10-10T20:58:03Z"},
+            typed_prompt("2026-10-10T20:59:00Z", "Explain context guard:"), wrong_hook, *self.calls,
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript)[0]["guard"], None)
+
+    def test_context_uses_chronological_main_calls_and_equal_timestamp(self):
+        before_ts = "2026-10-10T21:57:00Z"
+        prompt_ts = "2026-10-10T23:59:00+02:00"  # exactly the second main call
+        self.write_log(self.transcript, [typed_prompt(before_ts), typed_prompt(prompt_ts),
+                                         self.calls[2], self.calls[0], self.calls[1]])
+        agent_dir = self.transcript.with_suffix("") / "subagents"
+        agent_dir.mkdir(parents=True)
+        self.write_log(agent_dir / "agent-a.jsonl", [
+            guard_event(prompt_ts, "idle_hold"), typed_prompt(prompt_ts),
+            assistant("agent", "2026-10-10T21:58:00Z", 100, 200, 300, 400),
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": before_ts, "context": 2055, "guard": None},
+            {"timestamp": prompt_ts, "context": 2055, "guard": None},
+        ])
+
+    def test_prompt_extraction_uses_raters_origin_rule(self):
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:58:00Z"),
+            typed_prompt("2026-10-10T20:58:01Z", origin={"kind": "automation"}),
+            typed_prompt("2026-10-10T20:59:00Z", origin={"kind": "human"}), *self.calls,
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+        ])
+
+    def test_untimed_prompt_keeps_legacy_report_working(self):
+        self.write_log(self.transcript, [typed_prompt(None), *self.calls])
+        code, out, err = self.invoke("--dry-run", "--json")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out)["row"]["prompts"], [
+            {"timestamp": None, "context": 1201010, "guard": None},
+        ])
 
     def test_upsert_replaces_row_logged_with_short_session_prefix(self):
         sid = "55a11d16-0000-4000-8000-000000000000"
