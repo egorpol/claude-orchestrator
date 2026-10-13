@@ -51,7 +51,7 @@ cd claude-orchestrator
 ./install.sh --timer        # optional: systemd user timer logging pool readings every 10 min while Claude Code is active
 ```
 
-`--experiment` is for measuring whether delegation pays off. Each new session draws `orchestrator` (50%), `claude-only` or `vanilla` (25% each; delegation blocked), gets that mode's rules from the hook and logs one summary row to `~/.cache/claude-delegate/sessions.jsonl` (local only). The hook replaces the `--rules` import, so `--experiment` removes it. Weights go in `~/.config/claude-orchestrator/session-mode.json`; to stop, delete the `session-mode.py` entries from `~/.claude/settings.json` and run `--rules` again.
+`--experiment` is for measuring whether delegation pays off. Each new session draws `orchestrator` (50%), `claude-only` or `vanilla` (25% each; delegation blocked), gets that mode's rules from the hook and logs one summary row to `~/.cache/claude-delegate/sessions.jsonl` (local only). The hook replaces the `--rules` import, so `--experiment` removes it. `delegate rate` has Cursor Auto split each finished session into items from your prompts, HANDOFF.md and commits, without seeing the mode, and `delegate cost --by-mode` compares the arms: cost per finished item, by size and type. Weights go in `~/.config/claude-orchestrator/session-mode.json`; to stop, delete the `session-mode.py` entries from `~/.claude/settings.json` and run `--rules` again.
 
 `install.sh` is idempotent. It never deletes an existing skill directory or command file: with `--force`, the old one moves to `~/.claude/skill-backups/`. Use `--copy` where a symlink into the repo is not wanted. A copied install doesn't know where the checkout is, so `/field-report` then needs `CLAUDE_ORCHESTRATOR_FEEDBACK` set to a folder.
 

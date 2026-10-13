@@ -135,14 +135,25 @@ def _common_git_dir(git):
         return None
 
 
-def repo_info(cwd):
-    """Find the nearest git root; a linked worktree takes its main repo's origin."""
+def repo_root(cwd):
+    """The nearest git root, including linked worktrees, without invoking git."""
     try:
         directory = Path(cwd).resolve()
         for root in (directory, *directory.parents):
             git = root / ".git"
-            if not (git.is_dir() or git.is_file()):
-                continue
+            if git.is_dir() or git.is_file():
+                return root
+    except (OSError, TypeError, ValueError):
+        pass
+    return None
+
+
+def repo_info(cwd):
+    """Find the nearest git root; a linked worktree takes its main repo's origin."""
+    try:
+        root = repo_root(cwd)
+        if root is not None:
+            git = root / ".git"
             repo = None
             # Worktrees of an excluded repo must stay excluded, so read the main repo's config.
             common = git if git.is_dir() else _common_git_dir(git)
@@ -161,6 +172,34 @@ def repo_info(cwd):
     except (OSError, TypeError, ValueError):
         pass
     return None, None
+
+
+def snapshot_handoff(cwd, path, session):
+    """Best-effort, bounded start-time copy; never let measurement break a session."""
+    try:
+        if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session):
+            return None
+        directory = Path(cwd).resolve()
+        root = repo_root(cwd)
+        source = (root or directory) / "HANDOFF.md"
+        if not source.is_file():
+            source = directory / "HANDOFF.md"
+        if not source.is_file():
+            return None
+        with source.open("rb") as stream:
+            data = stream.read(64 * 1024)
+        target = path.parent / "handoffs" / (session + ".md")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # Duplicate starts must not overwrite the first start-time evidence.
+            with target.open("xb") as stream:
+                stream.write(data)
+        except FileExistsError:
+            if not target.is_file():
+                return None
+        return str(target)
+    except Exception:
+        return None
 
 
 def latest_start(path, session):
@@ -467,10 +506,14 @@ def start_session(data, path, config, previous):
     else:
         mode, u = draw_mode(random.Random(_env_int("CLAUDE_SESSION_MODE_SEED", None)), config["weights"])
     session = data["session_id"]
+    handoff = (snapshot_handoff(data.get("cwd"), path, session)
+               if source in ("startup", "clear") else (previous or {}).get("handoff"))
     append_row(path, "start", session, source=source, mode=mode,
+               weights=config["weights"],
                u=round(u, 6) if u is not None else None, forced=forced, excluded=excluded,
                inherited=inherited, unassigned=unassigned, cwd=data.get("cwd"), repo=repo,
-               repo_dir=repo_dir, model=data.get("model"), transcript=data.get("transcript_path"))
+               repo_dir=repo_dir, model=data.get("model"), transcript=data.get("transcript_path"),
+               handoff=handoff)
     specific = {"hookEventName": "SessionStart"}
     context = session_context(mode)
     if context is not None:

@@ -102,6 +102,8 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("conflicts: none", packet)
         self.assertIn("risks: none", packet)
         meta = runs.load_meta(root)
+        self.assertIn("session", meta)
+        self.assertIsNone(meta["session"])
         self.assertEqual([r["n"] for r in meta["history"]], [1])
         self.assertEqual(meta["history"][0]["usage"], expected)
         self.assertEqual(meta["history"][0]["verify"], 0)
@@ -184,6 +186,8 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         record = records[0]
         self.assertEqual(record["v"], 1)
+        self.assertIn("session", record)
+        self.assertIsNone(record["session"])
         self.assertEqual(record["outcome"], "applied")
         self.assertEqual(record["mode"], "workspace-write" if agent == "codex" else "sandbox")
         self.assertEqual((record["files"], record["insertions"], record["deletions"]), (2, 4, 0))
@@ -211,6 +215,24 @@ class LifecycleTests(unittest.TestCase):
 
     def test_cursor_lifecycle(self):
         self.lifecycle("cursor")
+
+    def test_launch_session_provenance_survives_followup_from_another_session(self):
+        self.launch(extra_env={"CLAUDE_CODE_SESSION_ID": "launch-session"})
+        self.assertEqual(runs.load_meta(self.root("test"))["session"], "launch-session")
+        self.cli("followup", "test", "--brief", self.follow_brief,
+                 extra_env={"CLAUDE_CODE_SESSION_ID": "later-session"})
+        self.cli("apply", "test", extra_env={"CLAUDE_CODE_SESSION_ID": "apply-session"})
+        record = json.loads((self.storage / "runs.jsonl").read_text())
+        self.assertEqual(record["session"], "launch-session")
+
+    def test_old_launch_meta_without_session_logs_null(self):
+        self.launch()
+        root = self.root("test")
+        meta = runs.load_meta(root)
+        del meta["session"]
+        runs.save_meta(root, meta)
+        self.cli("apply", "test", extra_env={"CLAUDE_CODE_SESSION_ID": "apply-session"})
+        self.assertIsNone(json.loads((self.storage / "runs.jsonl").read_text())["session"])
 
     def test_discard_safety_and_purge_accounting(self):
         self.launch()

@@ -134,18 +134,106 @@ class SessionModeTests(unittest.TestCase):
         self.assertEqual([row["u"] for row in rows], [0.622902, 0.622902])
         self.assertEqual(set(rows[0]), {"event", "session", "ts", "source", "mode", "u", "forced",
                                        "excluded", "inherited", "unassigned", "cwd", "repo", "repo_dir",
-                                       "model", "transcript"})
+                                       "model", "transcript", "weights", "handoff"})
+        self.assertEqual(rows[0]["weights"], SESSION_MODE.DEFAULT_WEIGHTS)
         self.assertEqual(rows[0]["session"], "first")
         self.assertEqual(rows[0]["cwd"], str(self.repo))
         self.assertEqual(rows[0]["repo_dir"], "project")
         self.assertIsNone(rows[0]["repo"])
         self.assertEqual(rows[0]["model"], "claude-opus-5-5")
         self.assertEqual(rows[0]["transcript"], str(self.transcript))
+        self.assertIsNone(rows[0]["handoff"])
         timestamp = datetime.fromisoformat(rows[0]["ts"])
         self.assertIsNotNone(timestamp.utcoffset())
         self.assertEqual(timestamp.microsecond, 0)
         for flag in ("forced", "excluded", "inherited", "unassigned"):
             self.assertIs(rows[0][flag], False)
+
+    def test_handoff_snapshot_on_startup_and_clear_from_git_root(self):
+        nested = self.repo / "src/nested"
+        nested.mkdir(parents=True)
+        handoff = self.repo / "HANDOFF.md"
+        handoff.write_text("continue the root item\n", encoding="utf-8")
+        (nested / "HANDOFF.md").write_text("wrong nested handoff", encoding="utf-8")
+        for source in ("startup", "clear"):
+            self.start(source=source, session=source, cwd=str(nested))
+            row = self.rows()[-1]
+            target = self.log.parent / "handoffs" / (source + ".md")
+            self.assertEqual(row["handoff"], str(target))
+            self.assertEqual(target.read_bytes(), b"continue the root item\n")
+        handoff.write_text("rewritten later", encoding="utf-8")
+        self.assertEqual(target.read_bytes(), b"continue the root item\n")
+
+    def test_handoff_fallback_to_cwd_without_repo_or_root_handoff(self):
+        outside = self.tmp / "outside"
+        nested = self.repo / "nested"
+        for directory in (outside, nested):
+            directory.mkdir()
+            (directory / "HANDOFF.md").write_text("local item", encoding="utf-8")
+        # In process: TMPDIR may sit inside a checkout with its own HANDOFF.md at the root,
+        # so "outside any repo" is simulated by a repo_root that finds none.
+        with mock.patch.object(SESSION_MODE, "repo_root", return_value=None):
+            copy = SESSION_MODE.snapshot_handoff(str(outside), self.log, "fallback0")
+        self.assertEqual(Path(copy).read_text(), "local item")
+        self.start(session="fallback1", cwd=str(nested))
+        self.assertEqual(Path(self.rows()[-1]["handoff"]).read_text(), "local item")
+
+    def test_handoff_absent_does_not_make_snapshot_directory(self):
+        self.start()
+        self.assertIsNone(self.rows()[-1]["handoff"])
+        self.assertFalse((self.log.parent / "handoffs").exists())
+
+    def test_handoff_resume_and_compact_inherit_without_copying(self):
+        handoff = self.repo / "HANDOFF.md"
+        handoff.write_text("initial item", encoding="utf-8")
+        self.start()
+        target = Path(self.rows()[-1]["handoff"])
+        handoff.write_text("different item", encoding="utf-8")
+        for source in ("resume", "compact"):
+            self.start(source=source)
+            self.assertEqual(self.rows()[-1]["handoff"], str(target))
+            self.assertEqual(target.read_text(), "initial item")
+            self.start(source=source, session=source)
+            self.assertIsNone(self.rows()[-1]["handoff"])
+        self.assertEqual(list(target.parent.iterdir()), [target])
+
+    def test_handoff_snapshot_is_capped_at_64_kib(self):
+        data = b"x" * (64 * 1024) + b"not copied"
+        (self.repo / "HANDOFF.md").write_bytes(data)
+        self.start()
+        self.assertEqual(Path(self.rows()[-1]["handoff"]).read_bytes(), data[:64 * 1024])
+
+    def test_duplicate_start_does_not_overwrite_initial_handoff(self):
+        handoff = self.repo / "HANDOFF.md"
+        handoff.write_text("initial item", encoding="utf-8")
+        self.start()
+        target = Path(self.rows()[0]["handoff"])
+        handoff.write_text("changed after starting", encoding="utf-8")
+        self.start()
+        self.assertEqual(target.read_text(), "initial item")
+        self.assertEqual(self.rows()[-1]["handoff"], str(target))
+
+    def test_handoff_errors_are_silent_and_do_not_abort_start(self):
+        (self.repo / "HANDOFF.md").write_text("item", encoding="utf-8")
+        self.log.parent.mkdir()
+        (self.log.parent / "handoffs").write_text("not a directory", encoding="utf-8")
+        self.assertIsNotNone(self.start())
+        self.assertIsNone(self.rows()[-1]["handoff"])
+        # Even an unexpected error in the optional copy must stay silent.
+        with mock.patch.object(Path, "open", side_effect=RuntimeError("disk failure")) as opened:
+            self.assertIsNone(SESSION_MODE.snapshot_handoff(str(self.repo), self.log, "bad"))
+        opened.assert_called_once_with("rb")
+        for session in ("../escape", "/absolute", ""):
+            self.assertIsNone(SESSION_MODE.snapshot_handoff(str(self.repo), self.log, session))
+
+    def test_handoff_snapshot_in_linked_worktree_uses_worktree_root(self):
+        worktree = self.tmp / "linked"
+        worktree.mkdir()
+        (worktree / ".git").write_text("gitdir: ../project/.git/worktrees/linked\n", encoding="utf-8")
+        (worktree / "HANDOFF.md").write_text("worktree item", encoding="utf-8")
+        (self.repo / "HANDOFF.md").write_text("main item", encoding="utf-8")
+        self.start(cwd=str(worktree))
+        self.assertEqual(Path(self.rows()[-1]["handoff"]).read_text(), "worktree item")
 
     def test_distribution_over_4000_seeds(self):
         counts = Counter(SESSION_MODE.draw_mode(random.Random(seed))[0] for seed in range(4000))
@@ -161,6 +249,8 @@ class SessionModeTests(unittest.TestCase):
         self.env["CLAUDE_SESSION_MODE_SEED"] = "5"
         self.assertIn("claude-only", self.start()["systemMessage"])
         self.assertEqual(self.rows()[0]["u"], 0.622902)
+        self.assertEqual(self.rows()[0]["weights"],
+                         {"orchestrator": 0.0, "claude-only": 0.75, "vanilla": 0.25})
         self.assertEqual(SESSION_MODE.draw_mode(mock.Mock(random=lambda: 0), weights)[0], "claude-only")
         self.assertEqual(SESSION_MODE.draw_mode(mock.Mock(random=lambda: 0.5))[0], "claude-only")
         self.assertEqual(SESSION_MODE.draw_mode(mock.Mock(random=lambda: 0.75))[0], "vanilla")
@@ -187,6 +277,20 @@ class SessionModeTests(unittest.TestCase):
         self.assertEqual(config["exclude"], [])
         self.assertEqual(config["reroll_calls"], 0)
         self.assertIs(config["quota_snapshot"], False)
+
+    def test_every_start_records_current_normalised_weights(self):
+        self.write_config(weights={"orchestrator": 1}, exclude=["project"])
+        self.start(session="excluded")
+        self.start("vanilla", session="forced")
+        self.start(source="resume", session="unassigned")
+        self.start(source="compact", session="excluded")
+        weights = {"orchestrator": 1.0, "claude-only": 0.0, "vanilla": 0.0}
+        self.assertTrue(all(row["weights"] == weights for row in self.rows()))
+        self.write_config(weights={"vanilla": 1})
+        self.start(source="resume", session="forced")
+        self.assertEqual(self.rows()[-1]["weights"],
+                         {"orchestrator": 0.0, "claude-only": 0.0, "vanilla": 1.0})
+        self.assertEqual(self.rows()[-1]["mode"], "vanilla")
 
     def test_missing_broken_and_unreadable_config_use_defaults(self):
         self.env["CLAUDE_SESSION_MODE_SEED"] = "5"
