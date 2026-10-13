@@ -222,9 +222,9 @@ def _fetch_snapshot(source, timeout):
         raise
 
 
-def snapshot(reason=None, session=None, run=None, if_active=False, log=None,
-             source="direct", timeout=90):
-    """Append one durable quota reading, serializing the gate and provider poll."""
+def record(reason=None, session=None, run=None, if_active=False, log=None,
+           source="direct", timeout=90):
+    """Append one durable quota reading; return (row, None), or (None, why) when gated off."""
     cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     path = Path(log or os.environ.get("CLAUDE_DELEGATE_QUOTA_LOG")
                 or cache / "claude-delegate/quota.jsonl").expanduser()
@@ -235,8 +235,7 @@ def snapshot(reason=None, session=None, run=None, if_active=False, log=None,
         if if_active:
             reason, gate, skip = _activity_gate(path, datetime.now(timezone.utc))
             if skip:
-                print("skip: " + skip)
-                return 0
+                return None, skip
         ts = datetime.now(timezone.utc).replace(microsecond=0)
         row = {"ts": ts.isoformat(), "source": source, "reason": reason,
                "session": session if isinstance(session, str)
@@ -257,8 +256,18 @@ def snapshot(reason=None, session=None, run=None, if_active=False, log=None,
             stream.write((line + "\n").encode("utf-8"))
             stream.flush()
             os.fsync(stream.fileno())
-        print(line)
-        return 1 if "error" in row else 0
+        return row, None
+
+
+def snapshot(reason=None, session=None, run=None, if_active=False, log=None,
+             source="direct", timeout=90):
+    """`delegate quota --snapshot`: record a reading, print it; exit status 1 on a fetch error."""
+    row, skip = record(reason, session, run, if_active, log, source, timeout)
+    if skip:
+        print("skip: " + skip)
+        return 0
+    print(json.dumps(row))
+    return 1 if "error" in row else 0
 
 
 def human_delta(dt, now):

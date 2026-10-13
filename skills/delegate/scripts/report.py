@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Collect exact session numbers and write a field-report skeleton."""
+"""Collect exact session numbers and write a field-report skeleton, or a session summary row."""
 import argparse
+import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
-from datetime import timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -17,6 +19,10 @@ if str(SCRIPTS) not in sys.path:
 
 import cost  # noqa: E402
 import quota  # noqa: E402
+import runs  # noqa: E402
+
+IDLE_SECONDS = 3600  # back-fill treats a session whose start and transcript are this quiet as over
+END_GRACE_SECONDS = 600  # SessionEnd's own summary (quota reading first) may still be running
 
 
 def _fail(message, code=1):
@@ -266,6 +272,13 @@ def _atomic_write(path, data):
 
 
 def cmd_report(a):
+    if (a.backfill or a.exclude or a.transcript or a.log or a.trigger) and not a.auto:
+        _fail("--backfill, --exclude, --transcript, --log and --trigger need --auto", 2)
+    if a.auto:
+        try:
+            return cmd_auto(a)
+        except OSError as exc:
+            _fail(str(exc))
     try:
         directory = feedback_dir(a.feedback_dir)
         path = cost.resolve_session(a.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or "latest")
@@ -330,6 +343,226 @@ def cmd_report(a):
         _fail(str(exc))
 
 
+# Session summaries for the session-mode experiment (hooks/session-mode.py). The log is
+# append-only and each summary covers the whole transcript, so the last one per session wins.
+
+@contextmanager
+def _locked(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with Path(str(path) + ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def _log_rows(path):
+    return [obj for _, obj in _json_rows(_read_bytes(path))
+            if obj and isinstance(obj.get("session"), str)]
+
+
+def _append_log(path, rows):
+    data = b"".join((json.dumps(row, ensure_ascii=True) + "\n").encode("utf-8") for row in rows)
+    with path.open("ab", buffering=0) as stream:
+        stream.write(data)
+
+
+def _aware(value):
+    ts = cost._parse_ts(value) if isinstance(value, str) else None
+    return ts if ts is None or ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def find_transcript(session, hint=None):
+    if hint and Path(hint).is_file():
+        return Path(hint).resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session):
+        return None
+    matches = sorted((cost._claude_config_dir() / "projects").glob(f"*/{session}.jsonl"))
+    return matches[0] if matches else None
+
+
+def transcript_activity(transcript):
+    """Newest write to the transcript or its subagent files, which the summary also counts."""
+    if transcript is None:
+        return None
+    newest = None
+    for path in (transcript, *Path(transcript).with_suffix("").glob("subagents/agent-*.jsonl")):
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            continue
+        newest = stamp if newest is None else max(newest, stamp)
+    return datetime.fromtimestamp(newest, timezone.utc) if newest is not None else None
+
+
+def session_quota(path, session):
+    """The session's first session-start and last session-end quota.jsonl readings."""
+    start = end = None
+    for _, row in _json_rows(_read_bytes(path)):
+        if not row or row.get("session") != session or not isinstance(row.get("pools"), dict):
+            continue
+        if row.get("reason") == "session-start" and start is None:
+            start = row
+        elif row.get("reason") == "session-end":
+            end = row
+    return start, end
+
+
+def _window(value):
+    """Reset time rounded to the nearest minute: Claude's moves by fractions of a second between polls."""
+    ts = _aware(value)
+    return (ts.astimezone(timezone.utc) + timedelta(seconds=30)).replace(second=0, microsecond=0) \
+        if ts else None
+
+
+def quota_change(start, end):
+    """used_pct at both ends; delta only for fresh readings in the same reset window."""
+    if start is None and end is None:
+        return None
+
+    def reading(row, pool):
+        entry = ((row or {}).get("pools") or {}).get(pool)
+        good = (isinstance(entry, dict) and isinstance(entry.get("used_pct"), (int, float))
+                and not entry.get("stale") and not entry.get("stale_reset"))
+        return entry if good else None
+
+    pools = {}
+    for pool in sorted(set((start or {}).get("pools") or {}) | set((end or {}).get("pools") or {})):
+        first, last = reading(start, pool), reading(end, pool)
+        same = first and last and _window(first.get("resets_at")) is not None \
+            and _window(first.get("resets_at")) == _window(last.get("resets_at"))
+        pools[pool] = {"start": first["used_pct"] if first else None,
+                       "end": last["used_pct"] if last else None,
+                       "delta": round(last["used_pct"] - first["used_pct"], 4) if same else None}
+    return {"start": (start or {}).get("ts"), "end": (end or {}).get("ts"), "pools": pools}
+
+
+def summary_row(session, rows, transcript, trigger, weights, prices, quota_start=None, quota_end=None):
+    """One row per session: cost incl. subagents, assignment, end, blocks, delegations, quota."""
+    mine = [(i, row) for i, row in enumerate(rows) if row.get("session") == session]
+    starts = [row for _, row in mine if row.get("event") == "start"]
+    start = starts[-1] if starts else {}
+    # The latest end wherever it is: a resume can log its start while this summary runs.
+    ends = [row for _, row in mine if row.get("event") == "end"]
+    end = ends[-1] if ends else {}
+    delegated = {}
+    for _, row in mine:
+        if row.get("event") == "delegate" and isinstance(row.get("command"), str):
+            delegated[row["command"]] = delegated.get(row["command"], 0) + 1
+    activity = transcript_activity(transcript)  # before parsing: later writes make it due again
+    calls = cost.parse_session_usage(transcript) if transcript else []
+    summary = cost.summarise_session(calls, weights, prices)
+    main_calls = [c for c in calls if c["source"] == "main"]
+    times = sorted(t for t in (_aware(c.get("timestamp")) for c in main_calls) if t)
+    units = sum(c["input"] * weights.get("input", 1) + c["cache_read"] * weights.get("cache_read", 0.1)
+                + c["cache_creation"] * weights.get("cache_write", 2.0)
+                + c["output"] * weights.get("output", 5.0) for c in calls)
+    usd = summary["usd"]
+    return {
+        "event": "summary", "session": session,
+        "ts": datetime.now().astimezone().isoformat(timespec="seconds"), "trigger": trigger,
+        "mode": start.get("mode"), "end_reason": end.get("reason"), "reroll": end.get("reroll"),
+        "repo": start.get("repo"), "repo_dir": start.get("repo_dir"),
+        "transcript": str(transcript) if transcript else None,
+        "activity": activity.isoformat() if activity else None,
+        "model": main_calls[0]["model"] if main_calls else None,
+        "first_call": times[0].isoformat() if times else None,
+        "last_call": times[-1].isoformat() if times else None,
+        "calls": summary["calls"], "subagent_calls": summary["subagent_calls"],
+        "tokens": {k: sum(c[k] for c in calls) for k in cost.TOKEN_CLASSES},
+        "context_max": summary["context_max"],
+        "cost_units": round(units), "cost_units_main": round(summary["cost_units"]),
+        "usd_list_price": round(usd, 6) if usd is not None else None,
+        "usd_subagents": round(summary["usd_subagents"], 6),
+        "usd_unpriced_calls": sum(g["calls"] for g in summary["usd_unpriced"]),
+        "prices_as_of": summary["prices_as_of"],
+        "by_model": [{**g, "usd": round(g["usd"], 6) if g["usd"] is not None else None}
+                     for g in summary["by_model"]],
+        "blocked": sum(row.get("event") == "blocked" for _, row in mine),
+        "delegate": delegated,
+        "quota": quota_change(quota_start, quota_end),
+    }
+
+
+def due_for_backfill(rows, exclude=None, now=None):
+    """Logged sessions with transcript writes no summary has seen, quiet for an hour.
+
+    VS Code once started a new process on /clear without SessionEnd for the old
+    session (docs/verified-behaviour.md), so a missing end row is expected. Each
+    summary records the newest write it saw (`activity`), so a session that goes on
+    after a back-fill, or a transcript that appears late, becomes due again.
+    """
+    now = now or datetime.now(timezone.utc)
+    state = {}
+    for i, row in enumerate(rows):
+        entry = state.setdefault(row["session"], {})
+        if row.get("event") == "start":
+            entry["start_ts"] = _aware(row.get("ts"))
+            entry["transcript"] = row.get("transcript") or entry.get("transcript")
+        elif row.get("event") == "end":
+            entry.update(end=i, end_ts=_aware(row.get("ts")))
+        elif row.get("event") == "summary":
+            entry.update(summary=i, seen=_aware(row.get("activity")))
+    due = []
+    for session, entry in state.items():
+        if "start_ts" not in entry or session == exclude:
+            continue
+        if entry["start_ts"] is None or (now - entry["start_ts"]).total_seconds() < IDLE_SECONDS:
+            continue
+        transcript = find_transcript(session, entry.get("transcript"))
+        activity = transcript_activity(transcript)
+        if "summary" in entry and (activity is None or (entry["seen"] is not None and activity <= entry["seen"])):
+            continue  # nothing written since the last summary saw the files
+        if activity is not None and (now - activity).total_seconds() < IDLE_SECONDS:
+            continue  # still being written, e.g. an older tab next to the new one
+        if (entry.get("end", -1) > entry.get("summary", -1) and entry["end_ts"] is not None
+                and (now - entry["end_ts"]).total_seconds() < END_GRACE_SECONDS):
+            continue  # SessionEnd's own summary may still be running
+        due.append((session, transcript))
+    return due
+
+
+def cmd_auto(a):
+    log = runs.session_log_path(a.log)
+    quota_log = log.parent / "quota.jsonl"
+    weights, prices = cost.load_catalog_cost()
+    if a.backfill:
+        with _locked(log):
+            rows = _log_rows(log)
+            written = [summary_row(session, rows, transcript, "backfill", weights, prices,
+                                   *session_quota(quota_log, session))
+                       for session, transcript in due_for_backfill(rows, a.exclude)]
+            if written and not a.dry_run:
+                _append_log(log, written)
+        for row in written:
+            print(json.dumps(row, ensure_ascii=False) if a.json or a.dry_run
+                  else f"{row['session']}: {row['calls']} calls, backfilled")
+        if not written and not a.json:
+            print("backfill: nothing due")
+        return
+    session, transcript = a.session or os.environ.get("CLAUDE_CODE_SESSION_ID"), a.transcript
+    if not session:
+        _fail("--auto needs --session or CLAUDE_CODE_SESSION_ID", 2)
+    if Path(session).is_file():
+        transcript, session = session, session_id(Path(session))
+    end = None
+    if not (a.no_quota or a.dry_run):
+        try:  # take the reading first, as close to the session's end as possible
+            end, _ = quota.record("session-end" if a.trigger == "end" else "manual",
+                                  session=session, log=quota_log)
+        except OSError:
+            end = None
+    with _locked(log):
+        rows = _log_rows(log)
+        if transcript is None:
+            hints = [r.get("transcript") for r in rows if r.get("session") == session and r.get("event") == "start"]
+            transcript = hints[-1] if hints else None
+        start, logged_end = session_quota(quota_log, session)
+        row = summary_row(session, rows, find_transcript(session, transcript), a.trigger or "manual", weights,
+                          prices, start, end if end is not None else logged_end)
+        if not a.dry_run:
+            _append_log(log, [row])
+    print(json.dumps(row, ensure_ascii=False))
+
+
 def _add_args(p):
     p.add_argument("--session", metavar="ID|latest|PATH", help="default: CLAUDE_CODE_SESSION_ID or latest")
     p.add_argument("--repo", help="report repo name (default: GitHub owner/name or directory name)")
@@ -340,6 +573,17 @@ def _add_args(p):
     p.add_argument("--force", action="store_true", help="replace an existing skeleton")
     p.add_argument("--dry-run", action="store_true", help="print the row, run count and skeleton path; write nothing")
     p.add_argument("--json", action="store_true")
+    auto = p.add_argument_group("session summary (session-mode experiment)")
+    auto.add_argument("--auto", action="store_true",
+                      help="append a summary row for the session to the session log; no skeleton")
+    auto.add_argument("--backfill", action="store_true",
+                      help="summarise logged sessions that look over but have no summary")
+    auto.add_argument("--exclude", metavar="ID", help="session to skip when back-filling (the new one)")
+    auto.add_argument("--transcript", metavar="PATH", help="session transcript (default: from the log)")
+    auto.add_argument("--log", metavar="PATH",
+                      help="session log (default: CLAUDE_SESSION_LOG or ~/.cache/claude-delegate/sessions.jsonl)")
+    auto.add_argument("--trigger", choices=["end", "manual"],
+                      help="end: written by the SessionEnd hook (default manual)")
     p.set_defaults(fn=cmd_report)
 
 

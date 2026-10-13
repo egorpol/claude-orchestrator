@@ -5,13 +5,16 @@ SessionStart draws once, injects that mode's rules, and records the assignment.
 Resume/compact recover it from the JSONL log, so intent-to-treat accounting keeps
 the original mode even after compaction. PreToolUse blocks new Codex/Cursor work
 in controls; SessionEnd records distinct main-thread calls and possible rerolls.
-Log/config/rules errors stay silent, and quota.jsonl snapshots run detached: a broken
-measurement hook must never get in the way of a session.
+Log/config/rules errors stay silent, and quota.jsonl snapshots and session summaries
+run detached: a broken measurement hook must never get in the way of a session.
+SessionEnd starts `delegate report --auto` (quota reading, then a summary row);
+SessionStart back-fills summaries for sessions that ended without SessionEnd.
 
 Env: CLAUDE_SESSION_LOG (XDG_CACHE_HOME/claude-delegate/sessions.jsonl),
 CLAUDE_SESSION_MODE_CONFIG (XDG_CONFIG_HOME/claude-orchestrator/session-mode.json),
 CLAUDE_SESSION_MODE (force a new assignment), CLAUDE_SESSION_MODE_SEED (integer),
-CLAUDE_SESSION_QUOTA=0 (disable snapshots), CLAUDE_SESSION_RULES_DIR (repo/rules).
+CLAUDE_SESSION_QUOTA=0 (disable snapshots), CLAUDE_SESSION_SUMMARY=0 (disable summaries),
+CLAUDE_SESSION_RULES_DIR (repo/rules).
 XDG_CACHE_HOME and XDG_CONFIG_HOME default to ~/.cache and ~/.config.
 Register this command for SessionStart, PreToolUse (Skill|Agent|Bash), SessionEnd.
 """
@@ -82,7 +85,7 @@ def normalise_weights(value):
 
 def load_config():
     config = {"weights": DEFAULT_WEIGHTS.copy(), "exclude": ["claude-orchestrator"],
-              "reroll_calls": 3, "quota_snapshot": True}
+              "reroll_calls": 3, "quota_snapshot": True, "summary": True}
     base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     path = Path(os.environ.get("CLAUDE_SESSION_MODE_CONFIG",
                                base / "claude-orchestrator/session-mode.json"))
@@ -99,8 +102,9 @@ def load_config():
     reroll = data.get("reroll_calls")
     if isinstance(reroll, int) and not isinstance(reroll, bool):
         config["reroll_calls"] = reroll
-    if isinstance(data.get("quota_snapshot"), bool):
-        config["quota_snapshot"] = data["quota_snapshot"]
+    for key in ("quota_snapshot", "summary"):
+        if isinstance(data.get(key), bool):
+            config[key] = data[key]
     return config
 
 
@@ -207,8 +211,16 @@ def session_context(mode):
     return "\n\n".join(parts) or None
 
 
+def quota_enabled(config):
+    return os.environ.get("CLAUDE_SESSION_QUOTA") != "0" and config["quota_snapshot"]
+
+
+def summary_enabled(config):
+    return os.environ.get("CLAUDE_SESSION_SUMMARY") != "0" and config["summary"]
+
+
 def quota_snapshot(path, session, suffix, config):
-    if os.environ.get("CLAUDE_SESSION_QUOTA") == "0" or not config["quota_snapshot"]:
+    if not quota_enabled(config):
         return
     # Ignore malformed session ids even though they no longer become filenames.
     if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session):
@@ -223,6 +235,20 @@ def quota_snapshot(path, session, suffix, config):
         spec.loader.exec_module(quota)
         quota.spawn_snapshot("session-" + suffix, session=session,
                              log=path.parent / "quota.jsonl", delegate=delegate)
+    except (OSError, ValueError):
+        pass
+
+
+def spawn_summary(path, session, args):
+    """Start `delegate report --auto ARGS` detached; parsing a long transcript takes seconds."""
+    if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session):
+        return
+    delegate = ROOT / "skills/delegate/scripts/delegate"
+    try:
+        if delegate.is_file():
+            subprocess.Popen([sys.executable, str(delegate), "report", "--auto", "--log", str(path), *args],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
     except (OSError, ValueError):
         pass
 
@@ -458,6 +484,8 @@ def start_session(data, path, config, previous):
     print(json.dumps(output))
     if source in ("startup", "clear"):
         quota_snapshot(path, session, "start", config)
+        if summary_enabled(config):
+            spawn_summary(path, session, ["--backfill", "--exclude", session])
 
 
 def main():
@@ -488,7 +516,15 @@ def main():
         reroll = bool(data.get("reason") == "clear" and calls is not None
                       and calls <= config["reroll_calls"] and drawn)
         append_row(path, "end", session, reason=data.get("reason"), mode=mode, calls=calls, reroll=reroll)
-        quota_snapshot(path, session, "end", config)
+        if summary_enabled(config):
+            # The summary takes the session-end quota reading itself, so the row can embed it.
+            transcript = data.get("transcript_path")
+            spawn_summary(path, session, ["--trigger", "end", "--session", session,
+                                          *(["--transcript", transcript] if isinstance(transcript, str)
+                                            and transcript else []),
+                                          *([] if quota_enabled(config) else ["--no-quota"])])
+        else:
+            quota_snapshot(path, session, "end", config)
 
 
 if __name__ == "__main__":

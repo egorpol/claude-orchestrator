@@ -48,6 +48,11 @@ class TestAsk(unittest.TestCase):
         (self.workspace / "foo.py").write_text("x = 1\n", encoding="utf-8")
         self._write_exe("cursor-agent", CURSOR_SH)
         self._write_exe("codex", CODEX_SH)
+        self.session_log = Path(self.tmp.name) / "sessions.jsonl"
+        env = mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": str(self.session_log)})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)  # set when the tests run inside Claude Code
         self.old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self.bindir}:{self.old_path}"
 
@@ -84,6 +89,21 @@ class TestAsk(unittest.TestCase):
         self.assertIn("in=11", out)
         self.assertIn("out=7", out)
         self.assertIn("cached=100", out)
+
+    def test_ask_logs_a_delegate_row_under_the_calling_session(self):
+        ns = argparse_ns(
+            question="What is x?", agent="cursor", model=None, effort=None,
+            dir=str(self.workspace), max_words=100, timeout=30, files=None,
+        )
+        from io import StringIO
+        with mock.patch("sys.stdout", StringIO()):
+            ask.cmd_ask(ns)
+            self.assertFalse(self.session_log.exists())  # no Claude session: nothing to attribute
+            os.environ["CLAUDE_CODE_SESSION_ID"] = "parent"
+            ask.cmd_ask(ns)
+        rows = [json.loads(line) for line in self.session_log.read_text().splitlines()]
+        self.assertEqual([{k: r[k] for k in ("event", "session", "command", "agent")} for r in rows],
+                         [{"event": "delegate", "session": "parent", "command": "ask", "agent": "cursor"}])
 
     def test_codex_ask(self):
         ns = argparse_ns(
