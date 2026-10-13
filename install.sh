@@ -8,11 +8,11 @@
 #   ./install.sh --hooks    also register hooks/context-guard.py as a UserPromptSubmit hook in
 #                           settings.json (handoff nudge at item boundaries past ~120k context)
 #                           and hooks/secret-guard.py as a PreToolUse (Bash) hook (timeout 30)
-#                           that asks before a push that would send secrets
+#                           that asks before a commit or push that would expose secrets
 #   ./install.sh --git-hook=DIR
-#                           link hooks/secret-guard.py as DIR's git pre-push hook
+#                           link hooks/secret-guard.py as DIR's pre-push and pre-commit hooks
 #                           (respects core.hooksPath / worktrees); refuses a different existing
-#                           pre-push unless --force (then backs it up like a skill)
+#                           hook unless --force (then backs it up per hook like a skill)
 #   ./install.sh --rules    also import rules/orchestrator.md from the user-level CLAUDE.md,
 #                           so every session gets the orchestrator rules (stays live from the repo);
 #                           skipped while the session-mode hook is registered
@@ -28,7 +28,7 @@
 #                           remove: systemctl --user disable --now claude-delegate-quota.timer
 #                           then delete claude-delegate-quota.{service,timer} from
 #                           ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/
-#   ./install.sh --check    only check prerequisites
+#   ./install.sh --check    only check prerequisites and the private-name deny list
 #   ./install.sh --force    replace an existing non-symlinked skill dir or command file (it is
 #                           moved to ~/.claude/skill-backups/, never deleted)
 set -euo pipefail
@@ -110,6 +110,40 @@ check_prereqs() {
   fi
   if [ -e "$COMMANDS_DIR/next.md" ]; then ok "/next command in $COMMANDS_DIR"
   else warn "/next command not installed (./install.sh)"; fi
+  if command -v python3 >/dev/null; then check_private_names; fi
+}
+
+check_private_names() {
+  python3 - "$REPO/hooks/secret-guard.py" <<'PY_PRIVATE_NAMES'
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+spec = importlib.util.spec_from_file_location("secret_guard", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+guard = module.Guard()
+path = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "claude-orchestrator/private-names.txt"
+try:
+    guard.require_private_names()
+except module.GitError:
+    print(guard.redact(f"  warn  private-name deny list unreadable or invalid UTF-8: {path}"))
+else:
+    if path.exists():
+        print(guard.redact(f"  ok    private-name deny list: {path} ({len(guard._private_entries)} entries)"))
+    else:
+        print(guard.redact(f"  warn  private-name deny list missing (rule off): {path}"))
+if path.exists():
+    try:
+        probe = subprocess.run(["git", "-C", str(path.resolve().parent), "rev-parse", "--is-inside-work-tree"],
+                               capture_output=True, text=True)
+        if probe.returncode == 0 and probe.stdout.strip() == "true":
+            print(guard.redact(f"  warn  private-name deny list is inside a git work tree: {path}; one git add could publish it"))
+    except OSError:
+        pass
+PY_PRIVATE_NAMES
 }
 
 # True if settings.json registers session-mode.py for SessionStart (parsed, not a text match).
@@ -294,13 +328,20 @@ PY_HOOK
 }
 
 install_git_hook() {
-  local dir="$1" target dest
+  local dir="$1" hook
+  for hook in pre-push pre-commit; do
+    install_one_git_hook "$dir" "$hook"
+  done
+}
+
+install_one_git_hook() {
+  local dir="$1" hook="$2" target dest backup
   if [ -z "$dir" ] || [ ! -d "$dir" ]; then
     miss "--git-hook: not a directory: ${dir:-}"
     failed=1
     return
   fi
-  if ! dest="$(git -C "$dir" rev-parse --git-path hooks/pre-push 2>/dev/null)"; then
+  if ! dest="$(git -C "$dir" rev-parse --git-path "hooks/$hook" 2>/dev/null)"; then
     miss "--git-hook: not a git repository: $dir"
     failed=1
     return
@@ -314,29 +355,33 @@ install_git_hook() {
   target="$REPO/hooks/secret-guard.py"
   if [ -L "$dest" ]; then
     if [ "$(readlink -f "$dest")" = "$(readlink -f "$target")" ]; then
-      ok "pre-push already linked in $dir"
+      ok "$hook already linked in $dir"
       return
     fi
     if [ "$force" = 0 ]; then
-      miss "pre-push: $dest exists and is not this secret-guard; re-run with --force to back it up"
+      miss "$hook: $dest exists and is not this secret-guard; re-run with --force to back it up"
       failed=1
       return
     fi
     mkdir -p "$BACKUP_DIR"
-    mv "$dest" "$BACKUP_DIR/pre-push-$(date +%Y%m%d-%H%M%S)"
-    warn "pre-push: previous link moved to $BACKUP_DIR/"
+    backup="$BACKUP_DIR/$hook-$(date +%Y%m%d-%H%M%S)"
+    if [ -e "$backup" ] || [ -L "$backup" ]; then backup="$backup-$$"; fi
+    mv "$dest" "$backup"
+    warn "$hook: previous link moved to $BACKUP_DIR/"
   elif [ -e "$dest" ]; then
     if [ "$force" = 0 ]; then
-      miss "pre-push: $dest exists and is not this secret-guard; re-run with --force to back it up"
+      miss "$hook: $dest exists and is not this secret-guard; re-run with --force to back it up"
       failed=1
       return
     fi
     mkdir -p "$BACKUP_DIR"
-    mv "$dest" "$BACKUP_DIR/pre-push-$(date +%Y%m%d-%H%M%S)"
-    warn "pre-push: previous hook moved to $BACKUP_DIR/"
+    backup="$BACKUP_DIR/$hook-$(date +%Y%m%d-%H%M%S)"
+    if [ -e "$backup" ] || [ -L "$backup" ]; then backup="$backup-$$"; fi
+    mv "$dest" "$backup"
+    warn "$hook: previous hook moved to $BACKUP_DIR/"
   fi
   ln -s "$target" "$dest"
-  ok "pre-push -> $target (in $dir)"
+  ok "$hook -> $target (in $dir)"
 }
 
 if [ "$hooks" = 1 ]; then

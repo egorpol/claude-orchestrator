@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-"""Stop secrets from leaving the machine on a push.
+"""Stop secrets, private names and working files at commit and push time.
 
-Three entry points, one file:
+Four entry points, one file:
 
 * Claude Code PreToolUse (Bash): JSON on stdin, no argv. Cheap substring prefilter,
-  then parse; findings or a scan that cannot finish return permissionDecision "ask"
+  then parse commits and pushes; findings or an unfinished scan return "ask"
   (never "allow", which would skip the user's own permission rules). A commit-making
   git segment before a push in the same Bash call returns "deny".
 * git pre-push: argv = remote name and URL; stdin lines are the ref updates. Findings
   or errors go to stderr and exit 1 (override with git push --no-verify).
+* git pre-commit (symlink name), or ``--pre-commit [DIR]``: scan the inherited
+  index only; stderr and exit 1 on findings/errors (git commit --no-verify).
 * ``secret-guard.py --check [DIR]``: scan full history of all refs plus uncommitted
   changes; exit 1 on findings, else one-line all-clear.
 
-Env: SECRET_GUARD_BUDGET_S (default 20 for push hooks; bounds --check only when set),
+Private literals: ${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/private-names.txt,
+one per line, ignoring blanks and # comments. Output masks names even inside words.
+Repo opt-outs: secretGuard.homePaths, secretGuard.privateNames, secretGuard.workingFiles.
+Approving Claude's ask still hits an installed git hook; --no-verify is scanned again.
+
+Env: SECRET_GUARD_BUDGET_S (default 20 for git/Claude hooks; bounds --check only when set),
 SECRET_GUARD_DISABLE=1 (exit 0 silently, same convention as CONTEXT_GUARD_DISABLE).
 
 Guiding principle: false positives cost one click; a miss leaks a secret. Where
@@ -118,6 +125,13 @@ PLACEHOLDER_USERS = frozenset(
     {"user", "username", "you", "me", "name", "example", "runner"}
 )
 COMMIT_VERBS = frozenset({"commit", "merge", "cherry-pick", "revert", "am", "rebase"})
+COMMIT_WORKTREE_FLAGS = frozenset({"--all", "--include", "--only", "--interactive", "--patch"})
+COMMIT_VALUE_OPTIONS = frozenset({
+    "--message", "--file", "--reuse-message", "--reedit-message", "--fixup", "--squash",
+    "--author", "--date", "--template", "--cleanup", "--trailer",
+})
+REPO_RULE_CONFIG = (("home_paths", "homePaths"), ("private_names", "privateNames"),
+                    ("working_files", "workingFiles"))
 SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!", "{"})
 # Distinct from None (which means "use default 20 s"). Only an explicit env bounds --check.
 _UNLIMITED = object()
@@ -254,8 +268,8 @@ def _mask(value):
     return text[:4] + "…" + str(len(text))
 
 
-def redact(text):
-    """Mask any token/key rule match in an output string (never leak full secrets)."""
+def redact(text, private_names=()):
+    """Mask tokens/keys and private literals in output (names have no boundaries)."""
     if not text or not isinstance(text, str):
         return text
     out = text
@@ -267,6 +281,14 @@ def redact(text):
             _PRIV_SHOWN,
             out,
         )
+    if private_names:
+        # One substitution, longest literals first, with no boundary restriction.
+        entries = sorted(private_names, key=lambda entry: len(entry[1]), reverse=True)
+        pattern = re.compile("|".join(re.escape(name) for _line, name in entries), re.I)
+        out = pattern.sub(lambda m: next(
+            f"<private name {line}>" for line, name in entries
+            if re.fullmatch(re.escape(name), m.group(0), re.I)
+        ), out)
     return out
 
 
@@ -297,14 +319,19 @@ class Guard:
         self.git_opts = []
         self._home_roots = self._extra_home_roots()
         self.home_paths = True  # per repo, see load_repo_config
+        self.private_names = True
+        self.working_files = True
+        self._private_entries = []
+        self._private_error = None
+        self._load_private_names()
         self._remerge = None  # None=untried, True/False after probe
         self.log_marker = secrets.token_hex(16)
 
     def load_repo_config(self, cwd, git_opts=None):
-        """`git config secretGuard.homePaths false` turns the home-path rule off in that repo
-        (a private repo full of its owner's paths); tokens, keys and file names stay on.
+        """Read per-repo opt-outs for home paths, private names and working files.
         `-c` overrides on the scanned command are ignored, so a command can't switch it off
-        for its own push."""
+        for its own commit or push."""
+        self.require_private_names()
         opts, words = [], list(git_opts if git_opts is not None else self.git_opts)
         i = 0
         while i < len(words):
@@ -314,9 +341,43 @@ class Guard:
             if not words[i].startswith("-c"):
                 opts.append(words[i])
             i += 1
-        proc = self.git(["config", "--type=bool", "--get", "secretGuard.homePaths"], cwd,
-                        check=False, git_opts=opts)
-        self.home_paths = proc.stdout.strip() != "false"
+        for attr, key in REPO_RULE_CONFIG:
+            proc = self.git(["config", "--type=bool", "--get", f"secretGuard.{key}"], cwd,
+                            check=False, git_opts=opts)
+            setattr(self, attr, proc.stdout.strip() != "false")
+
+    def _load_private_names(self):
+        root = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+        path = Path(root) / "claude-orchestrator" / "private-names.txt"
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError):
+            # Do not include exception text: decode errors can quote file contents.
+            self._private_error = GitError(f"cannot read private-name list: {path}")
+            return
+        self._private_entries = [(n, line.strip()) for n, line in enumerate(_split_lf(text), 1)
+                                 if line.strip() and not line.strip().startswith("#")]
+
+    def require_private_names(self):
+        if self._private_error is not None:
+            raise self._private_error
+
+    def redact(self, text):
+        return redact(text, self._private_entries)
+
+    def _private_name_hits(self, text):
+        self.require_private_names()
+        if self.private_names:
+            for line, name in self._private_entries:
+                self._tick()
+                for match in re.finditer(re.escape(name), text, re.I):
+                    start, end = match.span()
+                    if (start and text[start - 1].isalnum()) or (
+                            end < len(text) and text[end].isalnum()):
+                        continue
+                    yield (start, "private name", f"private-names.txt:{line}", False)
 
     def begin_push_scan(self):
         self._scan_hits = 0
@@ -405,13 +466,13 @@ class Guard:
             start = pos + len(_PRIV)
         return hits
 
-    def scan_text(self, text, path, commit, start_line=1):
+    def scan_text(self, text, path, commit, start_line=1, home_paths=True):
         if not text:
             return
         self._tick()
         # Per-rule regexes with literal prefilters (a leading lookbehind / \\b / big
         # alternation in one combined regex was slower than separate rules).
-        hits = []  # (pos, label, value, mask)
+        hits = list(self._private_name_hits(text))  # (pos, label, value, mask)
         folded = None
 
         def hay_fold():
@@ -424,7 +485,7 @@ class Guard:
             hits.extend(self._find_private_key_hits(text))
 
         for kind, pattern, lits, fold_lits in SCAN_RULES:
-            if kind == "home path" and not self.home_paths:
+            if kind == "home path" and not (self.home_paths and home_paths):
                 continue
             ok = any(lit in text for lit in lits) if lits else False
             if not ok and fold_lits:
@@ -456,7 +517,7 @@ class Guard:
             last = pos
             self.add(label, path, lineno, commit, value, mask=mask)
         # Extra $HOME roots (rare) still need a linear pass when configured.
-        if self._home_roots and self.home_paths:
+        if self._home_roots and self.home_paths and home_paths:
             for offset, line in enumerate(_split_lf(text)):
                 self._scan_extra_homes(line, path, start_line + offset, commit)
 
@@ -484,9 +545,16 @@ class Guard:
                 self.add("home path", path, lineno, commit, line[pos:stop], mask=False)
                 idx = pos + 1
 
-    def scan_path_name(self, relpath, commit):
+    def scan_path_name(self, relpath, commit, root_relative=None):
+        added_path = root_relative if root_relative is not None else relpath
+        for _pos, label, value, _mask_hit in self._private_name_hits(added_path):
+            self.add(label, added_path, "-", commit, value, mask=False)
         name = Path(relpath).name
         lower = name.lower()
+        if self.working_files and (lower == "handoff.md" or (
+                added_path.startswith("feedback/") and added_path.count("/") == 1
+                and name.endswith((".md", ".jsonl")))):
+            self.add("working file", added_path, "-", commit, added_path, mask=False)
         if name in SENSITIVE_NAMES or lower in SENSITIVE_NAMES:
             self.add("sensitive file", relpath, "-", commit, name, mask=False)
             return
@@ -739,36 +807,45 @@ class Guard:
             if patch:
                 self.scan_diff(patch, commit)
 
-    def scan_working_tree(self, cwd, git_opts=None):
+    def scan_working_tree(self, cwd, git_opts=None, tracked=True, untracked=True):
+        """Staged changes, optionally index→worktree and untracked files.
+
+        Keep the inherited GIT_INDEX_FILE: git commit -a/path prepares a temporary index.
+        """
         self.load_repo_config(cwd, git_opts=git_opts)
         head = self.git(["rev-parse", "--verify", "HEAD"], cwd, check=False, git_opts=git_opts)
         base = "HEAD" if head.returncode == 0 else EMPTY_TREE
         # Staged vs BASE, then index→worktree (avoids scanning staged twice).
-        for args, label in (
-            (["diff", "--cached", base, *_WT_DIFF_FLAGS], "(staged)"),
-            (["diff", *_WT_DIFF_FLAGS], "(working tree)"),
-        ):
+        diffs = [(["diff", "--cached", base, *_WT_DIFF_FLAGS], "(staged)")]
+        names = [(["diff", "--cached", base, "--name-status", "-z", "--diff-filter=ACR",
+                   "--no-relative"], "(staged)")]
+        if tracked:
+            diffs.append((["diff", *_WT_DIFF_FLAGS], "(working tree)"))
+            names.append((["diff", "--name-status", "-z", "--diff-filter=ACR",
+                           "--no-relative"], "(working tree)"))
+        for args, label in diffs:
             diff = self.git(args, cwd, check=True, git_opts=git_opts)
             self._scan_wt_names(diff.stdout, label)
             self.scan_diff(diff.stdout, label)
         # Name-status for staged/worktree additions without relying on +++ headers.
-        for ns, label in (
-            (["diff", "--cached", base, "--name-status", "-z", "--diff-filter=ACR",
-              "--no-relative"], "(staged)"),
-            (["diff", "--name-status", "-z", "--diff-filter=ACR", "--no-relative"],
-             "(working tree)"),
-        ):
+        for ns, label in names:
             proc = self.git(ns, cwd, check=True, git_opts=git_opts)
             self._parse_wt_name_status_z(proc.stdout, label)
+        if not untracked:
+            return
         untracked = self.git(
-            ["ls-files", "--others", "--exclude-standard", "-z"],
+            ["ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", ":/"],
             cwd, check=True, git_opts=git_opts,
         )
+        root = self.git(["rev-parse", "--show-toplevel"], cwd, git_opts=git_opts).stdout.strip()
         for rel in untracked.stdout.split("\0"):
             if not rel:
                 continue
-            self.scan_path_name(rel, "(untracked)")
-            path = Path(cwd) / rel
+            path = Path(root) / rel
+            # Keep existing cwd-relative locations for token/key/home/file rules.
+            # The new path rules need root-relative names even from a subdirectory.
+            shown_path = os.path.relpath(path, cwd)
+            self.scan_path_name(shown_path, "(untracked)", root_relative=rel)
             try:
                 if not path.is_file():
                     continue
@@ -776,10 +853,10 @@ class Guard:
                     continue
                 self.scan_text(
                     path.read_text(encoding="utf-8", errors="replace"),
-                    rel, "(untracked)",
+                    shown_path, "(untracked)",
                 )
             except OSError as exc:
-                raise GitError(f"unreadable {rel}: {exc}") from exc
+                raise GitError(f"unreadable {shown_path}: {exc}") from exc
 
     def _scan_wt_names(self, diff_text, label):
         """Best-effort path names from a working-tree diff (+++ headers)."""
@@ -1276,18 +1353,47 @@ def might_push(command):
     if not isinstance(command, str) or not command:
         return False
     lower = command.lower()
-    return "push" in lower or "gh" in lower or "visibility" in lower
+    return "push" in lower or "gh" in lower or "visibility" in lower or "commit" in lower
 
 
-def analyze_command(command, cwd, guard):
+def _commit_scans_worktree(args):
+    """Over-approximate commit flags/pathspecs while skipping message option values."""
+    i = 0
+    while i < len(args):
+        word = args[i]
+        if word in COMMIT_WORKTREE_FLAGS or (
+                word.startswith("--pathspec-from-file")):
+            return True
+        if word == "--":
+            return i + 1 < len(args)
+        if not word.startswith("-"):
+            return True
+        if word in COMMIT_VALUE_OPTIONS:
+            i += 2
+            continue
+        if not word.startswith("--"):
+            for pos, char in enumerate(word[1:], 1):
+                if char in "aiop":
+                    return True
+                if char in "mFCct":
+                    if pos == len(word) - 1:
+                        i += 1  # separate option value
+                    break
+        i += 1
+    return False
+
+
+def analyze_command(command, cwd, guard, commits=None):
     """Return (pushes, commit_before_push).
 
+    Optionally collect exact `commit` segments and whether earlier commands run.
     Inside bash/sh -c, cd applies to later segments of that string only.
     eval cd changes propagate to the caller (like a real shell).
     A cd inside ( … ), $( … ) or backticks does not change later parent segments.
     env -C / --chdir applies only to the child command (and its nested walk).
     """
-    state = {"seen_commit": False, "commit_before_push": False, "pushes": []}
+    state = {"seen_commit": False, "commit_before_push": False, "pushes": [],
+             "other_before": False}
 
     def handle_one(segment, work, depth=0):
         if depth > 32:
@@ -1328,7 +1434,16 @@ def analyze_command(command, cwd, guard):
             return work
         if is_git_commit_verb(words):
             state["seen_commit"] = True
+            c_dirs, git_opts, idx = _parse_git_global(words)
+            if words[idx] == "commit" and commits is not None:
+                commits.append({
+                    "cwd": _apply_c_dirs(work, c_dirs), "git_opts": git_opts,
+                    "full": state["other_before"],
+                    "tracked": _commit_scans_worktree(words[idx + 1:]),
+                })
+            state["other_before"] = True
             return work
+        state["other_before"] = True
         push = None
         if Path(words[0]).name == "git":
             _c, _opts, idx = _parse_git_global(words)
@@ -1460,25 +1575,26 @@ def format_reason(findings, target, extra_prefix=None, guard=None):
     more_groups = len(groups) - shown
     if more_groups > 0:
         lines.append(f"and {more_groups} more")
-    return "\n".join(lines)
+    reason = "\n".join(lines)
+    return guard.redact(reason) if guard is not None else reason
 
 
-def print_ask(reason):
+def print_ask(reason, guard=None):
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "ask",
-            "permissionDecisionReason": redact(reason),
+            "permissionDecisionReason": guard.redact(reason) if guard else redact(reason),
         }
     }))
 
 
-def print_deny(reason):
+def print_deny(reason, guard=None):
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": redact(reason),
+            "permissionDecisionReason": guard.redact(reason) if guard else redact(reason),
         }
     }))
 
@@ -1536,15 +1652,30 @@ def run_push_scans(guard, pushes):
         push["_had_findings"] = guard._scan_hits > 0
 
 
-def _ask_could_not_finish(exc, repo_dir=None):
+def _ask_could_not_finish(exc, repo_dir=None, guard=None, operation="push"):
     name = type(exc).__name__
     script = Path(__file__).resolve()
     repo = repo_dir or os.getcwd()
     hint = f"python3 {script} --check {repo}"
     print_ask(
         f"secret guard could not finish: {name}: {exc}; "
-        f"scan without a time limit: {hint}; push anyway?"
+        f"scan without a time limit: {hint}; {operation} anyway?", guard=guard,
     )
+
+
+def run_commit_scans(guard, commits, command):
+    for commit in commits:
+        cwd, opts = commit["cwd"], commit["git_opts"]
+        guard.git_opts = opts
+        guard.begin_push_scan()
+        guard.scan_working_tree(cwd, git_opts=opts,
+                                tracked=commit["full"] or commit["tracked"],
+                                untracked=commit["full"])
+        # Substitutions hide -m heredocs from the segment walker. Absolute paths
+        # are normal in Claude's commands, so only token/key/name rules apply here.
+        guard.scan_text(command, "(command)", "-", home_paths=False)
+        commit["_had_findings"] = guard._scan_hits > 0
+        commit["_target"] = f"commit in {cwd}"
 
 
 def claude_main(data):
@@ -1562,53 +1693,62 @@ def claude_main(data):
     if not might_push(command or ""):
         return 0
     guard = Guard(budget_s=None)  # default 20 s (or SECRET_GUARD_BUDGET_S)
+    commits = []
     try:
-        pushes, commit_before = analyze_command(command, cwd, guard)
-        if not pushes:
+        pushes, commit_before = analyze_command(command, cwd, guard, commits=commits)
+        if not pushes and not commits:
             return 0
         if commit_before:
             print_deny(
                 "secret guard: this Bash call creates a commit and then pushes; "
-                "run the push as its own Bash call so the new commit can be scanned"
+                "run the push as its own Bash call so the new commit can be scanned", guard=guard,
             )
             return 0
+        guard.require_private_names()
         try:
+            run_commit_scans(guard, commits, command)
             run_push_scans(guard, pushes)
         except GitError as exc:
             msg = str(exc)
             if "is not a git repository" in msg.lower():
-                print_ask(f"secret guard could not finish: {msg}")
+                print_ask(f"secret guard could not finish: {msg}", guard=guard)
                 return 0
-            _ask_could_not_finish(exc, repo_dir=cwd)
+            _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
+                                  operation="commit" if commits else "push")
             return 0
         except Exception as exc:
-            _ask_could_not_finish(exc, repo_dir=cwd)
+            _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
+                                  operation="commit" if commits else "push")
             return 0
         if not guard.findings:
             return 0
         targets = []
-        for p in pushes:
+        for p in pushes + commits:
             if p.get("_had_findings"):
                 t = p.get("_target") or p.get("remote") or "remote"
                 if t not in targets:
                     targets.append(t)
         if not targets:
-            targets = [pushes[0].get("_target") or pushes[0].get("remote") or "remote"]
+            first = (pushes + commits)[0]
+            targets = [first.get("_target") or first.get("remote") or "remote"]
         target = ", ".join(str(t) for t in targets)
         print_ask(format_reason(guard.findings, target, guard=guard))
         return 0
     except BudgetExceeded as exc:
-        _ask_could_not_finish(exc, repo_dir=cwd)
+        _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
+                              operation="commit" if commits else "push")
         return 0
     except GitError as exc:
         msg = str(exc)
         if "is not a git repository" in msg.lower():
-            print_ask(f"secret guard could not finish: {msg}")
+            print_ask(f"secret guard could not finish: {msg}", guard=guard)
             return 0
-        _ask_could_not_finish(exc, repo_dir=cwd)
+        _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
+                              operation="commit" if commits else "push")
         return 0
     except Exception as exc:
-        _ask_could_not_finish(exc, repo_dir=cwd)
+        _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
+                              operation="commit" if commits else "push")
         return 0
 
 
@@ -1618,6 +1758,7 @@ def git_pre_push_main(remote, url):
     cwd = os.getcwd()
     guard = Guard(budget_s=None)
     try:
+        guard.require_private_names()
         lines = sys.stdin.read().splitlines()
         # Prefer per-line ranges; also fall back to union vs remote when needed.
         batches = []
@@ -1654,49 +1795,74 @@ def git_pre_push_main(remote, url):
         if guard.findings:
             text = format_reason(guard.findings, remote or url, guard=guard)
             print(text, file=sys.stderr)
-            print("override: git push --no-verify", file=sys.stderr)
+            print(guard.redact("override: git push --no-verify"), file=sys.stderr)
             return 1
         return 0
     except Exception as exc:
         script = Path(__file__).resolve()
         hint = f"python3 {script} --check {cwd}"
-        print(redact(
+        print(guard.redact(
             f"secret guard could not finish: {type(exc).__name__}: {exc}; "
             f"scan without a time limit: {hint}"
         ), file=sys.stderr)
-        print("override: git push --no-verify", file=sys.stderr)
+        print(guard.redact("override: git push --no-verify"), file=sys.stderr)
         return 1
+
+
+def git_pre_commit_main(directory=None):
+    if os.environ.get("SECRET_GUARD_DISABLE") == "1":
+        return 0
+    guard = Guard(budget_s=None)
+    cwd = str(Path(directory or os.getcwd()).resolve())
+    try:
+        guard.scan_working_tree(cwd, tracked=False, untracked=False)
+        if not guard.findings:
+            return 0
+        print(format_reason(guard.findings, cwd, guard=guard), file=sys.stderr)
+    except Exception as exc:
+        hint = f"python3 {Path(__file__).resolve()} --check {cwd}"
+        print(guard.redact(
+            f"secret guard could not finish: {type(exc).__name__}: {exc}; "
+            f"scan without a time limit: {hint}"
+        ), file=sys.stderr)
+    print(guard.redact("override: git commit --no-verify"), file=sys.stderr)
+    return 1
 
 
 def check_main(directory):
     cwd = str(Path(directory or os.getcwd()).resolve())
     guard = Guard(budget_s=_UNLIMITED)
     try:
+        guard.require_private_names()
         probe = guard.git(["rev-parse", "--is-inside-work-tree"], cwd, check=False)
         if probe.returncode != 0:
-            print(redact(f"secret guard: not a git repository: {cwd}"), file=sys.stderr)
+            print(guard.redact(f"secret guard: not a git repository: {cwd}"), file=sys.stderr)
             return 1
         commits = guard.rev_list(cwd, ["--all", "--"])
         if commits:
             guard.scan_rev_range(cwd, ["--all", "--"])
         guard.scan_working_tree(cwd)
+        if guard.findings:
+            print(format_reason(guard.findings, cwd, guard=guard))
+            return 1
     except Exception as exc:
         script = Path(__file__).resolve()
         hint = f"python3 {script} --check {cwd}"
-        print(redact(
+        print(guard.redact(
             f"secret guard could not finish: {type(exc).__name__}: {exc}; "
             f"scan without a time limit: {hint}"
         ), file=sys.stderr)
         return 1
-    if guard.findings:
-        print(format_reason(guard.findings, cwd, guard=guard))
-        return 1
-    print(f"secret guard: all clear ({len(commits)} commits + working tree)")
+    print(guard.redact(f"secret guard: all clear ({len(commits)} commits + working tree)"))
     return 0
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if Path(sys.argv[0]).name == "pre-commit":
+        return git_pre_commit_main()
+    if argv and argv[0] == "--pre-commit":
+        return git_pre_commit_main(argv[1] if len(argv) > 1 else None)
     if argv and argv[0] == "--check":
         directory = argv[1] if len(argv) > 1 else os.getcwd()
         return check_main(directory)
