@@ -238,7 +238,25 @@ Each closed with `/field-report`. Numbers from `delegate cost --session <id>`, s
 - **This repo's own tests caused 912 Nextcloud sync errors** (found in 67cbd1d1, all under `claude-orchestrator/.delegate/tmp/`): the documented test command put TMPDIR inside the synced checkout, and one test set file mtimes to 1970. TMPDIR now stays outside, test mtimes are plausible, and a secret-guard test that passed only inside a git checkout now runs in a real repo.
 - **Not adopted:** a shared `cdp.mjs` helper for headless browser checks (the traps went into one rule line instead), a guard that names a clean, pushed tree before Q&A, and project-specific shell notes (`gh run list --commit` needs a full SHA, ugrep's limits on long patterns, `uv run --with` for one-off parsing). Worktree metadata under `.git/worktrees` drew transient "could not get modification time" warnings in four synced repos, which comes with keeping git worktrees in a synced folder.
 
+## 2026-10-13 to 10-20: control-session arms, first numbers
+
+From 2026-10-13 10:29 the session-mode hook drew each session's mode, at weights 50/25/25: 57 drawn sessions, 32 orchestrator, 11 claude-only and 14 vanilla. Another 17 sessions were excluded from the draw and 1 was unassigned; those are left out. The numbers come from `delegate cost --by-mode`, intent-to-treat: each session stays in the arm it was drawn into. Items come from `delegate rate` with rubric v2: Cursor Auto, blinded to the mode, splits each session into items from its typed prompts, its HANDOFF.md at start and end, and its commits ([verified behaviour](verified-behaviour.md)). USD is list price, including subagents; field-report items are left out of the item counts, but their USD stays in.
+
+| arm | sessions (with cost) | calls | USD | rated sessions | items (finished) | USD per finished item | unclear counted as finished | Claude 7d points, estimated | delegate runs, `ask` calls |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| orchestrator | 32 (28) | 1,643 | 111.38 | 28 | 36 (21) | 5.30 | 3.98 | 40.2 | 8, 14 |
+| claude-only | 11 (10) | 620 | 51.80 | 10 | 13 (9) | 5.76 | 4.71 | 18.7 | 0, 0 |
+| vanilla | 14 (8) | 530 | 35.65 | 8 | 11 (7) | 5.09 | 3.96 | 12.9 | 0, 0 |
+
+- **Too few items to compare the arms.** USD per finished item is 5.09–5.76 under v2. Under v1, on 39 of these sessions, it was 5.18–6.54. One more finished item would lower vanilla's figure by about 0.6.
+- **Unclear items set the range.** Counted as finished, they bring the arms to 3.96–4.71. 10 of the 11 unclear items are in sessions that left no end-state HANDOFF.md copy. From 2026-10-20 SessionEnd saves one, so new sessions should settle more items. Under v1, 27 of 64 items were unclear, 14 of them field reports (11, 4 and 2 per arm, now counted apart).
+- **Claude pool points are estimated, not read.** The estimate is list-price USD times the saved fit (claude-7d 0.361 points per USD), about 1.4, 1.9 and 1.6 claude-7d points per session. The SessionStart-to-SessionEnd reading deltas sum to 57.0, 28.0 and 110.0, but they also count other sessions' use and the hours a session stays open: three vanilla sessions left open for 21–92 h read 103 points between them.
+- **Delegation stayed in the orchestrator arm.** It had all 8 delegate runs (all applied, with 7 review rounds and 2 follow-ups) and all 14 `ask` calls, with Codex at 0.68M input, 12.2M cached and 0.23M output tokens, and Cursor at 1.05M, 9.8M and 0.20M. Codex and Cursor reading deltas also rise in claude-only and vanilla sessions, from other sessions' use, so those pools have no per-session estimate yet. Claude-only sessions made 138 Claude subagent calls, counted in their USD. The hook blocked one delegate call in a vanilla session.
+- **10 drawn sessions are 0–2 s startup ghosts** with no transcript (6 vanilla, 3 orchestrator, 1 claude-only). They have no cost and count only in the session totals, so vanilla's USD covers 8 of its 14 sessions.
+
 ## Still open
+
+- Control sessions: USD per finished item needs many more items per arm before the arms can be compared. Re-read `delegate cost --by-mode` as sessions accumulate.
 
 - Re-measure on the next long session with `delegate cost --session latest`.
 - Orchestrator effort: measured above ([lever 4](cost-analysis.md#4-keep-heavy-reading-and-scripting-out-of-the-main-context-about-4-measured-more-possible)), keep xhigh. For proof, run one routine work item at `high` and compare its thinking tokens and rounds against an xhigh item.
