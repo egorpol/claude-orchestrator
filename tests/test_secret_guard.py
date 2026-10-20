@@ -88,7 +88,9 @@ class SecretGuardTests(_SecretGuardHarness, unittest.TestCase):
     def test_echo_git_push_and_commit_message_are_not_pushes(self):
         r = self.claude('echo "git push"')
         self.assertEqual((r.returncode, r.stdout), (0, ""))
-        r = self.claude('git commit -m "fix git push docs"')
+        # A commit is scanned (pre-commit stage), so it needs a repo to scan.
+        local, _ = self.make_pair()
+        r = self.claude('git commit -m "fix git push docs"', cwd=local)
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
     def test_clean_push_silent(self):

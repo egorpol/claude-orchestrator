@@ -83,7 +83,9 @@ class TestReport(unittest.TestCase):
         self.transcript.write_text("bad json\n" + "".join(json.dumps(obj) + "\n" for obj in lines), encoding="utf-8")
         self.feedback = self.root / "fb"
         self.log = self.root / "delegate-runs.jsonl"
-        env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.cfg), "TZ": "Europe/Berlin"})
+        self.session_log = self.root / "sessions.jsonl"
+        env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.cfg), "TZ": "Europe/Berlin",
+                                           "CLAUDE_SESSION_LOG": str(self.session_log)})
         env.start()
         self.addCleanup(time.tzset)
         self.addCleanup(env.stop)
@@ -408,6 +410,20 @@ class TestReport(unittest.TestCase):
         self.assertEqual(row["item"], "regenerated")
         self.assertEqual(row["api_calls"], 4)
 
+    def test_skeleton_counts_this_sessions_asks(self):
+        rows = [{"event": "delegate", "session": SESSION, "command": "ask", "agent": "both"},
+                {"event": "delegate", "session": SESSION, "command": "launch", "agent": "codex"},
+                {"event": "delegate", "session": OTHER_SESSION, "command": "ask", "agent": "codex"},
+                {"event": "delegate", "session": SESSION, "command": "ask", "agent": "cursor"}]
+        self.session_log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        code, out, err = self.invoke()
+        self.assertEqual((code, err), (0, ""))
+        skeleton = Path(out.splitlines()[0]).read_text(encoding="utf-8")
+        self.assertIn("Delegate runs: none.\n\nDelegate asks: 2 (both, cursor).", skeleton)
+        self.session_log.unlink()
+        code, out, _ = self.invoke("--force")
+        self.assertIn("Delegate asks: none.", Path(out.splitlines()[0]).read_text(encoding="utf-8"))
+
     def test_runs_filter_repo_and_time_and_deduplicate(self):
         subdir = self.repo / "src"
         subdir.mkdir()
@@ -425,7 +441,8 @@ class TestReport(unittest.TestCase):
                 run("by-alias", repo_path=str(alias)),
                 run("too-old", ts="2026-10-10T20:59:59Z"),
                 run("other-repo", repo_path=str(self.root / "other")),
-                run("no-time", ts=None), run("bad-time", ts="bad"), run("boundary")]
+                run("no-time", ts=None), run("bad-time", ts="bad"), run("boundary"),
+                run("launched-earlier", session=OTHER_SESSION)]
         self.log.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         self.feedback.mkdir()
         retained = b' {"run":"preexisting", "ts":"old", "session":"another"}\r\n'
@@ -433,13 +450,17 @@ class TestReport(unittest.TestCase):
         target.write_bytes(retained)
         code, out, err = self.invoke("--repo", "custom/report-label")
         self.assertEqual((code, err), (0, ""))
-        self.assertIn("runs copied: 3", out)
+        self.assertIn("runs copied: 4", out)
         copied = [json.loads(line) for line in target.read_bytes().splitlines()[1:]]
-        self.assertEqual([r["run"] for r in copied], ["boundary", "by-name", "by-alias"])
+        self.assertEqual([r["run"] for r in copied], ["boundary", "by-name", "by-alias", "launched-earlier"])
         for row in copied:
-            self.assertEqual(row["session"], SESSION)
+            # A run cleaned up here keeps the session that launched it.
+            launcher = OTHER_SESSION if row["run"] == "launched-earlier" else SESSION
             source = next(r for r in rows if r["run"] == row["run"])
-            self.assertEqual(row, {**source, "repo": "custom/report-label", "session": SESSION})
+            self.assertEqual(row, {**source, "repo": "custom/report-label", "session": launcher})
+        skeleton = Path(out.splitlines()[0]).read_text(encoding="utf-8")
+        self.assertIn("2 round(s), applied, launched in session `aaaaaaaa`", skeleton)
+        self.assertEqual(skeleton.count("launched in session"), 1)
         old = target.read_bytes()
         self.assertTrue(old.startswith(retained))
         code, out, err = self.invoke("--force", "--repo", "custom/report-label")
@@ -502,8 +523,8 @@ class TestReport(unittest.TestCase):
         obj = assistant("other", "2026-10-10T23:30:00Z", 1, 2, 3, 4)
         obj["sessionId"] = OTHER_SESSION
         other.write_text(json.dumps(obj) + "\n", encoding="utf-8")
-        os.utime(str(self.transcript), (10, 10))
-        os.utime(str(other), (20, 20))
+        os.utime(str(self.transcript), (1_700_000_000, 1_700_000_000))
+        os.utime(str(other), (1_700_000_100, 1_700_000_100))
         args = ["--feedback-dir", str(self.feedback), "--no-quota", "--dry-run", "--json"]
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": SESSION}):
             code, out, err = self.invoke(*args, defaults=False)

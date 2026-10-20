@@ -1,6 +1,6 @@
 # Field results
 
-Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. `mode` is the session's drawn mode in the control-session experiment (hook registered 2026-10-13 10:29); — means the session started before it. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in.
+Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. `mode` is the session's drawn mode in the control-session experiment (hook registered 2026-10-13 10:29); — means the session started before it, and none that no draw was logged. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in.
 
 | date | session | mode | calls | context at end | cost units | units per call | idle rebuild share |
 |---|---|---|---:|---:|---:|---:|---:|
@@ -25,8 +25,23 @@ Numbers come from `delegate cost --session` on each session's transcript and inc
 | 2026-10-13 | ae30942b | — | 48 | 144k | 0.94M | 19.6k | 0 |
 | 2026-10-13 | 7c19e13a | — | 121 | 261k | 3.30M | 27.3k | 13.7% |
 | 2026-10-13 | 3240a01e | claude-only | 67 | 177k | 1.67M | 24.9k | 17.9% |
+| 2026-10-13 | c3057ac0 | none | 68 | 183k | 1.47M | 21.6k | 0 |
+| 2026-10-13 | f002ba21 | orchestrator | 106 | 171k | 1.75M | 16.5k | 0 |
+| 2026-10-14 | 67cbd1d1 | orchestrator | 61 | 171k | 1.30M | 21.3k | 0 |
+| 2026-10-14 | a14926ff | orchestrator | 48 | 163k | 1.16M | 24.2k | 0 |
+| 2026-10-14 | 2991ecc1 | claude-only | 74 | 250k | 2.34M | 31.6k | 0 |
+| 2026-10-14 | 8e2592ed | orchestrator | 66 | 255k | 2.04M | 30.9k | 0 |
+| 2026-10-14 | b4f23cf6 | orchestrator | 88 | 151k | 1.63M | 18.6k | 14.2% |
+| 2026-10-14 | 0efc0a5f | orchestrator | 101 | 243k | 2.57M | 25.5k | 0 |
+| 2026-10-17 | 2ebc2f69 | claude-only | 90 | 328k | 3.34M | 37.1k | 0 |
+| 2026-10-17 | b25535bb | vanilla | 78 | 241k | 2.15M | 27.6k | 0 |
+| 2026-10-17 | 471f185b | vanilla | 90 | 202k | 1.82M | 20.2k | 0 |
+| 2026-10-17 | 0b474ff6 | orchestrator | 79 | 170k | 1.66M | 21.0k | 9.8% |
+| 2026-10-19 | c3b22c1e | orchestrator | 68 | 169k | 1.65M | 24.3k | 16.1% |
+| 2026-10-19 | 4cd72052 | claude-only | 52 | 118k | 0.81M | 15.6k | 0 |
+| 2026-10-20 | f4ddbc11 | orchestrator | 55 | 181k | 1.58M | 28.6k | 17.3% |
 
-21 sessions, 2,106 calls, 68.8M cost units; idle rebuilds 8.2M (11.9%). The 20 sessions after the marathon averaged 24.8k units per call.
+36 sessions, 3,230 calls, 96.1M cost units; idle rebuilds 9.1M (9.5%). The 35 sessions after the marathon averaged 24.6k units per call.
 
 ## 2026-10-10
 
@@ -188,6 +203,40 @@ Four sessions, each closed with `/field-report`. Numbers from `delegate cost --s
 - **What worked:** one probe over six real files settled a fix's scope before any design; tests written first surfaced a second symptom; one side-by-side render of 3–4 encodings settled each placement question; promoted scripts were checked against the previous tool's output on the same input; a doc claim ("beamSpan is not drawn") was probed (41 of 41 drawn) and removed instead of copied forward. A before/after render diff needs generated IDs normalised first (now in the rules).
 - **The first control session** (3240a01e, claude-only) did a near-copy job, promoting scratch scripts, which the delegation rule would otherwise hand off. One session says nothing about the comparison; `delegate cost --by-mode` will, once ratings accumulate.
 - **Not adopted:** a hook that lints `echo =` in Bash commands (the zsh rule exists; a check on every Bash call isn't worth it for a one-call error), and letting the user pick a delegate-enabled session for mechanical items, which would break the random assignment.
+
+## 2026-10-13 to 10-20: fifteen sessions, six projects
+
+Each closed with `/field-report`. Numbers from `delegate cost --session <id>`, so they include the calls after each report, and idle shares come out a little lower than in the reports. Modes: 9 orchestrator, 3 claude-only, 2 vanilla, and c3057ac0 without a draw (its session log has no start row). Claude 7d is the share left when the report was written; the pool reset before f4ddbc11.
+
+| session | work | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---|---:|---:|---:|---:|---|---|
+| c3057ac0, egorpol.github.io: two delegate audits verified into one list, note feedback | 2 items | none (cleaned up two audit runs) | 68 | 183k | 1.47M | 21.6k | none | 59 |
+| f002ba21, egorpol.github.io: guided audit fixes 1–8, one step per user OK | 1 item | `ask --agent both` | 106 | 171k | 1.75M | 16.5k | none | 57 |
+| 67cbd1d1, camat_v2: Nextcloud integrity check (a corrupt git object repaired), refactor spec | 2 items | `ask --agent both` | 61 | 171k | 1.30M | 21.3k | none | 48 |
+| a14926ff, camat_lectures: seminar outline with tested format examples, then a revision | 2 items | `ask --agent both` | 48 | 163k | 1.16M | 24.2k | none | 47 |
+| 2991ecc1, camat_lectures: live page with four in-browser demos (claude-only) | 1 item | none | 74 | 250k | 2.34M | 31.6k | none | 43 |
+| 8e2592ed, camat_v2: a 757-line notebook helper cell moved into the package | 1 item | Codex build (1 round), Cursor review | 66 | 255k | 2.04M | 30.9k | none | 41 |
+| b4f23cf6, camat_lectures: clean-env notebook runs, site published, fetch script | 3 items | `ask --agent both` | 88 | 151k | 1.63M | 18.6k | 87 min (14.2%) | 37 |
+| 0efc0a5f, camat_lectures: demo and notebook polish from one typed list, review, deploy | 1 prompt, ~8 tasks | `ask --agent both` | 101 | 243k | 2.57M | 25.5k | none | 35 |
+| 2ebc2f69, job-webcrawler: review, new sources, keyword alignment, PR (claude-only) | 1 item | none | 90 | 328k | 3.34M | 37.1k | none | 22 |
+| b25535bb, webern_op27: notes rewrite, static Pages viewer built and browser-tested (vanilla) | 1 item | none | 78 | 241k | 2.15M | 27.6k | none | 16 |
+| 471f185b, webern_op27: release wording, Pages, facsimile repo, paste guide (vanilla) | 4 items | none | 90 | 202k | 1.82M | 20.2k | none | 13 |
+| 0b474ff6, webern_op27: paste-and-verify loop for seven upstream posts | 1 item | none | 79 | 170k | 1.66M | 21.0k | 237 min (9.8%) | 12 |
+| c3b22c1e, audiospylt: notebook fixtures, paths, legacy archive | 1 item | none | 68 | 169k | 1.65M | 24.3k | 61 min (16.1%) | 10 |
+| 4cd72052, audiospylt: headless notebook runner and CI job, sample provenance (claude-only) | 3 items | none | 52 | 118k | 0.81M | 15.6k | none | 8 |
+| f4ddbc11, audiospylt: review of an uncommitted step, a design decision after probes | 2 items | 2 × `ask --agent both` | 55 | 181k | 1.58M | 28.6k | 204 min (17.3%) | 100 |
+
+- **One item grew past 240k in five sessions** (241–328k): a handoff that bundled a site, four demos and three notebooks; a 757-line refactor; a crawler review; a viewer build; an eight-task typed list. The guard fired mid-item in each, where its handoff advice can't apply. These five ran 25.5k–37.1k units per call, the other ten 15.6k–28.6k. The rules now let an item stop at a step boundary above ~120k and ask a handoff to name one deliverable per session; the guard's in-item text points at step boundaries, counted output and ranged reads. In 2ebc2f69 one full read of a 2.8k-line file carried ~40k tokens through 70 calls, ~14% of the session's cache reads.
+- **Four more idle rebuilds, 9.8–17.3% each:** a `/field-report` typed 204 min after an item closed with a prose line instead of a picker (f4ddbc11), a picker answered after 61 min at 133k (c3b22c1e), a hand-paste loop paused for 237 min (0b474ff6), and an 87-min gap at 116k (b4f23cf6). The guard's idle hold watches typed prompts only, so the picker answer went through. The rules now close every item with a picker that offers "`/clear`, then `/next`" and `/field-report`, and refresh the handoff before a picker or hand-paste step above ~100k.
+- **The handoff sat outside the project root three times** (`private/` in one project because of Jekyll, `revision/` in another), at 1–2 calls each. `/next` now looks one folder down and in the project memory; the rule asks for the root plus `.git/info/exclude`.
+- **`cd` stuck in 5 of the 15 sessions despite the rule**; in one, a strict build failed ~50 calls later on a relative snippet path. A subshell `(cd sub && …)` leaves the Bash tool's directory alone ([verified behaviour](verified-behaviour.md)), and the rule now says so. A hook that flags the bare form is on the Roadmap.
+- **9 status requests in three sessions**, all after an unexpected result, before a long call (venv builds, a 10-minute test run) or in a run of Writes. In a fourth session the user lost track of the plan at 133k. The status rule now covers those points and asks for the plan position in plain words on a resume.
+- **Checks in the audience's own tool.** Examples prepared for upstream maintainers passed the project's schema and failed in the maintainers' online editor (~16 calls and a round trip). nbclient stalled on a widget notebook, and a real JupyterLab showed the Bokeh failure; a fresh venv found two doc errors that the project's execute check missed because it skips the install cell. A CSP hash held only at the harness's 1280 px, and 53 unit tests passed while a keyword change moved 6 off-topic posts into the top tier. Each is now a data-check rule.
+- **Delegation was rare.** The nine orchestrator sessions launched one delegate run between them (8e2592ed): the byte-identity baseline was proven both ways before launch, Codex passed it in round 1, and four small fixes after the Cursor review went in inline. Second opinions ran in six sessions, in the background, without waiting. In f4ddbc11 `ask --agent both --effort high` reviewed uncommitted main-tree work and found three real defects, which `delegate review` can't do (Roadmap: `--working-tree`). SKILL.md now covers acceptance scripts written for the main tree and a tutorial checker that always exits 0.
+- **A control session overrode a typed request:** in 2ebc2f69 the user asked for Cursor, the claude-only draw blocked it, and all 90 calls ran on Claude. The control line now says to tell the user in one line.
+- **`delegate report` fixes.** Two audit runs launched in one session and cleaned up in the next (c3057ac0) were copied into the second report; copied runs now keep their launch session, and the skeleton names it. A session's `delegate ask` calls were missing from the skeleton; it now counts them from the session log.
+- **This repo's own tests caused 912 Nextcloud sync errors** (found in 67cbd1d1, all under `claude-orchestrator/.delegate/tmp/`): the documented test command put TMPDIR inside the synced checkout, and one test set file mtimes to 1970. TMPDIR now stays outside, test mtimes are plausible, and a secret-guard test that passed only inside a git checkout now runs in a real repo.
+- **Not adopted:** a shared `cdp.mjs` helper for headless browser checks (the traps went into one rule line instead), a guard that names a clean, pushed tree before Q&A, and project-specific shell notes (`gh run list --commit` needs a full SHA, ugrep's limits on long patterns, `uv run --with` for one-off parsing). Worktree metadata under `.git/worktrees` drew transient "could not get modification time" warnings in four synced repos, which comes with keeping git worktrees in a synced folder.
 
 ## Still open
 

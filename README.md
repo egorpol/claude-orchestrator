@@ -10,10 +10,10 @@ It is a snapshot, published in case parts of it are useful to someone else. It i
 
 ## What it achieved so far
 
-These figures come from 21 Claude Code sessions across five projects, 2026-10-09 to 2026-10-13; the per-session numbers are in [field results](docs/field-results.md). Cost units weigh tokens by API price: input 1, cache read 0.1, cache write 2, output 5. Each session did different work, so the comparisons are per call, not controlled experiments.
+These figures come from 36 Claude Code sessions across seven projects, 2026-10-09 to 2026-10-20; the per-session numbers are in [field results](docs/field-results.md). Cost units weigh tokens by API price: input 1, cache read 0.1, cache write 2, output 5. Each session did different work, so the comparisons are per call, not controlled experiments.
 
-- **Short sessions with handoffs.** The baseline was one 13-hour session: 389 calls, with context growing to 779k tokens. Each call re-reads everything before it, so cost grows with the square of session length; cache re-reads were 98% of its tokens. It averaged 67.4k cost units per call. The 20 sessions since averaged 24.8k (63% less), and those that did one item from a `HANDOFF.md` ran 17.7k–24.9k (the top one paid 18% for an idle rebuild). The rules and the hook push for one work item per session.
-- **Idle cache rebuilds.** After an hour idle, the prompt cache expires, and the next turn rewrites the whole context at twice the input price. That happened in 10 of the 21 sessions and cost 12% of all logged units (8.2M of 68.8M). The hook now holds the first typed prompt after an hour idle and suggests `/clear`; it first fired live on 2026-10-13. Slash commands pass, and two rebuilds came from a `/field-report` typed after the break.
+- **Short sessions with handoffs.** The baseline was one 13-hour session: 389 calls, with context growing to 779k tokens. Each call re-reads everything before it, so cost grows with the square of session length; cache re-reads were 98% of its tokens. It averaged 67.4k cost units per call. The 35 sessions since averaged 24.6k (about 64% less), and those that did one item from a `HANDOFF.md` ran 16.5k–31.6k; the three above 27k each let that one item grow past 240k. The rules and the hook push for one work item per session.
+- **Idle cache rebuilds.** After an hour idle, the prompt cache expires, and the next turn rewrites the whole context at twice the input price. That happened in 14 of the 36 sessions and cost 9.5% of all logged units (9.1M of 96.1M). The hook now holds the first typed prompt after an hour idle and suggests `/clear`; it first fired live on 2026-10-13. Slash commands and picker answers pass, and three rebuilds came from a `/field-report` typed after the break.
 - **No polling.** In the baseline, 40 status checks cost 15.3% of the session. A finished delegate run now puts its status, at most 20 lines, into the task notification.
 - **Delegation.**
   - On the baseline day, Cursor Auto used about 5× fewer tokens per run than Codex at xhigh effort, and moved its quota pool about 1 point over 9 runs.
@@ -74,7 +74,7 @@ Most of the rules here started as a lesson from a real session. To log one, type
 ## Tests
 
 ```bash
-mkdir -p .delegate/tmp && TMPDIR=$PWD/.delegate/tmp python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests
 ```
 
 The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
@@ -83,6 +83,9 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 
 - Personal tuning in an optional `catalog.local.json`, merged key by key over `catalog.json`.
 - Machine-readable reviews through `codex exec --output-schema`.
+- `delegate review --working-tree [--base REF]`: review uncommitted work in the main tree, with the diff and untracked files as a patch.
+- `--preflight` warnings for brief paths outside the worktree and for a checker that prints failures but exits 0.
+- A hook that flags a `cd` away from the project root: 5 of 15 sessions from 2026-10-13 to 10-20 broke the written rule.
 - The open ideas in the [survey](docs/related-projects.md): loop cost scoring, pre-launch approval policies, `.worktreeinclude`, control-session preregistration and blocked assignment, quota refresh at dispatch.
 
 ## Docs
