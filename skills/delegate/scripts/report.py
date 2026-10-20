@@ -192,9 +192,17 @@ def append_runs(data, rows, sid, repo):
     for row in rows:
         pair = (row.get("run"), row.get("ts"))
         if pair not in seen:
-            new.append({**row, "repo": repo, "session": sid})
+            # A run cleaned up here may have been launched by an earlier session; keep that one.
+            new.append({**row, "repo": repo, "session": row.get("session") or sid})
             seen.add(pair)
     return _append_bytes(data, b"".join(_encoded_row(row) for row in new)), len(new)
+
+
+def session_asks(session):
+    """`delegate ask` calls the session made, from the delegate rows in the session log."""
+    path = runs.session_log_path()
+    return [r for r in _log_rows(path) if r.get("event") == "delegate"
+            and r.get("command") == "ask" and _same_session(r["session"], session)]
 
 
 def _fmt_tokens(n):
@@ -272,7 +280,7 @@ def render_prompt_contexts(prompts):
     return f"Context at typed prompts: {contexts or 'none'}."
 
 
-def render_skeleton(row, summary, runs):
+def render_skeleton(row, summary, runs, asks=()):
     total = summary["cost_units"] or 1
     parts = summary["cost_parts"]
     shares = ", ".join(f"{label} {100 * parts[key] / total:.1f}%" for key, label in (
@@ -293,8 +301,11 @@ def render_skeleton(row, summary, runs):
         run_text = "\n" + "\n".join(
             f"- `{r.get('run', '?')}`: {r.get('agent', '?')} {r.get('model', '?')}, "
             f"{len(r.get('rounds') or [])} round(s), {r.get('outcome') or 'unknown'}"
+            + (f", launched in session `{r['session'][:8]}`"
+               if r.get("session") and not _same_session(r["session"], row["session"]) else "")
             for r in runs
         )
+    ask_text = f"{len(asks)} ({', '.join(a.get('agent') or '?' for a in asks)})" if asks else "none"
     return f"""# Field report: {row['item'] or 'TODO title'} ({row['date']})
 
 Orchestrator: {row['model'] or 'unknown model'} (session `{row['session'][:8]}`). Started from <!-- handoff file or first prompt -->. <!-- items, delegates, commits -->. Machine-readable rows: `token_usage.jsonl`, `runs.jsonl`.
@@ -312,6 +323,8 @@ Session up to this log: {row['api_calls']} calls, {_fmt_tokens(row['cache_read']
 Quota at the end: {quota_text}.
 
 Delegate runs: {run_text}.
+
+Delegate asks: {ask_text}.
 
 ## What worked
 
@@ -393,7 +406,7 @@ def cmd_report(a):
         runs = matching_runs(repo_dir, first)
         old_runs = _read_bytes(runs_path)
         run_data, copied = append_runs(old_runs, runs, row["session"], repo)
-        markdown = render_skeleton(row, summary, runs)
+        markdown = render_skeleton(row, summary, runs, session_asks(row["session"]))
         if not a.dry_run:
             directory.mkdir(parents=True, exist_ok=True)
             _atomic_write(usage_path, usage)

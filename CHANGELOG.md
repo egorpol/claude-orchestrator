@@ -30,6 +30,8 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - The context guard ignores events other than `UserPromptSubmit`: cursor-agent runs the hooks in `~/.claude/settings.json` as `beforeSubmitPrompt`.
 - `delegate report` gives copied run rows the session row's `repo` (`owner/name`), so the two rows of one report agree; the folder path stays in `repo_path`.
 - `delegate rate` also reads prompts typed while Claude was working. The transcript records them only as `queued_command` attachments, so the rater missed them (7 in the 68 local transcripts); task notifications and messages from other sessions stay out.
+- `delegate report` keeps the launching session on a run that a later session cleaned up, and the skeleton names it; the skeleton also counts the session's `delegate ask` calls from the session log.
+- Tests: the documented command keeps TMPDIR outside the checkout (in `.delegate/tmp/` of a Nextcloud-synced checkout, test files drew 912 sync errors), test mtimes are plausible dates, and a secret-guard test that passed only inside a git checkout runs in a real repo.
 
 ### Changed
 
@@ -43,6 +45,10 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - SKILL.md: `install.sh --bin` for a bare `delegate`; web access of the `ask` agents.
 - Field results: four more 2026-10-13 sessions and a `mode` column; README totals now cover 21 sessions, and the idle hold has been seen live.
 - `docs/related-projects.md` folds in the 2026-10-13 wide survey (Codex with live web search): new orchestrators and routers, a quota-aware routing section, and a measurement section on the ccusage family, Claude Code's OpenTelemetry export and published controlled comparisons. It also records which of the survey's recommendations are done and adds the rest to the open list and the README roadmap.
+- Rules from 15 field reports (2026-10-13 to 10-20): an item may stop at a step boundary above ~120k; every item closes with a picker; above ~100k the handoff is refreshed before a picker or hand-paste step; `HANDOFF.md` stays at the root (`.git/info/exclude`); status lines after unexpected results, before long calls and with the plan position on a resume; checks in the audience's own tool, same-day before/after runs for scoring changes, headless browser checks; ranged reads of large files; subshell `cd`, `pgrep -f`, `;` between probes, counted output, PASS/FAIL lines, whole-sentence replaces and kept file formatting.
+- `/next` looks one folder down (such as `private/HANDOFF.md`) and in the project memory when the root has no `HANDOFF.md`.
+- The claude-only control line says the mode holds when the user asks to delegate, and to tell them in one line. The context guard's in-item advice adds counted output, ranged reads and a handoff at the next step boundary.
+- SKILL.md: acceptance scripts with checkout-relative paths, `sys.executable` and one planted failure; `ask --agent both --effort high` as the review of uncommitted main-tree work; no polling a background `ask`; brief inputs outside the worktree; audit findings with reproducible checks.
 
 ## [0.1.0] - 2026-10-13
 

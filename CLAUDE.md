@@ -29,7 +29,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
 ## Checking a change
 
 ```bash
-mkdir -p .delegate/tmp && TMPDIR=$PWD/.delegate/tmp python3 -m unittest discover -s tests   # fake agents, no quota
+python3 -m unittest discover -s tests   # fake agents, no quota; TMPDIR outside the checkout
 bash -n install.sh
 ```
 
@@ -39,6 +39,7 @@ bash -n install.sh
 - **Real-data checks** (read-only, maintainer's machine only):
   - `delegate status <run>` against the old records in `~/.cache/claude-delegate/runs/PublicDomainSheetMusicFinder/`;
   - `delegate cost --session 762dc86f` must print 389 calls and cache_read 174,522,404. The session was resumed for 3 calls after the 2026-10-09 analysis, so older docs quote 386.
+- **Keep TMPDIR outside this checkout.** Nextcloud syncs `.delegate/tmp/` and flagged 912 test files there as having invalid modification times (2026-10-13).
 - **Real agent runs spend quota.** Use a throwaway repo in the scratchpad.
 - **Installer:** test it against `CLAUDE_CONFIG_DIR=<scratch>`, never the real `~/.claude`.
 - **Docs:** after a behaviour change, update SKILL.md, plus `docs/verified-behaviour.md` with the date when the fact was tested live, plus a line under `[Unreleased]` in CHANGELOG.md.

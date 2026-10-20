@@ -151,13 +151,15 @@ def main():
                 f"Context guard: this session's context is ~{k}k tokens and every call re-reads all of it "
                 "(a fresh session starts at ~35k). Decide whether this prompt starts a new work item: the "
                 "previous item is committed, merged or handed off, the user turns to a different topic, or a "
-                "finished build turns into Q&A support. If it does, do not start it here, even after 'go on'. "
+                "finished build turns into Q&A support or a hand-paste loop. If it does, do not start it here, even after 'go on'. "
                 "First write or refresh the handoff (memory files plus a short HANDOFF.md: state, open PRs or "
                 "delegate runs, decided cases, next step), then offer '/clear, then /next' in one line (/next "
                 "continues from HANDOFF.md; a command can't run /clear itself). Start in place only if the user then says so. If the prompt continues the current "
                 "item, carry on: batch independent tool calls, wait for background-run notifications instead "
-                "of polling, and hand mechanical parts with a clear spec (tests from a spec, multi-file doc "
-                "refreshes) to `delegate`."
+                "of polling, hand mechanical parts with a clear spec (tests from a spec, multi-file doc "
+                "refreshes) to `delegate`, keep probe and test output to counts and pass/fail lines, and "
+                "read large files through grep and line ranges. If the item has a step boundary ahead (the "
+                "next guided step, one of several deliverables), hand off there and list the rest."
             ),
         },
     }))
