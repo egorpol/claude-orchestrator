@@ -233,6 +233,28 @@ class SessionModeTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "initial item")
         self.assertEqual(self.rows()[-1]["handoff"], str(target))
 
+    def test_session_end_copies_latest_handoff_for_known_sessions_only(self):
+        handoff = self.repo / "HANDOFF.md"
+        handoff.write_text("start state", encoding="utf-8")
+        self.start()
+        start_copy = Path(self.rows()[-1]["handoff"])
+        handoff.write_text("item done; next: the viewer", encoding="utf-8")
+        self.event("SessionEnd", reason="clear")
+        end_copy = Path(self.rows()[-1]["handoff"])
+        self.assertEqual(end_copy.name, "s1.end.md")
+        self.assertEqual(end_copy.read_text(), "item done; next: the viewer")
+        self.assertEqual(start_copy.read_text(), "start state")
+        # A resumed session ends again; its end copy follows the latest end.
+        handoff.write_text("after resume", encoding="utf-8")
+        self.event("SessionEnd", reason="logout")
+        self.assertEqual(end_copy.read_text(), "after resume")
+        self.assertEqual(sorted(p.name for p in end_copy.parent.iterdir()), ["s1.end.md", "s1.md"])
+        self.event("SessionEnd", session="unknown", reason="logout")
+        self.assertIsNone(self.rows()[-1]["handoff"])
+        handoff.unlink()
+        self.event("SessionEnd", reason="other")
+        self.assertIsNone(self.rows()[-1]["handoff"])
+
     def test_handoff_errors_are_silent_and_do_not_abort_start(self):
         (self.repo / "HANDOFF.md").write_text("item", encoding="utf-8")
         self.log.parent.mkdir()
@@ -572,7 +594,7 @@ class SessionModeTests(unittest.TestCase):
         self.transcript.write_text("not json\n" + "".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
         self.assertIsNone(self.event("SessionEnd", reason="prompt_input_exit"))
         row = self.rows()[-1]
-        self.assertEqual(set(row), {"event", "session", "ts", "reason", "mode", "calls", "reroll"})
+        self.assertEqual(set(row), {"event", "session", "ts", "reason", "mode", "calls", "reroll", "handoff"})
         self.assertEqual((row["event"], row["mode"], row["calls"]), ("end", "claude-only", 2))
         self.assertEqual(row["reason"], "prompt_input_exit")
         self.assertIs(row["reroll"], False)

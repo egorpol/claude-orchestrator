@@ -138,7 +138,7 @@ class RateTests(unittest.TestCase):
             user("last", "2026-10-13T10:00:00Z"), assistant("last-call", "2026-10-13T10:01:00Z"),
         ])
         rating = rate.rating_row(self.record(), "packet", [item(0), item(1), item(2)], "cursor", "auto")
-        self.assertEqual(rating["rubric"], "v1")
+        self.assertEqual(rating["rubric"], rate.RUBRIC)
         self.assertEqual(rating["prompt_ts"], ["2026-10-13T09:00:00Z", "2026-10-13T09:30:00Z",
                                               "2026-10-13T10:00:00Z"])
         totals = rate.item_costs(rating, self.transcript, cost.DEFAULT_WEIGHTS, None)
@@ -181,7 +181,8 @@ class RateTests(unittest.TestCase):
     def test_packet_sections_timings_redaction_and_determinism(self):
         words = ("DELEGATE delegation Codex CURSOR-agent cursor ORCHESTRATOR orchestrating "
                  "claude-only Vanilla control session session-mode session mode gpt-6.1-sol "
-                 "SOL second opinion second opinions")
+                 "SOL second opinion second opinions Cursor Auto --agent both --agent=codex both models "
+                 "other vendor vendors")
         handoff = self.root / "start.md"
         handoff.write_text(words + "\ncontinue this item", encoding="utf-8")
         self.start["handoff"] = str(handoff)
@@ -196,6 +197,7 @@ class RateTests(unittest.TestCase):
         self.assertIn("### P0 (0.0 min)", packet)
         self.assertIn("### P1 (0.0 min)", packet)
         self.assertIn("## HANDOFF.md at session start", packet)
+        self.assertIn("\n> continue this item\n", packet)
         self.assertIn("## Commits in the session window", packet)
         self.assertIn("abc123 [redacted] [redacted] work", packet)
         self.assertNotIn("SECRET", packet)
@@ -210,11 +212,11 @@ class RateTests(unittest.TestCase):
         self.start["handoff"] = str(handoff)
         with mock.patch("rate.session_commits", return_value="(none)"):
             packet = rate.build_packet(self.record())
-            body = packet.split("## HANDOFF.md at session start\n", 1)[1].split("\n\n## Commits", 1)[0]
-            self.assertEqual(len(body), 8000)
+            body = packet.split("## HANDOFF.md at session start\n", 1)[1].split("\n\n## HANDOFF.md at session end", 1)[0]
+            self.assertEqual(len(body), len("> ") + 8000)  # one line, quoted
             self.assertTrue(body.endswith(rate.TRUNCATED))
             handoff.unlink()
-            self.assertNotIn("## HANDOFF", rate.build_packet(self.record()))
+            self.assertNotIn("## HANDOFF.md at session start", rate.build_packet(self.record()))
 
     def test_next_marker_says_when_no_copy_was_saved(self):
         self.write_rows(self.transcript, [user("<command-name>/next</command-name>\nfocus x")])
@@ -228,6 +230,54 @@ class RateTests(unittest.TestCase):
                 packet = rate.build_packet(self.record())
                 self.assertIn(rate.NEXT_PROMPT_NO_COPY + "\nfocus x", packet)
                 self.assertNotIn(rate.NEXT_PROMPT, packet)
+
+    def test_end_state_prefers_session_end_copy_then_next_start_within_gap(self):
+        start_copy, next_copy, end_copy = (self.root / f"{name}.md" for name in ("start", "next", "end"))
+        start_copy.write_text("next: build the viewer", encoding="utf-8")
+        next_copy.write_text("viewer done 2026-10-13; next: Codex review", encoding="utf-8")
+        self.start.update(repo_dir="proj", handoff=str(start_copy))
+        # Last call 10:00Z; this start at 10:20Z is within the 30-minute gap.
+        later = {"event": "start", "session": OTHER, "ts": "2026-10-13T12:20:00+02:00", "source": "clear",
+                 "repo_dir": "proj", "handoff": str(next_copy)}
+        record = self.record([self.start, self.summary, later])
+        self.assertEqual((record["end_handoff"], record["end_source"]), (str(next_copy), "next-start"))
+        with mock.patch("rate.session_commits", return_value="(none)"):
+            packet = rate.build_packet(record)
+        self.assertIn("## Prompts (session date 2026-10-13)", packet)
+        self.assertIn("## HANDOFF.md at session start\n> next: build the viewer\n\n"
+                      "## HANDOFF.md at session end\n> viewer done 2026-10-13; next: [redacted] review\n\n"
+                      "## Commits", packet)
+        for change in ({"ts": "2026-10-13T10:31:00Z"}, {"ts": "2026-10-13T09:59:00Z"}, {"repo_dir": "other"},
+                       {"source": "resume"}, {"session": SESSION}, {"handoff": str(self.root / "gone.md")},
+                       {"handoff": None}):
+            record = self.record([self.start, self.summary, {**later, **change}])
+            self.assertEqual((record["end_handoff"], record["end_source"]), (None, None), change)
+        earlier = {**later, "session": "early", "ts": "2026-10-13T10:05:00Z", "handoff": str(start_copy)}
+        # An earlier start in the gap that can't vouch for the end state blocks the later one:
+        # no copy, a resume, or a repeated start row whose copy dates from its first start.
+        repeated = {**earlier, "ts": "2026-10-13T09:00:00Z"}
+        for blockers in ([{**earlier, "handoff": str(self.root / "gone.md")}], [{**earlier, "handoff": None}],
+                         [{**earlier, "source": "resume"}], [repeated, earlier]):
+            record = self.record([self.start, self.summary, *blockers, later])
+            self.assertEqual((record["end_handoff"], record["end_source"]), (None, None), blockers)
+        record = self.record([self.start, self.summary, later, earlier])
+        self.assertEqual(record["end_handoff"], str(start_copy))
+        with mock.patch("rate.session_commits", return_value="(none)"):
+            self.assertIn("## HANDOFF.md at session end\n(unchanged from the start copy)",
+                          rate.build_packet(record))
+        # Without a repo_dir the next start must share the cwd.
+        del self.start["repo_dir"]
+        self.assertIsNone(self.record([self.start, self.summary, later])["end_handoff"])
+        self.assertEqual(self.record([self.start, self.summary, {**later, "cwd": self.start["cwd"]}])
+                         ["end_handoff"], str(next_copy))
+        # The session's own SessionEnd copy wins over any next start.
+        end_copy.write_text("x" * 9000, encoding="utf-8")
+        ended = {"event": "end", "session": SESSION, "handoff": str(end_copy)}
+        record = self.record([self.start, self.summary, later, ended])
+        self.assertEqual((record["end_handoff"], record["end_source"]), (str(end_copy), "end"))
+        with mock.patch("rate.session_commits", return_value="(none)"):
+            body = rate.build_packet(record).split("## HANDOFF.md at session end\n", 1)[1].split("\n\n## Commits")[0]
+        self.assertEqual(len(body), len("> ") + rate.HANDOFF_LIMIT)
 
     def test_packet_cap_trims_longest_prompts_first_and_is_deterministic(self):
         prompts = [user("x" * 1990) for _ in range(40)] + [user("KEEP SHORT")]
@@ -311,7 +361,7 @@ class RateTests(unittest.TestCase):
             packet = rate.build_packet(self.record([self.summary]))
         commits.assert_called_once_with(str(self.root), datetime(2026, 10, 13, 9, tzinfo=timezone.utc),
                                         datetime(2026, 10, 13, 10, tzinfo=timezone.utc))
-        self.assertNotIn("## HANDOFF", packet)
+        self.assertNotIn("## HANDOFF.md at session start", packet)
 
     def test_explicit_without_summary_uses_last_call_timestamp(self):
         self.write_rows(self.transcript, [user(cwd=str(self.root)), assistant("m", "2026-10-13T11:00:00Z")])
@@ -430,6 +480,21 @@ class RateTests(unittest.TestCase):
         self.assertEqual(rate.parse_reply('{"items": []}', 0), [])
         self.assertEqual(rate.parse_reply(json.dumps({"items": [item(), item(1)]}), 2), [item(), item(1)])
 
+    def test_field_report_prompts_start_their_own_typed_items(self):
+        rows = [user("work"), user("<command-name>/field-report</command-name>\n<command-args>x</command-args>"),
+                user("commit")]
+        self.assertEqual(rate.field_report_prompts(rate.typed_prompts(rows)), [1])
+        report = item(1, type="field-report")
+        self.assertEqual(rate.parse_reply(json.dumps({"items": [item(), report]}), 3, [1]), [item(), report])
+        for items, starts, message in (
+                ([item(), item(1)], [1], "item 1 type must be field-report"),
+                ([item(), item(2, type="field-report")], [1], "item 1 type must be field-report"),
+                ([item(), report], [], "item 1 type must be field-report"),
+                ([item(type="field-report")], [1], "item 0 type must be field-report"),
+                ([item()], [1], "P1 must each start an item of type field-report")):
+            with self.assertRaisesRegex(ValueError, message):
+                rate.parse_reply(json.dumps({"items": items}), 3, starts)
+
     def test_one_invalid_reply_retried_in_fresh_empty_directory_and_cleaned_up(self):
         directories, prompts = [], []
 
@@ -503,13 +568,26 @@ class RateTests(unittest.TestCase):
         self.assertEqual([r["event"] for r in rows], ["start", "summary", "rating"])
         row = rows[-1]
         self.assertEqual(set(row), {"event", "session", "ts", "rubric", "rater", "prompts",
-                                    "prompt_ts", "packet_sha256", "items"})
+                                    "prompt_ts", "packet_sha256", "end_state", "items"})
         self.assertEqual((row["session"], row["rubric"], row["rater"], row["prompts"], row["items"]),
-                         (SESSION, "v1", "cursor/auto", 2, [item()]))
+                         (SESSION, rate.RUBRIC, "cursor/auto", 2, [item()]))
         self.assertEqual(row["prompt_ts"], ["2026-10-13T09:00:00Z", "2026-10-13T10:00:00Z"])
         self.assertIsNotNone(datetime.fromisoformat(row["ts"]).utcoffset())
         packet = rate.build_packet(self.record())
         self.assertEqual(row["packet_sha256"], hashlib.sha256(packet.encode("utf-8")).hexdigest())
+
+    def test_cli_passes_field_report_prompts_and_logs_end_state(self):
+        self.write_rows(self.transcript, [user(), user("<command-name>/field-report</command-name>")])
+        end_copy = self.root / "end.md"
+        end_copy.write_text("done", encoding="utf-8")
+        self.write_rows(self.log, [self.start, self.summary,
+                                   {"event": "end", "session": SESSION, "handoff": str(end_copy)}])
+        reply = [item(), item(1, type="field-report")]
+        with mock.patch("rate.rate_packet", return_value=reply) as rater:
+            self.assertEqual(self.invoke("--session", SESSION)[0], 0)
+        self.assertEqual(rater.call_args.args[5], [1])
+        row = rate.json_rows(self.log)[-1]
+        self.assertEqual((row["end_state"], row["items"]), ("end", reply))
 
     def test_append_rating_is_one_unbuffered_write(self):
         stream = mock.MagicMock()
@@ -536,7 +614,7 @@ class RateTests(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertIn(SESSION[:8] + " mode=vanilla prompts=2 packet=", out)
         self.assertIn("## Prompts", out)
-        self.assertNotIn("## HANDOFF", out)
+        self.assertNotIn("## HANDOFF.md at session start", out)
         self.assertEqual(before, self.log.read_bytes())
         run.assert_not_called()
 
@@ -671,13 +749,35 @@ class ItemReportTests(unittest.TestCase):
         self.assertEqual([i["calls"] for i in by_id["rated"]["items"]], [1, 1, 1])
         self.assertIsNone(by_id["pending"]["items"])
         text = cost.render_by_mode(result, sessions=True)
-        self.assertIn("items (rubric v1", text)
+        self.assertIn(f"items (rubric {rate.RUBRIC}", text)
         self.assertIn("1/1 0.00", text)  # docs: one finished item at 135e-6 USD
         lines = text.splitlines()
         section = next(i for i, l in enumerate(lines) if l.startswith("items (rubric"))
         line = next(l for l in lines[section:] if l.startswith("vanilla"))
-        self.assertEqual(line.split()[1:], ["1", "1", "3", "2", "1", "0", "1", "67", "3.00"])
+        self.assertEqual(line.split()[1:], ["1", "1", "3", "2", "1", "0", "1", "67", "3.00", "3.00", "0", "0"])
         self.assertIn("2/3", text)
+
+    def test_field_reports_left_out_with_range_and_end_state_coverage(self):
+        self.write_calls(self.transcript, [assistant("a", "2026-10-13T09:10:00Z")])
+        rating = {**self.rating, "end_state": "next-start",
+                  "items": [item(), item(2, status="unclear"), item(3, type="field-report", status="unclear")]}
+        rows = (self.session_rows("rated", "orchestrator", self.transcript, 6.0, rating)
+                + self.session_rows("bare", "orchestrator", self.transcript, 2.0,
+                                    {**self.rating, "items": [item(status="partial")]}))
+        result = rate.attach_items(cost.by_mode(rows, []), rows, self.weights, self.prices)
+        items = result["arms"]["orchestrator"]["items"]
+        self.assertEqual((items["items"], items["finished"], items["unclear"], items["field_reports"]), (3, 1, 1, 1))
+        self.assertEqual((items["rated_sessions"], items["end_state_sessions"]), (2, 1))
+        self.assertEqual(items["usd_per_finished"], 8.0)  # field-report USD stays in the numerator
+        self.assertEqual(items["usd_per_finished_or_unclear"], 4.0)
+        self.assertNotIn("field-report", items["by_type"])
+        self.assertNotIn("field-report", result["item_order"]["by_type"])
+        text = cost.render_by_mode(result, sessions=True)
+        lines = text.splitlines()
+        section = next(i for i, l in enumerate(lines) if l.startswith("items (rubric"))
+        line = next(l for l in lines[section:] if l.startswith("orchestrator"))
+        self.assertEqual(line.split()[-4:], ["8.00", "4.00", "1", "1"])
+        self.assertIn("1/2", text)  # FIN/ITEMS of "rated" leaves the field report out
 
     def test_missing_transcript_counts_as_error_not_rated(self):
         rows = self.session_rows("gone", "orchestrator", self.root / "missing.jsonl", 2.0, self.rating)
