@@ -356,6 +356,16 @@ class TestByMode(unittest.TestCase):
         self.session_log = Path(tmp.name) / "sessions.jsonl"
         self.run_log = Path(tmp.name) / "runs.jsonl"
         self.weights = {"orchestrator": 0.5, "claude-only": 0.25, "vanilla": 0.25}
+        # The default saved fit sits next to the quota log: keep the real one out.
+        env = mock.patch.dict(os.environ, {"CLAUDE_DELEGATE_QUOTA_LOG": str(Path(tmp.name) / "quota" / "quota.jsonl")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.calibration = {"path": "/x/calibration.json", "saved_at": "2026-10-20T12:00:00+02:00",
+                            "span": ["2026-10-13T08:00:00+00:00", "2026-10-20T09:00:00+00:00"],
+                            "readings": 471, "since": None,
+                            "pools": {"claude-5h": {"per_usd": 2.0, "p5": 1.9, "p95": 2.1},
+                                      "claude-7d": {"per_usd": 0.5, "p5": 0.4, "p95": 0.6},
+                                      "other-pool": {"per_usd": 9.0, "p5": None, "p95": None}}}
 
     def start(self, session="session-a", mode="orchestrator", **fields):
         return {"event": "start", "session": session, "ts": "2026-10-13T10:00:00+02:00",
@@ -513,8 +523,73 @@ class TestByMode(unittest.TestCase):
         self.assertEqual((arm["usd_list_price"], arm["usd_null_sessions"], arm["usd_per_session"]), (4.5, 1, 1.5))
         text = cost.render_by_mode(result)
         self.assertIn("16.0 (3)", text)
-        header = text.split("pool points used (sum over sessions with a same-window delta, n):\n")[1].splitlines()[0]
-        self.assertEqual(header.split(), ["MODE", "claude-5h", "claude-7d", "codex-5h", "new-pool"])
+        claude = text.split("run `delegate cost --calibrate --save`\n")[1].splitlines()
+        self.assertEqual(claude[0].split("  ")[0], "MODE")
+        self.assertIn("  claude-5h EST  READ", claude[0])
+        self.assertEqual(claude[0].split(), ["MODE", "claude-5h", "EST", "READ", "claude-7d", "EST", "READ"])
+        self.assertEqual(claude[1].split(), ["orchestrator", "-", "16.0", "(3)", "-", "-"])
+        other = text.split("other pools, READ:\n")[1].splitlines()[0]
+        self.assertEqual(other.split(), ["MODE", "codex-5h", "new-pool"])
+        only_other = cost.render_by_mode(self.result([self.start(), self.summary(quota={"pools": {
+            "codex-5h": {"delta": 4.0}}})]))
+        self.assertIn("pool points used, READ (sum, n):\nMODE          codex-5h\norchestrator  4.0 (1)", only_other)
+        self.assertNotIn("READ:", only_other)
+
+    def test_estimated_points_are_usd_times_the_saved_rate(self):
+        rows = [self.start(), self.summary(quota={"pools": {"claude-5h": {"delta": 12.0}}}),
+                self.start("null-usd"), self.summary("null-usd", usd_list_price=None),
+                self.start("third"), self.summary("third", usd_list_price=2.0),
+                self.start("vanilla", mode="vanilla"), self.summary("vanilla", usd_list_price=0.0),
+                self.start("pending")]
+        before = json.dumps(self.calibration)
+        result = self.result(rows, calibration=self.calibration)
+        self.assertEqual(json.dumps(self.calibration), before)
+        sessions = {s["session"]: s for s in result["sessions"]}
+        self.assertEqual(sessions["session-a"]["est_pools"], {"claude-5h": 2.5, "claude-7d": 0.625})
+        self.assertEqual(sessions["null-usd"]["est_pools"], {})
+        self.assertEqual(sessions["pending"]["est_pools"], {})
+        arm = result["arms"]["orchestrator"]
+        self.assertEqual(arm["est_pools"], {"claude-5h": {"sum": 6.5, "n": 2, "mean": 3.25},
+                                            "claude-7d": {"sum": 1.625, "n": 2, "mean": 0.8125}})
+        self.assertEqual(arm["pools"]["claude-5h"], {"sum": 12.0, "n": 1, "mean": 12.0})
+        self.assertEqual(result["arms"]["vanilla"]["est_pools"]["claude-5h"], {"sum": 0.0, "n": 1, "mean": 0.0})
+        self.assertEqual(result["arms"]["claude-only"]["est_pools"]["claude-5h"]["n"], 0)
+        self.assertIs(result["calibration"], self.calibration)
+        text = cost.render_by_mode(result, sessions=True)
+        self.assertIn("EST = list-price USD x points per USD (claude-5h 2, claude-7d 0.5; fit saved 2026-10-20, "
+                      "readings 2026-10-13 to 2026-10-20)", text)
+        self.assertNotIn("other-pool", text)
+        claude = text.split("readings 2026-10-13 to 2026-10-20)\n")[1].splitlines()
+        self.assertEqual(claude[1].split(), ["orchestrator", "6.5", "(2)", "12.0", "(1)", "1.6", "(2)", "-"])
+        self.assertEqual(claude[3].split(), ["vanilla", "0.0", "(1)", "-", "0.0", "(1)", "-"])
+        self.assertTrue(claude[4].startswith("READ: the SessionStart-to-SessionEnd delta"))
+        means = text.split("pool points per measured session (mean):\n")[1].splitlines()
+        self.assertEqual(means[1].split(), ["orchestrator", "3.2", "12.0", "0.8", "-"])
+        header = text.split("sessions:\n")[1].splitlines()[0].split()
+        self.assertEqual(header[7:13], ["CLAUDE-5H", "EST", "READ", "CLAUDE-7D", "EST", "READ"])
+        row = next(line for line in text.splitlines() if line.startswith("session-"))
+        self.assertEqual(row.split()[7:11], ["2.5", "12.0", "0.6", "-"])
+
+    def test_no_saved_fit_prints_dashes_and_where_to_save(self):
+        read = [self.start(), self.summary(quota={"pools": {"claude-7d": {"delta": 3.0}}})]
+        for calibration, where in ((None, ""), ({**self.calibration, "pools": {}},
+                                               " (none usable at /x/calibration.json)")):
+            with self.subTest(calibration=calibration):
+                result = self.result(read, calibration=calibration)
+                self.assertEqual(result["sessions"][0]["est_pools"], {})
+                self.assertEqual(result["arms"]["orchestrator"]["est_pools"], {})
+                text = cost.render_by_mode(result)
+                self.assertIn("EST needs a saved fit: run `delegate cost --calibrate --save`" + where + "\n", text)
+                self.assertIn("\norchestrator  -              3.0 (1)\n", text)
+        # No readings in the summaries: the hint still shows, since estimates need only a fit.
+        unread = [self.start(), self.summary()]
+        text = cost.render_by_mode(self.result(unread, calibration={"path": "/x/c.json", "pools": {}}))
+        self.assertIn("pool points used: no quota readings in the summaries yet\nClaude pool points: EST needs a saved "
+                      "fit: run `delegate cost --calibrate --save` (none usable at /x/c.json)\n", text)
+        self.assertNotIn("EST", cost.render_by_mode(self.result(unread)))
+        only_codex = cost.render_by_mode(self.result([self.start(), self.summary(quota={"pools": {
+            "codex-5h": {"delta": 1.0}}})], calibration={"pools": {}}))
+        self.assertIn("vanilla       -\nClaude pool points: EST needs a saved fit", only_codex)
 
     def test_weights_warning_distinct_configs_and_unknowns(self):
         rows = [self.start(), self.start("same", weights=dict(reversed(list(self.weights.items())))),
@@ -555,8 +630,18 @@ class TestByMode(unittest.TestCase):
         with redirect_stdout(out):
             cost.main(["--by-mode", "--session-log", str(self.session_log), "--log", str(self.run_log), "--json"])
         payload = json.loads(out.getvalue())
-        self.assertEqual(set(payload), {"log", "run_log", "since", "arms", "not_drawn", "skipped_no_start", "weights", "sessions",
-                                        "item_order"})
+        self.assertEqual(set(payload), {"log", "run_log", "since", "calibration", "arms", "not_drawn",
+                                        "skipped_no_start", "weights", "sessions", "item_order"})
+        self.assertEqual(payload["calibration"]["path"], str(self.session_log.parent / "quota" / "calibration.json"))
+        self.assertEqual(payload["calibration"]["pools"], {})
+        saved = self.session_log.parent / "saved.json"
+        saved.write_text(json.dumps({"saved_at": "2026-10-20T12:00:00+02:00", "pools": [
+            {"pool": "claude-7d", "headline": {"unit": "usd", "per_unit": 0.4, "p5": 0.3, "p95": 0.5}}]}))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cost.main(["--by-mode", "--session-log", str(self.session_log), "--log", str(self.run_log), "--json",
+                       "--calibration", str(saved)])
+        self.assertEqual(json.loads(out.getvalue())["sessions"][0]["est_pools"], {"claude-7d": 0.5})
         self.assertEqual((payload["log"], payload["run_log"]), (str(self.session_log), str(self.run_log)))
         self.assertEqual(payload["sessions"][0]["session"], "abcdefgh-long")
         self.assertEqual(payload["arms"]["orchestrator"]["applied"], 1)

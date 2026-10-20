@@ -8,13 +8,16 @@ a pair is regressed on the tokens of every call made in it (all Claude Code
 transcripts, subagents and scratch projects included; Codex pools on
 `~/.codex` rollouts) with non-negative least squares. Claude pools also get a
 one-column fit on list-price USD, the stable headline; classes with too little
-volume to fit are carried at list price times that fit.
+volume to fit are carried at list price times that fit. `--save` stores the
+fit with its date; `cost --by-mode` estimates each session's Claude pool
+points from its list-price USD with the saved rates.
 """
 import bisect
 import json
 import math
 import os
 import random
+import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -402,7 +405,8 @@ def fit_pool(pool, pairs, events, prices=None, seed=0, reference=None):
 
 def calibrate(quota_log, projects, codex_home, prices=None, since=None, seed=0):
     rows = cost.load_jsonl(quota_log)
-    result = {"quota_log": str(quota_log), "readings": len(rows), "pools": []}
+    result = {"quota_log": str(quota_log), "readings": len(rows),
+              "since": since.isoformat() if since else None, "pools": []}
     pair_sets = {}
     for pool in POOLS:
         pairs, stats = snapshot_pairs(rows, pool)
@@ -425,6 +429,43 @@ def calibrate(quota_log, projects, codex_home, prices=None, since=None, seed=0):
         fits[pool] = fit
         result["pools"].append(fit)
     return result
+
+
+def saved_path(path=None, quota_log=None):
+    """Where `--save` writes the fit and `cost --by-mode` reads it: next to the quota log by default."""
+    return Path(path).expanduser() if path else quota.log_path(quota_log).parent / "calibration.json"
+
+
+def save(result, path):
+    """Write the fit with its date, atomically; `--by-mode` keeps using it until the next save."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # per process: two saves must not share one
+    tmp.write_text(json.dumps({**result, "saved_at": datetime.now().astimezone().isoformat(timespec="seconds")},
+                              indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def usd_rates(path):
+    """A saved fit's points per list-price USD by pool, with its date; `pools` is empty when none is usable."""
+    out = {"path": str(path), "saved_at": None, "span": None, "readings": None, "since": None, "pools": {}}
+    try:
+        saved = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return out
+    if not isinstance(saved, dict) or not isinstance(saved.get("pools"), list):
+        return out
+    span = saved.get("span")
+    out.update({key: saved.get(key) if isinstance(saved.get(key), str) else None for key in ("saved_at", "since")},
+               readings=saved.get("readings") if isinstance(saved.get("readings"), int) else None,
+               span=span if isinstance(span, list) and len(span) == 2 and all(isinstance(t, str) for t in span)
+               else None)
+    for fit in saved["pools"]:
+        head = fit.get("headline") if isinstance(fit, dict) else None
+        rate = head.get("per_unit") if isinstance(head, dict) and head.get("unit") == "usd" else None
+        usable = isinstance(rate, (int, float)) and not isinstance(rate, bool) and math.isfinite(rate) and rate > 0
+        if usable and isinstance(fit.get("pool"), str):
+            out["pools"][fit["pool"]] = {"per_usd": rate, "p5": head.get("p5"), "p95": head.get("p95")}
+    return out
 
 
 def _f(v, nd=2):
@@ -540,3 +581,11 @@ def cmd_calibrate(a):
     result = calibrate(quota.log_path(a.quota_log), cost._claude_config_dir() / "projects", codex_home,
                        prices, since=cost._since_dt(a.since))
     print(render(result, as_json=a.json))
+    if a.save:
+        path = saved_path(a.calibration, a.quota_log)
+        save(result, path)
+        rates = usd_rates(path)["pools"]
+        fitted = ", ".join(f"{pool} {rate['per_usd']:.3g}" for pool, rate in rates.items())
+        print(f"saved to {path}: " + (f"`cost --by-mode` now estimates Claude pool points at {fitted} per USD"
+                                      if fitted else "no Claude pool rate fitted, so `cost --by-mode` shows no estimates"),
+              file=sys.stderr if a.json else sys.stdout)
