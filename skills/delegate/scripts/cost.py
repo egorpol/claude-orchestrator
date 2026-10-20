@@ -765,6 +765,12 @@ def render_runs(rows, groups, since=None, repo=None, log_path=None, as_json=Fals
 
 
 def cmd_cost(a):
+    if a.calibrate:
+        if a.by_mode or a.session is not None:
+            sys.exit("--calibrate cannot be combined with --by-mode or --session")
+        import calibrate
+        calibrate.cmd_calibrate(a)
+        return
     if a.by_mode:
         if a.session is not None:
             sys.exit("--by-mode cannot be combined with --session")
@@ -802,6 +808,9 @@ def _add_args(p):
     p.add_argument("--session-log", metavar="PATH",
                    help=f"session log path for --by-mode (default {runs.session_log_path()})")
     p.add_argument("--sessions", action="store_true", help="also print per-session rows with --by-mode")
+    p.add_argument("--calibrate", action="store_true",
+                   help="fit pool points per token class and per list-price USD from quota reading pairs")
+    p.add_argument("--quota-log", metavar="PATH", help="quota readings for --calibrate (default: delegate quota's log)")
     p.set_defaults(fn=cmd_cost)
 
 
