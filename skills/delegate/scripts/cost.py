@@ -719,6 +719,7 @@ def _pool_lines(arms, claude, others, stat, footnote=False):
 def _fin_items(items):
     if items is None:
         return "-"
+    items = [item for item in items if item["type"] != "field-report"]  # overhead, as in rate.attach_items
     return f"{sum(item['status'] == 'finished' for item in items)}/{len(items)}"
 
 
@@ -728,15 +729,19 @@ def _render_items(result):
     money = lambda value: f"{value:.2f}" if value is not None else "-"
     rubric = next(iter(arms.values()))["items"]["rubric"]
     lines = [f"items (rubric {rubric}, rated sessions only; USD/FIN = all USD of rated sessions / finished items):"]
-    table = [("MODE", "RATED", "UNRATED", "ITEMS", "FIN", "PART", "UNCL", "CONT", "FIN%", "USD/FIN")]
+    table = [("MODE", "RATED", "UNRATED", "ITEMS", "FIN", "PART", "UNCL", "CONT", "FIN%", "USD/FIN",
+              "IF UNCL FIN", "END", "FR")]
     for mode in MODES:
         items = arms[mode]["items"]
         share = items["finished_share"]
         table.append((mode, str(items["rated_sessions"]), str(items["unrated_sessions"] + items["errors"]),
                       str(items["items"]), str(items["finished"]), str(items["partial"]), str(items["unclear"]),
                       str(items["continuations"]), f"{share * 100:.0f}" if share is not None else "-",
-                      money(items["usd_per_finished"])))
+                      money(items["usd_per_finished"]), money(items["usd_per_finished_or_unclear"]),
+                      str(items["end_state_sessions"]), str(items["field_reports"])))
     lines.extend(_table_lines(table))
+    lines.append("IF UNCL FIN: USD/FIN with unclear items counted as finished, the range's other end; "
+                 "END: rated sessions with an end-state HANDOFF.md; FR: field-report items, not in ITEMS")
     for key, label in (("by_size", "by size"), ("by_type", "by type")):
         groups = [g for g in result.get("item_order", {}).get(key, [])
                   if any(g in arm["items"][key] for arm in arms.values())]

@@ -5,6 +5,7 @@ SessionStart draws once, injects that mode's rules, and records the assignment.
 Resume/compact recover it from the JSONL log, so intent-to-treat accounting keeps
 the original mode even after compaction. PreToolUse blocks new Codex/Cursor work
 in controls; SessionEnd records distinct main-thread calls and possible rerolls.
+SessionStart (startup/clear) and SessionEnd copy HANDOFF.md for the blinded rater.
 Log/config/rules errors stay silent, and quota.jsonl snapshots and session summaries
 run detached: a broken measurement hook must never get in the way of a session.
 SessionEnd starts `delegate report --auto` (quota reading, then a summary row);
@@ -187,8 +188,8 @@ def nested_handoff(base):
     return matches[0] if len(matches) == 1 else None
 
 
-def snapshot_handoff(cwd, path, session):
-    """Best-effort, bounded start-time copy; never let measurement break a session."""
+def snapshot_handoff(cwd, path, session, end=False):
+    """Best-effort, bounded start- or end-time copy; never let measurement break a session."""
     try:
         if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session):
             return None
@@ -203,8 +204,14 @@ def snapshot_handoff(cwd, path, session):
             return None
         with source.open("rb") as stream:
             data = stream.read(64 * 1024)
-        target = path.parent / "handoffs" / (session + ".md")
+        target = path.parent / "handoffs" / (session + (".end.md" if end else ".md"))
         target.parent.mkdir(parents=True, exist_ok=True)
+        if end:
+            # A resumed session ends again: the latest end state wins, replaced atomically.
+            temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+            temp.write_bytes(data)
+            os.replace(temp, target)
+            return str(target)
         try:
             # Duplicate starts must not overwrite the first start-time evidence.
             with target.open("xb") as stream:
@@ -576,7 +583,9 @@ def main():
                  and not any(previous.get(key) for key in ("forced", "excluded", "unassigned")))
         reroll = bool(data.get("reason") == "clear" and calls is not None
                       and calls <= config["reroll_calls"] and drawn)
-        append_row(path, "end", session, reason=data.get("reason"), mode=mode, calls=calls, reroll=reroll)
+        handoff = snapshot_handoff(data.get("cwd"), path, session, end=True) if previous else None
+        append_row(path, "end", session, reason=data.get("reason"), mode=mode, calls=calls, reroll=reroll,
+                   handoff=handoff)
         if summary_enabled(config):
             # The summary takes the session-end quota reading itself, so the row can embed it.
             transcript = data.get("transcript_path")

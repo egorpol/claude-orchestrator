@@ -91,3 +91,10 @@ Facts tested live, dated, so a reader can tell what may have changed since.
   - Sessions left open read high. Three vanilla sessions spanned 21–92 h with at most 2 h of calls; they read 103 claude-7d points against an estimate of 4.7.
   - Overlapping sessions in other projects read high even when the last call comes right before SessionEnd: claude-5h 51 against 15.8, 45 against 7.9.
   - The claude-5h delta is missing for 25 of the 55 sessions, because the window reset inside the session or a reading was missing or stale.
+- **SessionEnd HANDOFF.md copy, first live run**: session `7260d314` ended with `/clear` at 09:05 and left `<session>.end.md` (8.6 KB), with its path in the end row.
+- **Rubric v2 re-rate** (`delegate rate`, Cursor Auto: 43 sessions in 23 min, then 3 new ones; the v1 rows are kept):
+  - On the 39 sessions both rubrics rated, the 27 v1 `unclear` items became 14 field-report items (one per `/field-report` prompt), 3 finished and 3 partial; 7 stayed unclear. Of v1's 30 finished items, 25 stayed finished, 3 became partial and 2 unclear; 4 of its 7 partial items became finished. The split into items differed in 2 of the 39 sessions (64 items, now 66), so not every change comes from the new evidence.
+  - No rated session had a SessionEnd copy yet. 27 of the 46 got the next session's start copy as their end state, 19 none. With a copy the rater settled 37 of 38 items; 10 of the 11 unclear items are in sessions without one.
+  - 6 of the 7 sessions (among the 39) whose only prompt was `/next` have no end-state copy and stay unclear; the seventh became partial.
+  - USD per finished item, with unclear items counted as finished in brackets: orchestrator 5.30 (3.98), claude-only 5.76 (4.71), vanilla 5.09 (3.96), on 36, 13 and 11 items. v1 gave 5.94, 5.18 and 6.54 on the 39 sessions. Still too few items to compare the arms.
+  - Review (Codex, `ask --effort high`): the next-start fallback could skip a start without a copy and take a later one, or treat a repeated start row as a recent start. Now only the earliest start in the 30-min gap counts. Neither case occurs in the log: all 43 packets hash the same before and after the fix.

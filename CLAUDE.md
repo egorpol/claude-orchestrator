@@ -12,6 +12,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
   - `route.py`: per-task score = ratings × weights × quota
   - `runs.py`: worktree/launch/followup/review/verify/status/wait/diff/apply/cleanup, `meta.json`, environment scrubbing
   - `cost.py`, `ask.py`, `report.py`: session and run-log cost, read-only questions, field-report skeletons and JSONL rows
+  - `rate.py`: `delegate rate`, the blinded item rater (rubric v2), and the item columns of `cost --by-mode`
   - `calibrate.py`: `cost --calibrate`, pool points per USD and per token class from pairs of quota readings; `--save` writes the dated rates that `cost --by-mode` estimates Claude pool points with
 - `skills/delegate/scripts/catalog.json`: user-editable delegates, pools, task weights, `min_quota_pct`, subagent penalty.
 - `install.sh`: links or copies skills into `~/.claude/skills` and `commands/next.md` into `~/.claude/commands`; `--check` checks prerequisites and the private-name deny list; `--hooks` registers `hooks/context-guard.py` and `hooks/secret-guard.py`; `--git-hook=DIR` links `secret-guard.py` as that repo's git pre-commit and pre-push hooks; `--rules` imports `rules/orchestrator.md` into the user-level `CLAUDE.md`, unless session-mode is registered; `--experiment` registers `hooks/session-mode.py` and removes that import; `--timer` installs the systemd user timer for `delegate quota --snapshot --if-active` (test with a scratch `XDG_CONFIG_HOME` and a fake `systemctl`).
