@@ -734,7 +734,9 @@ class ItemReportTests(unittest.TestCase):
                 + self.session_rows("unrated", "vanilla", other, 100.0)
                 + self.session_rows("old", "claude-only", other, 1.0, {**rating, "rubric": "v0"})
                 + [{"event": "start", "session": "pending", "ts": "2026-10-13T08:00:00Z",
-                    "mode": "vanilla", "u": 0.2}])
+                    "mode": "vanilla", "u": 0.2},
+                   {"event": "start", "session": "ghost", "ts": "2026-10-13T08:00:00Z", "mode": "vanilla", "u": 0.3},
+                   {"event": "summary", "session": "ghost", "transcript": None, "calls": 0, "usd_list_price": None}])
         result = rate.attach_items(cost.by_mode(rows, []), rows, self.weights, self.prices)
         items = result["arms"]["vanilla"]["items"]
         self.assertEqual((items["rated_sessions"], items["unrated_sessions"], items["items"]), (1, 1, 3))
