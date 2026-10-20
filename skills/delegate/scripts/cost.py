@@ -490,6 +490,9 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None):
 
     Sessions retain their first start's assignment and last summary/end in file
     order. Per-session records are the aggregation boundary for future ratings.
+    A ghost (a summary with no transcript and no calls: it ended before its first
+    call) counts in `sessions` and `ghosts` only; its 0.0 quota deltas would
+    dilute the means.
     `calibration` is `calibrate.usd_rates()`: estimated pool points are a
     session's list-price USD times the saved points per USD.
     """
@@ -538,6 +541,7 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None):
         summary = entry.get("summary")
         pending = summary is None
         summary = summary or {}
+        ghost = not pending and summary.get("transcript") is None and not summary.get("calls")
         weights = start.get("weights")
         if weights is None:
             unknown += 1
@@ -551,7 +555,7 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None):
             "start_date": ts.astimezone().date().isoformat() if ts is not None else None,
             "mode": start.get("mode"), "repo": start.get("repo"), "repo_dir": start.get("repo_dir"),
             "weights": weights, "reroll": bool((entry.get("end") or {}).get("reroll")),
-            "pending": pending, "summarised": not pending,
+            "pending": pending, "ghost": ghost, "summarised": not pending and not ghost,
             **{key: summary.get(key) or 0 for key in ("calls", "subagent_calls", "cost_units", "blocked")},
             "usd_list_price": usd,
             "delegate": dict(entry["delegate"]), "pools": pools,
@@ -564,30 +568,32 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None):
     sum_fields = ("calls", "subagent_calls", "cost_units", "blocked", "runs", "applied", "discarded")
     for mode in MODES:
         mine = [session for session in sessions if session["mode"] == mode]
-        summarised = sum(session["summarised"] for session in mine)
-        usd = sum(session["usd_list_price"] for session in mine if session["usd_list_price"] is not None)
-        priced = sum(session["usd_list_price"] is not None for session in mine)
+        live = [session for session in mine if not session["ghost"]]
+        summarised = sum(session["summarised"] for session in live)
+        usd = sum(session["usd_list_price"] for session in live if session["usd_list_price"] is not None)
+        priced = sum(session["usd_list_price"] is not None for session in live)
         arm = {
-            "sessions": len(mine), "rerolls": sum(session["reroll"] for session in mine),
+            "sessions": len(mine), "ghosts": len(mine) - len(live),
+            "rerolls": sum(session["reroll"] for session in mine),
             "pending": sum(session["pending"] for session in mine), "summarised": summarised,
-            **{key: sum(session[key] for session in mine) for key in sum_fields},
+            **{key: sum(session[key] for session in live) for key in sum_fields},
             "usd_list_price": usd,
             "usd_null_sessions": sum(session["summarised"] and session["usd_list_price"] is None
-                                     for session in mine),
+                                     for session in live),
             "usd_per_session": usd / priced if priced else None,
-            "calls_per_session": sum(session["calls"] for session in mine) / summarised if summarised else None,
-            "delegate": {command: sum(session["delegate"][command] for session in mine)
+            "calls_per_session": sum(session["calls"] for session in live) / summarised if summarised else None,
+            "delegate": {command: sum(session["delegate"][command] for session in live)
                          for command in DELEGATE_COMMANDS},
             "delegate_tokens": {}, "pools": {},
-            "est_pools": {pool: _points([s["est_pools"][pool] for s in mine if pool in s["est_pools"]])
+            "est_pools": {pool: _points([s["est_pools"][pool] for s in live if pool in s["est_pools"]])
                           for pool in rates},
         }
-        for agent in sorted({agent for session in mine for agent in session["delegate_tokens"]}):
+        for agent in sorted({agent for session in live for agent in session["delegate_tokens"]}):
             arm["delegate_tokens"][agent] = {
-                key: sum(session["delegate_tokens"].get(agent, {}).get(key, 0) for session in mine)
+                key: sum(session["delegate_tokens"].get(agent, {}).get(key, 0) for session in live)
                 for key in DELEGATE_TOKENS}
         for pool in pool_names:
-            arm["pools"][pool] = _points([session["pools"][pool] for session in mine
+            arm["pools"][pool] = _points([session["pools"][pool] for session in live
                                           if session["pools"].get(pool) is not None])
         arms[mode] = arm
     return {"log": None, "run_log": None, "since": since, "calibration": calibration, "arms": arms,
@@ -609,18 +615,21 @@ def render_by_mode(result, as_json=False, sessions=False):
     count = sum(arm["sessions"] for arm in arms.values())
     since = f" since {result['since']}" if result["since"] else ""
     lines = [f"session log: {result['log']}  ({count} drawn sessions{since})"]
-    table = [("MODE", "SESS", "REROLL", "PEND", "CALLS", "SUB", "UNITS", "USD", "USD/S",
+    table = [("MODE", "SESS", "GHOST", "REROLL", "PEND", "CALLS", "SUB", "UNITS", "USD", "USD/S",
               "LAUNCH", "RUNS", "APPLIED", "ASK", "BLOCKED")]
     money = lambda value: f"{value:.2f}" if value is not None else "-"
     for mode in MODES:
         arm = arms[mode]
         has_usd = arm["summarised"] > arm["usd_null_sessions"]
-        table.append((mode, str(arm["sessions"]), str(arm["rerolls"]), str(arm["pending"]),
+        table.append((mode, str(arm["sessions"]), str(arm["ghosts"]), str(arm["rerolls"]), str(arm["pending"]),
                       _fmt_int(arm["calls"]), _fmt_int(arm["subagent_calls"]), _fmt_int(arm["cost_units"]),
                       money(arm["usd_list_price"] if has_usd else None), money(arm["usd_per_session"]),
                       str(arm["delegate"]["launch"]), str(arm["runs"]), str(arm["applied"]),
                       str(arm["delegate"]["ask"]), str(arm["blocked"])))
     lines.extend(_table_lines(table))
+    if any(arm["ghosts"] for arm in arms.values()):
+        lines.append("GHOST: drawn sessions that ended with no transcript and no calls; "
+                     "counted in SESS only, left out of every other column and mean")
     calibration = result.get("calibration") or {}
     read = sorted({pool for arm in arms.values() for pool in arm["pools"]})
     claude = [pool for pool in ESTIMATED_POOLS if pool in read or pool in (calibration.get("pools") or {})]
@@ -668,7 +677,7 @@ def render_by_mode(result, as_json=False, sessions=False):
                   *(label for pool in ESTIMATED_POOLS for label in (f"{pool.upper()} EST", "READ")),
                   "LAUNCH", "APPLIED", "FIN/ITEMS")]
         for session in result["sessions"]:
-            flags = "/".join(key for key in ("reroll", "pending") if session[key]) or "-"
+            flags = "/".join(key for key in ("reroll", "pending", "ghost") if session[key]) or "-"
             table.append((session["session"][:8], session["start_date"] or "-", session["mode"], flags,
                           session["repo"] or session["repo_dir"] or "-",
                           _fmt_int(session["calls"]) if session["summarised"] else "-",

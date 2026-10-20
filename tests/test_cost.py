@@ -609,6 +609,31 @@ class TestByMode(unittest.TestCase):
         self.assertEqual(len(result["weights"]["configs"]), 2)
         self.assertNotIn("warning", cost.render_by_mode(self.result(rows, since="2026-10-14")))
 
+    def test_ghosts_count_in_sessions_only(self):
+        zero = {"pools": {"claude-5h": {"delta": 0.0}, "claude-7d": {"delta": 0.0}}}
+        rows = [self.start("ghost"), self.summary("ghost", transcript=None, calls=0, subagent_calls=0,
+                                                  cost_units=0, usd_list_price=None, blocked=0, quota=zero),
+                self.start("real"), self.summary("real", transcript="/x/real.jsonl", usd_list_price=None,
+                                                 quota={"pools": {"claude-7d": {"delta": 4.0}}}),
+                self.start("no-calls"), self.summary("no-calls", transcript="/x/no-calls.jsonl", calls=0,
+                                                     usd_list_price=0.5),
+                self.start("pending")]
+        result = self.result(rows)
+        arm = result["arms"]["orchestrator"]
+        self.assertEqual((arm["sessions"], arm["ghosts"], arm["summarised"], arm["pending"]), (4, 1, 2, 1))
+        self.assertEqual((arm["calls"], arm["calls_per_session"], arm["usd_null_sessions"]), (10, 5, 1))
+        self.assertEqual(arm["pools"]["claude-7d"], {"sum": 4.0, "n": 1, "mean": 4.0})
+        self.assertEqual(arm["pools"]["claude-5h"], {"sum": 0, "n": 0, "mean": None})
+        self.assertEqual({s["session"]: s["ghost"] for s in result["sessions"]},
+                         {"ghost": True, "real": False, "no-calls": False, "pending": False})
+        text = cost.render_by_mode(result, sessions=True)
+        lines = text.splitlines()
+        self.assertEqual(lines[1].split()[:4], ["MODE", "SESS", "GHOST", "REROLL"])
+        self.assertEqual(lines[2].split()[:3], ["orchestrator", "4", "1"])
+        self.assertIn("GHOST: drawn sessions that ended with no transcript and no calls", text)
+        self.assertEqual(next(l for l in lines if l.startswith("ghost ")).split()[3], "ghost")
+        self.assertNotIn("GHOST:", cost.render_by_mode(self.result(rows[2:])))
+
     def test_empty_arms_have_null_means_and_print_dashes_in_fixed_order(self):
         result = self.result([])
         self.assertEqual(list(result["arms"]), ["orchestrator", "claude-only", "vanilla"])
@@ -618,7 +643,7 @@ class TestByMode(unittest.TestCase):
             self.assertIsNone(arm["calls_per_session"])
         text = cost.render_by_mode(result)
         self.assertEqual([line.split()[0] for line in text.splitlines()[2:5]], list(cost.MODES))
-        self.assertTrue(all(line.split()[7:9] == ["-", "-"] for line in text.splitlines()[2:5]))
+        self.assertTrue(all(line.split()[8:10] == ["-", "-"] for line in text.splitlines()[2:5]))
         self.assertTrue(all(line == line.rstrip() for line in text.splitlines()))
         self.assertIn("pool points used: no quota readings in the summaries yet", text)
 

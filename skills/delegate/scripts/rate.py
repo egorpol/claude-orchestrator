@@ -535,7 +535,7 @@ def attach_items(result, rows, weights, prices):
     for session in result["sessions"]:
         session["items"] = None
         arm = result["arms"].get(session["mode"])
-        if arm is None or session["pending"]:
+        if arm is None or session["pending"] or session["ghost"]:  # a ghost has nothing to rate
             continue
         totals = arm["items"]
         record = records.get(session["session"]) or {}
