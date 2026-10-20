@@ -86,3 +86,8 @@ Facts tested live, dated, so a reader can tell what may have changed since.
     - Fresh input is 0.0% of USD and 5m writes 0.7%, too little to fit. Haiku 5.5 made 12 of the 4,462 calls, so it gets no weights of its own yet.
   - codex-5h, on Codex rollout tokens (gpt-6.1-sol 92% of calls), per million tokens: uncached input 5.5 (3.2–11.3), cached input 1.27 (1.04–1.46), output 196 (172–227). Its RMSE is 0.90, against 0.41 from rounding alone.
   - codex-7d: fitted per pair on codex-5h's weights, 0.164 codex-7d points per codex-5h point (0.149–0.169; sum ratio 0.161), so a full 5h window is about 16% of the week; RMSE 0.45. A resumed Codex thread can start a new rollout file at the thread's running total (1 of 77 files): read as a delta from zero, that one file put the fit at 0.092 against a sum ratio of 0.141 and explained only 59 of 90 points. The parser now takes a file's first event from `last_token_usage`.
+- **Per-session pool readings against USD × the fitted rate** (55 drawn sessions from 2026-10-13 to 10-20, rates 2.66 and 0.361):
+  - Sessions with nothing else running agree within about a point: claude-5h read 13 against 13.1 estimated, 9 against 8.8, 13 against 12.9, 15 against 16.4, 8 against 8.0.
+  - Sessions left open read high. Three vanilla sessions spanned 21–92 h with at most 2 h of calls; they read 103 claude-7d points against an estimate of 4.7.
+  - Overlapping sessions in other projects read high even when the last call comes right before SessionEnd: claude-5h 51 against 15.8, 45 against 7.9.
+  - The claude-5h delta is missing for 25 of the 55 sessions, because the window reset inside the session or a reading was missing or stale.

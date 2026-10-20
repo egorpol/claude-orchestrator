@@ -5,7 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -341,6 +341,77 @@ class TestCalibrate(unittest.TestCase):
             self.assertEqual(fits["claude-5h"]["calls"], 40)
             with self.assertRaises(SystemExit):
                 cost.main(["--calibrate", "--by-mode"])
+
+    def test_save_round_trip_keeps_usd_rates_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log, projects, codex_home, _, _ = _synthetic(tmp)
+            result = calibrate.calibrate(log, projects, codex_home, PRICES, since=T0)
+            path = Path(tmp) / "saved" / "calibration.json"
+            calibrate.save({**result, "saved_at": "old"}, path)
+            rates = calibrate.usd_rates(path)
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+        self.assertEqual(set(rates["pools"]), {"claude-5h", "claude-7d"})  # codex headlines are not in USD
+        self.assertAlmostEqual(rates["pools"]["claude-5h"]["per_usd"], SCALE, places=6)
+        self.assertAlmostEqual(rates["pools"]["claude-7d"]["per_usd"], SCALE / 8, places=6)
+        self.assertEqual((rates["readings"], rates["span"], rates["since"]),
+                         (result["readings"], result["span"], T0.isoformat()))
+        self.assertIsNotNone(cost._parse_ts(rates["saved_at"]).tzinfo)  # the save's own time wins
+
+    def test_unusable_saved_fits_give_no_rates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calibration.json"
+            self.assertEqual(calibrate.usd_rates(path), {"path": str(path), "saved_at": None, "span": None,
+                                                         "readings": None, "since": None, "pools": {}})
+            for text in ("not json", "[]", '{"pools": {}}', json.dumps({"saved_at": "x", "pools": [
+                    None, {"pool": "claude-5h", "headline": {"unit": "usd", "per_unit": 0}},
+                    {"pool": "claude-7d", "headline": {"unit": "usd", "per_unit": None}},
+                    {"pool": "codex-7d", "headline": {"unit": "codex-5h", "per_unit": 0.16}},
+                    {"headline": {"unit": "usd", "per_unit": 1.0}}]}),
+                    json.dumps({"pools": [{"pool": "claude-5h", "headline": {"unit": "usd", "per_unit": True}}]}),
+                    '{"pools": [{"pool": "claude-5h", "headline": {"unit": "usd", "per_unit": Infinity}}]}'):
+                with self.subTest(text=text):
+                    path.write_text(text)
+                    self.assertEqual(calibrate.usd_rates(path)["pools"], {})
+            # Odd metadata types become None, so the --by-mode title can't trip on them.
+            path.write_text(json.dumps({"saved_at": 5, "since": [], "readings": "471", "span": ["2026-10-13"],
+                                        "pools": [{"pool": "claude-5h", "headline": {"unit": "usd", "per_unit": 2.6}}]}))
+            rates = calibrate.usd_rates(path)
+            self.assertEqual([rates[k] for k in ("saved_at", "since", "readings", "span")], [None] * 4)
+            self.assertEqual(rates["pools"], {"claude-5h": {"per_usd": 2.6, "p5": None, "p95": None}})
+            self.assertIn("(claude-5h 2.6; fit saved ?, readings ? to ?)", cost._estimate_note(rates))
+
+    def test_saved_path_follows_the_quota_log(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_DELEGATE_QUOTA_LOG": "/x/q/quota.jsonl"}):
+            self.assertEqual(calibrate.saved_path(), Path("/x/q/calibration.json"))
+            self.assertEqual(calibrate.saved_path(None, "/y/quota.jsonl"), Path("/y/calibration.json"))
+        self.assertEqual(calibrate.saved_path("~/c.json"), Path("~/c.json").expanduser())
+
+    def test_cli_save(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log, projects, codex_home, _, _ = _synthetic(tmp)
+            path = Path(tmp) / "calibration.json"
+            env = {"CLAUDE_CONFIG_DIR": str(projects.parent), "CODEX_HOME": str(codex_home)}
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, env), redirect_stdout(out), redirect_stderr(err):
+                cost.main(["--calibrate", "--quota-log", str(log), "--json", "--save", "--calibration", str(path)])
+            self.assertEqual(json.loads(out.getvalue())["readings"], json.loads(path.read_text())["readings"])
+            self.assertIn(f"saved to {path}: `cost --by-mode` now estimates Claude pool points at claude-5h 2.5,",
+                          err.getvalue())
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, env), redirect_stdout(out):
+                cost.main(["--calibrate", "--quota-log", str(Path(tmp) / "none.jsonl"), "--save",
+                           "--calibration", str(path)])
+            self.assertIn("no Claude pool rate fitted, so `cost --by-mode` shows no estimates", out.getvalue())
+            self.assertEqual(calibrate.usd_rates(path)["pools"], {})
+            # Without --calibration the fit lands next to the --quota-log given, not the default log.
+            env["CLAUDE_DELEGATE_QUOTA_LOG"] = str(Path(tmp) / "default" / "quota.jsonl")
+            with mock.patch.dict(os.environ, env), redirect_stdout(io.StringIO()):
+                cost.main(["--calibrate", "--quota-log", str(log), "--save"])
+            self.assertIn("claude-5h", calibrate.usd_rates(log.parent / "calibration.json")["pools"])
+            self.assertFalse((Path(tmp) / "default").exists())
+            with self.assertRaises(SystemExit) as exc:
+                cost.main(["--by-mode", "--save"])
+            self.assertIn("--save needs --calibrate", str(exc.exception))
 
 
 if __name__ == "__main__":
