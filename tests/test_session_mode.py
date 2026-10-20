@@ -180,6 +180,24 @@ class SessionModeTests(unittest.TestCase):
         self.start(session="fallback1", cwd=str(nested))
         self.assertEqual(Path(self.rows()[-1]["handoff"]).read_text(), "local item")
 
+    def test_handoff_one_folder_down_as_next_looks(self):
+        for name, text in (("notes", "notes item"), (".hidden", "hidden item")):
+            (self.repo / name).mkdir()
+            (self.repo / name / "HANDOFF.md").write_text(text, encoding="utf-8")
+        self.start(session="single")
+        self.assertEqual(Path(self.rows()[-1]["handoff"]).read_text(), "notes item")
+        (self.repo / "other").mkdir()
+        (self.repo / "other" / "HANDOFF.md").write_text("other item", encoding="utf-8")
+        self.start(session="ambiguous")
+        self.assertIsNone(self.rows()[-1]["handoff"])
+        (self.repo / "private").mkdir()
+        (self.repo / "private" / "HANDOFF.md").write_text("private item", encoding="utf-8")
+        self.start(session="private")
+        self.assertEqual(Path(self.rows()[-1]["handoff"]).read_text(), "private item")
+        (self.repo / "HANDOFF.md").write_text("root item", encoding="utf-8")
+        self.start(session="root")
+        self.assertEqual(Path(self.rows()[-1]["handoff"]).read_text(), "root item")
+
     def test_handoff_absent_does_not_make_snapshot_directory(self):
         self.start()
         self.assertIsNone(self.rows()[-1]["handoff"])
@@ -559,15 +577,22 @@ class SessionModeTests(unittest.TestCase):
         self.assertEqual(row["reason"], "prompt_input_exit")
         self.assertIs(row["reroll"], False)
 
-    def test_missing_transcript_and_unknown_end_have_null_values(self):
-        self.start("vanilla")
+    def test_missing_transcript_is_zero_calls_and_unknown_end_has_null_values(self):
+        # No transcript file yet means no message: a /clear before the first prompt re-rolls.
+        self.env["CLAUDE_SESSION_MODE_SEED"] = "5"
+        self.start()
+        self.event("SessionEnd", reason="clear")
+        self.assertEqual(self.rows()[-1]["calls"], 0)
+        self.assertIs(self.rows()[-1]["reroll"], True)
+        self.event("SessionEnd", session="unknown", reason="logout")
+        self.assertIsNone(self.rows()[-1]["mode"])
+        self.assertEqual(self.rows()[-1]["calls"], 0)
+        self.assertIs(self.rows()[-1]["reroll"], False)
+        self.transcript.mkdir()
         self.event("SessionEnd", reason="clear")
         self.assertIsNone(self.rows()[-1]["calls"])
         self.assertIs(self.rows()[-1]["reroll"], False)
-        self.event("SessionEnd", session="unknown", reason="logout")
-        self.assertIsNone(self.rows()[-1]["mode"])
-        self.assertIsNone(self.rows()[-1]["calls"])
-        self.assertIs(self.rows()[-1]["reroll"], False)
+        self.assertIsNone(SESSION_MODE.count_calls(""))
 
     def test_reroll_only_for_small_drawn_sessions_cleared(self):
         self.env["CLAUDE_SESSION_MODE_SEED"] = "5"

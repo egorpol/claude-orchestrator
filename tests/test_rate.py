@@ -216,6 +216,19 @@ class RateTests(unittest.TestCase):
             handoff.unlink()
             self.assertNotIn("## HANDOFF", rate.build_packet(self.record()))
 
+    def test_next_marker_says_when_no_copy_was_saved(self):
+        self.write_rows(self.transcript, [user("<command-name>/next</command-name>\nfocus x")])
+        handoff = self.root / "handoff.md"
+        handoff.write_text("continue this item", encoding="utf-8")
+        self.start["handoff"] = str(handoff)
+        with mock.patch("rate.session_commits", return_value="(none)"):
+            self.assertIn(rate.NEXT_PROMPT + "\nfocus x", rate.build_packet(self.record()))
+            for missing in (None, str(self.root / "gone.md")):
+                self.start["handoff"] = missing
+                packet = rate.build_packet(self.record())
+                self.assertIn(rate.NEXT_PROMPT_NO_COPY + "\nfocus x", packet)
+                self.assertNotIn(rate.NEXT_PROMPT, packet)
+
     def test_packet_cap_trims_longest_prompts_first_and_is_deterministic(self):
         prompts = [user("x" * 1990) for _ in range(40)] + [user("KEEP SHORT")]
         self.write_rows(self.transcript, prompts)

@@ -176,6 +176,17 @@ def repo_info(cwd):
     return None, None
 
 
+def nested_handoff(base):
+    """One folder down, where /next looks next: private/ first, else a single match."""
+    preferred = base / "private" / "HANDOFF.md"
+    if preferred.is_file():
+        return preferred
+    matches = [p for p in base.glob("*/HANDOFF.md")
+               if p.is_file() and not p.parent.name.startswith(".")]
+    # Several unrelated handoffs: a wrong copy would mislead the rater more than none.
+    return matches[0] if len(matches) == 1 else None
+
+
 def snapshot_handoff(cwd, path, session):
     """Best-effort, bounded start-time copy; never let measurement break a session."""
     try:
@@ -187,6 +198,8 @@ def snapshot_handoff(cwd, path, session):
         if not source.is_file():
             source = directory / "HANDOFF.md"
         if not source.is_file():
+            source = nested_handoff(root or directory)
+        if source is None:
             return None
         with source.open("rb") as stream:
             data = stream.read(64 * 1024)
@@ -482,6 +495,9 @@ def count_calls(transcript):
                 message = row.get("message")
                 if isinstance(message, dict) and isinstance(message.get("id"), str):
                     ids.add(message["id"])
+    except FileNotFoundError:
+        # Claude Code writes no transcript before the first message (12 of 12 such ends, 2026-10-20).
+        return 0
     except (OSError, ValueError):
         return None
     return len(ids)

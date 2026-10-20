@@ -59,6 +59,8 @@ PROMPT_LIMIT = 2000
 HANDOFF_LIMIT = 8000
 PACKET_LIMIT = 60000
 TRUNCATED = "… [truncated]"
+NEXT_PROMPT = "[continue from HANDOFF.md; its start-time copy is below]"
+NEXT_PROMPT_NO_COPY = "[continue from HANDOFF.md; no start-time copy was saved]"
 ITEM_FIELDS = ("start", "type", "size", "status", "continuation", "note")
 TYPES = ("code", "docs", "data", "research", "config", "question", "other")
 SIZES = ("S", "M", "L", "XL")
@@ -145,7 +147,7 @@ def _typed_prompt_rows(rows):
                 continue
             args = re.search(r"<command-args>(.*?)</command-args>", text, flags=re.S)
             args = args.group(1).strip() if args else ""
-            rendered = ("[continue from HANDOFF.md; its start-time copy is below]"
+            rendered = (NEXT_PROMPT
                         if name == "/next" else f"[command {name}{' ' + args if args else ''}]")
             text = rendered + ("\n" + remaining if remaining else "")
         yield index, {"text": _truncate(text, PROMPT_LIMIT), "timestamp": row.get("timestamp")}
@@ -264,6 +266,9 @@ def build_packet(record):
         except (OSError, ValueError):
             pass
     texts = [_truncate(redact(p["text"]), PROMPT_LIMIT) for p in prompts]
+    if handoff is None:
+        texts = [NEXT_PROMPT_NO_COPY + t[len(NEXT_PROMPT):] if t.startswith(NEXT_PROMPT) else t
+                 for t in texts]
     labels = []
     for i, prompt in enumerate(prompts):
         ts = _aware(prompt["timestamp"])
