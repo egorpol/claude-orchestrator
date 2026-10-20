@@ -436,6 +436,13 @@ class TestByMode(unittest.TestCase):
         self.assertEqual(arm["usd_null_sessions"], 0)
         self.assertIn("reroll/pending", cost.render_by_mode(result, sessions=True))
 
+    def test_sessions_table_prints_no_repo_names(self):
+        result = self.result([self.start(repo="owner/secret-project", repo_dir="secret-project"), self.summary()])
+        text = cost.render_by_mode(result, sessions=True)
+        self.assertIn("session-", text)
+        self.assertNotIn("secret-project", text)
+        self.assertIn("owner/secret-project", cost.render_by_mode(result, as_json=True, sessions=True))
+
     def test_since_is_earliest_start_local_midnight_and_offset_aware(self):
         env = mock.patch.dict(os.environ, {"TZ": "Europe/Berlin"})
         env.start()
@@ -566,9 +573,9 @@ class TestByMode(unittest.TestCase):
         means = text.split("pool points per measured session (mean):\n")[1].splitlines()
         self.assertEqual(means[1].split(), ["orchestrator", "3.2", "12.0", "0.8", "-"])
         header = text.split("sessions:\n")[1].splitlines()[0].split()
-        self.assertEqual(header[7:13], ["CLAUDE-5H", "EST", "READ", "CLAUDE-7D", "EST", "READ"])
+        self.assertEqual(header[6:12], ["CLAUDE-5H", "EST", "READ", "CLAUDE-7D", "EST", "READ"])
         row = next(line for line in text.splitlines() if line.startswith("session-"))
-        self.assertEqual(row.split()[7:11], ["2.5", "12.0", "0.6", "-"])
+        self.assertEqual(row.split()[6:10], ["2.5", "12.0", "0.6", "-"])
 
     def test_no_saved_fit_prints_dashes_and_where_to_save(self):
         read = [self.start(), self.summary(quota={"pools": {"claude-7d": {"delta": 3.0}}})]

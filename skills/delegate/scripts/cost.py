@@ -673,13 +673,12 @@ def render_by_mode(result, as_json=False, sessions=False):
     if sessions:
         lines.append("sessions:")
         points = lambda value: f"{value:.1f}" if value is not None else "-"
-        table = [("SESSION", "START", "MODE", "FLAGS", "REPO", "CALLS", "USD",
+        table = [("SESSION", "START", "MODE", "FLAGS", "CALLS", "USD",  # no REPO: repo names can be private
                   *(label for pool in ESTIMATED_POOLS for label in (f"{pool.upper()} EST", "READ")),
                   "LAUNCH", "APPLIED", "FIN/ITEMS")]
         for session in result["sessions"]:
             flags = "/".join(key for key in ("reroll", "pending", "ghost") if session[key]) or "-"
             table.append((session["session"][:8], session["start_date"] or "-", session["mode"], flags,
-                          session["repo"] or session["repo_dir"] or "-",
                           _fmt_int(session["calls"]) if session["summarised"] else "-",
                           money(session["usd_list_price"]),
                           *(points(source.get(pool)) for pool in ESTIMATED_POOLS
