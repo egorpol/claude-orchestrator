@@ -12,6 +12,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
   - `route.py`: per-task score = ratings × weights × quota
   - `runs.py`: worktree/launch/followup/review/verify/status/wait/diff/apply/cleanup, `meta.json`, environment scrubbing
   - `cost.py`, `ask.py`, `report.py`: session and run-log cost, read-only questions, field-report skeletons and JSONL rows
+  - `calibrate.py`: `cost --calibrate`, pool points per USD and per token class from pairs of quota readings
 - `skills/delegate/scripts/catalog.json`: user-editable delegates, pools, task weights, `min_quota_pct`, subagent penalty.
 - `install.sh`: links or copies skills into `~/.claude/skills` and `commands/next.md` into `~/.claude/commands`; `--check` checks prerequisites and the private-name deny list; `--hooks` registers `hooks/context-guard.py` and `hooks/secret-guard.py`; `--git-hook=DIR` links `secret-guard.py` as that repo's git pre-commit and pre-push hooks; `--rules` imports `rules/orchestrator.md` into the user-level `CLAUDE.md`, unless session-mode is registered; `--experiment` registers `hooks/session-mode.py` and removes that import; `--timer` installs the systemd user timer for `delegate quota --snapshot --if-active` (test with a scratch `XDG_CONFIG_HOME` and a fake `systemctl`).
 - `hooks/context-guard.py`: a UserPromptSubmit hook. From about 120k context tokens, it asks Claude to hand off before starting a new work item. After 60 min idle at 100k+ context, the prompt cache has expired, so it holds the first typed prompt once and suggests `/clear`. Tested in `tests/test_context_guard.py`.
@@ -35,7 +36,7 @@ bash -n install.sh
 
 - **What the tests cover:**
   - `tests/test_lifecycle.py` drives launch, the exit packet, followup, review, status, diff, apply, the run log and cleanup, using the fake `codex`/`cursor-agent` in `tests/fake_agents/`.
-  - `test_route.py`, `test_cost.py` and `test_ask.py` cover routing preferences, cost accounting and `ask`.
+  - `test_route.py`, `test_cost.py`, `test_calibrate.py` and `test_ask.py` cover routing preferences, cost accounting, pool calibration and `ask`.
 - **Real-data checks** (read-only, maintainer's machine only):
   - `delegate status <run>` against the old records in `~/.cache/claude-delegate/runs/PublicDomainSheetMusicFinder/`;
   - `delegate cost --session 762dc86f` must print 389 calls and cache_read 174,522,404. The session was resumed for 3 calls after the 2026-10-09 analysis, so older docs quote 386.

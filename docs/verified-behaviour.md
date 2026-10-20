@@ -73,3 +73,16 @@ Facts tested live, dated, so a reader can tell what may have changed since.
 - **`delegate launch --preflight`** on this repo: the base suite (246 tests) passed in 32.4 s with exit 0, and a missing checker (`python3 tests/no_such_checker.py`) failed with exit 2 in under 0.1 s. `git worktree list`, the `delegate/*` branches, the session's rows in `sessions.jsonl` and `quota.jsonl` were the same before and after, and the run folder was gone.
 - **No transcript before the first message** (2026-10-20, from `sessions.jsonl`): all 12 SessionEnd rows with `calls: null` belonged to sessions whose transcript file never appeared, though 11 of their project folders exist. 11 were startup ghosts ending 0–2 s after start (`reason: other`) and one was cleared after 5 s.
 - **A subshell `cd` leaves the Bash tool's directory alone** (2026-10-20, Claude Code in the VS Code extension, zsh): `(cd tests && pwd); pwd` printed `…/tests`, then the project root, and no working-directory notice followed. A bare `cd feedback; …` in a compound command moved the directory for the following calls, with an "Environment update" notice, until a later `cd` back.
+
+## 2026-10-20
+
+- **Pool calibration** (`delegate cost --calibrate`; 471 readings from 2026-10-13 to 10-20, openusage 0.25.0 `--source direct`):
+  - Claude 5h/7d and Codex 5h/7d readings are whole percents (all 392 good Claude readings and 459 good Codex ones). While no 5h window is open, claude-5h reads `resets_at: null` at 0% (49 readings).
+  - Readings follow calls within a minute: scored on the same pairs, the claude-5h USD fit has RMSE 0.53 at the call times, against 0.86 and 0.78 with call times shifted by −1 and +1 min.
+  - Claude pools follow list price:
+    - claude-5h: 2.66 points per list-price USD (p5–p95 2.61–2.71), so a full window is about $37.6;
+    - claude-7d: 0.36 (0.33–0.40), about $276, so a full 5h window is about 13.5% of the week.
+    - Opus 5.5 class weights per million tokens, against list price × 2.66: cache reads 0.55 (0.43–0.62) against 0.53, output 56 (47–67) against 53, 1h writes 19.2 (17.5–21.5) against 21.3.
+    - Fresh input is 0.0% of USD and 5m writes 0.7%, too little to fit. Haiku 5.5 made 12 of the 4,462 calls, so it gets no weights of its own yet.
+  - codex-5h, on Codex rollout tokens (gpt-6.1-sol 92% of calls), per million tokens: uncached input 5.5 (3.2–11.3), cached input 1.27 (1.04–1.46), output 196 (172–227). Its RMSE is 0.90, against 0.41 from rounding alone.
+  - codex-7d: fitted per pair on codex-5h's weights, 0.164 codex-7d points per codex-5h point (0.149–0.169; sum ratio 0.161), so a full 5h window is about 16% of the week; RMSE 0.45. A resumed Codex thread can start a new rollout file at the thread's running total (1 of 77 files): read as a delta from zero, that one file put the fit at 0.092 against a sum ratio of 0.141 and explained only 59 of 90 points. The parser now takes a file's first event from `last_token_usage`.

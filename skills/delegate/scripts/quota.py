@@ -222,12 +222,16 @@ def _fetch_snapshot(source, timeout):
         raise
 
 
+def log_path(log=None):
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return Path(log or os.environ.get("CLAUDE_DELEGATE_QUOTA_LOG")
+                or cache / "claude-delegate/quota.jsonl").expanduser()
+
+
 def record(reason=None, session=None, run=None, if_active=False, log=None,
            source="direct", timeout=90):
     """Append one durable quota reading; return (row, None), or (None, why) when gated off."""
-    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    path = Path(log or os.environ.get("CLAUDE_DELEGATE_QUOTA_LOG")
-                or cache / "claude-delegate/quota.jsonl").expanduser()
+    path = log_path(log)
     path.parent.mkdir(parents=True, exist_ok=True)
     with Path(str(path) + ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
