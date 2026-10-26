@@ -6,6 +6,7 @@ Facts tested live, dated, so a reader can tell what may have changed since.
 
 - **SessionStart `additionalContext` preview.** With Claude Code persisting a large SessionStart `additionalContext` to a file and showing the model only a ~2 KB preview of whole lines, a 12,607-byte injection ended the preview at character 1,867 of 12,605. Before commit `c61e134`, 7,925 bytes stayed inline. Across 68 sessions since 2026-10-20, 65 opened the file (one extra call each) and 3 never did, so those three never saw past the hygiene rules when hygiene was first.
 - **Cut rules stay inline.** After the rules cut, the orchestrator SessionStart text of 7,320 bytes (mode line, spare-pool line, delegation and hygiene rules) arrived inline: the first session's transcript has no `persisted-output` at SessionStart.
+- **Cursor `--mode ask` reads outside its workspace.** Four `delegate ask --agent cursor` runs with `--dir` set to an empty folder cited exact line numbers from `skills/delegate/scripts/rate.py` and `report.py` in this checkout, from `~/.claude/skills/*/SKILL.md`, and from a file in the empty folder's parent; one said it had found "sibling context files from a parallel Q1 run". An empty working directory therefore doesn't keep `ask`, `rate` or a review away from other files on the machine. The default `--output-format json` doesn't show which files were read.
 
 ## 2026-10-09
 
