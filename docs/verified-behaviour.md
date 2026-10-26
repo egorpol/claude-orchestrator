@@ -5,6 +5,7 @@ Facts tested live, dated, so a reader can tell what may have changed since.
 ## 2026-10-26
 
 - **SessionStart `additionalContext` preview.** With Claude Code persisting a large SessionStart `additionalContext` to a file and showing the model only a ~2 KB preview of whole lines, a 12,607-byte injection ended the preview at character 1,867 of 12,605. Before commit `c61e134`, 7,925 bytes stayed inline. Across 68 sessions since 2026-10-20, 65 opened the file (one extra call each) and 3 never did, so those three never saw past the hygiene rules when hygiene was first.
+- **Cut rules stay inline.** After the rules cut, the orchestrator SessionStart text of 7,320 bytes (mode line, spare-pool line, delegation and hygiene rules) arrived inline: the first session's transcript has no `persisted-output` at SessionStart.
 
 ## 2026-10-09
 

@@ -171,6 +171,69 @@ class TestAsk(unittest.TestCase):
             ask.cmd_ask(self._both_ns(model="auto"))
         self.assertIn("single --agent", str(cm.exception))
 
+    def _ask_both_with(self, answers):
+        """answers: agent -> answer str, or AskFailed to fail that agent."""
+        from io import StringIO
+
+        def fake_run(agent, prompt, a, directory):
+            val = answers[agent]
+            if isinstance(val, ask.AskFailed):
+                raise val
+            model = "gpt-6.1-sol" if agent == "codex" else "auto"
+            return val, {"input": 1, "output": 1, "cached_input": 0}, 0.5, model
+
+        buf = StringIO()
+        with mock.patch("ask._run_one", side_effect=fake_run), mock.patch("sys.stdout", buf):
+            ask.cmd_ask(self._both_ns())
+        return buf.getvalue()
+
+    def test_both_picks_from_markdown_wrapped_pick_after_preamble(self):
+        out = self._ask_both_with({
+            "codex": "Here is my reasoning.\n\n**Pick:** B, keep the 10 KB cap\nWhy: smaller",
+            "cursor": "I prefer A.\n- Pick: C\nWhy: clearer",
+        })
+        self.assertIn("## picks", out)
+        self.assertIn("Pick (codex): B, keep the 10 KB cap", out)
+        self.assertIn("Pick (cursor): C", out)
+        from io import StringIO
+        buf = StringIO()
+        with mock.patch("sys.stdout", buf):
+            ask.cmd_ask(argparse_ns(
+                question="x", agent="cursor", model=None, effort=None,
+                dir=str(self.workspace), max_words=100, timeout=30, files=None))
+        self.assertNotIn("## picks", buf.getvalue())
+
+    def test_both_picks_heading_form_and_missing_and_failed(self):
+        out = self._ask_both_with({
+            "codex": "### Pick: A\nWhy: first",
+            "cursor": "no pick here",
+        })
+        self.assertIn("Pick (codex): A", out)
+        self.assertIn("Pick (cursor): (no Pick line found)", out)
+
+        out = self._ask_both_with({"codex": "no structured pick", "cursor": "also none"})
+        self.assertNotIn("## picks", out)
+
+        from io import StringIO
+        buf = StringIO()
+        with mock.patch("ask._run_one", side_effect=lambda ag, *a, **k: (
+                (_ for _ in ()).throw(ask.AskFailed("boom", 3)) if ag == "cursor"
+                else ("Pick: B\n", {"input": 1, "output": 1, "cached_input": 0}, 0.5, "gpt-6.1-sol"))), \
+             mock.patch("sys.stdout", buf):
+            with self.assertRaises(SystemExit) as cm:
+                ask.cmd_ask(self._both_ns())
+        self.assertEqual(cm.exception.code, 3)
+        out = buf.getvalue()
+        self.assertIn("## picks", out)
+        self.assertIn("Pick (codex): B", out)
+        self.assertIn("Pick (cursor): (failed)", out)
+
+    def test_extract_pick_helpers(self):
+        self.assertEqual(ask.extract_pick("preamble\n**Pick:** B, keep\n"), "B, keep")
+        self.assertEqual(ask.extract_pick("- Pick: C"), "C")
+        self.assertEqual(ask.extract_pick("### Pick: A"), "A")
+        self.assertIsNone(ask.extract_pick("nope\nPick me\n"))
+
     def test_never_passes_force(self):
         seen = []
 

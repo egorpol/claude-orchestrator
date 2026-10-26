@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -227,6 +228,33 @@ def _footer(agent, model, elapsed, usage):
     return f"({agent} {model} · {elapsed:.0f}s · {_usage_bits(usage)})"
 
 
+def _normalize_pick_prefix(line):
+    """Strip leading markdown list/heading markers and ** / __ emphasis for Pick: matching."""
+    s = line
+    while True:
+        stripped = s.lstrip(" \t")
+        if stripped != s:
+            s = stripped
+            continue
+        if s and s[0] in "#>-*":
+            s = s[1:]
+            continue
+        break
+    return s.replace("**", "").replace("__", "").strip()
+
+
+def extract_pick(answer):
+    """First Pick: value in answer, or None. Tolerates markdown wrappers around Pick."""
+    if not answer:
+        return None
+    for line in answer.splitlines():
+        s = _normalize_pick_prefix(line)
+        m = re.match(r"(?i)^pick\s*:(.*)$", s)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
 def cmd_ask(a):
     question = a.question
     if question == "-":
@@ -257,6 +285,8 @@ def cmd_ask(a):
     with ThreadPoolExecutor(len(agents)) as pool:
         futures = {ag: pool.submit(_run_one, ag, prompt, a, directory) for ag in agents}
     code = 0
+    picks = []  # (agent, value_or_None | False for failed)
+    any_pick = False
     for i, ag in enumerate(agents):
         if i:
             print()
@@ -266,9 +296,23 @@ def cmd_ask(a):
         except AskFailed as e:
             print(f"(failed, exit {e.code}) {e}")
             code = code or e.code
+            picks.append((ag, False))
             continue
         print(answer)
         print(_footer(ag, model, elapsed, usage))
+        pick = extract_pick(answer)
+        picks.append((ag, pick))
+        if pick is not None:
+            any_pick = True
+    if any_pick:
+        print("\n## picks")
+        for ag, value in picks:
+            if value is False:
+                print(f"Pick ({ag}): (failed)")
+            elif value is None:
+                print(f"Pick ({ag}): (no Pick line found)")
+            else:
+                print(f"Pick ({ag}): {value}")
     if code:
         sys.exit(code)
 

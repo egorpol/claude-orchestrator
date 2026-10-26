@@ -1,7 +1,6 @@
 ---
 name: field-report
 description: Write a field report on the current Claude Code session into the claude-orchestrator feedback folder. `delegate report` fills in the session's cost, quota and delegate runs; Claude then writes the flow, what worked, friction and suggestions. Use only when the user asks for a field report, a session log or feedback for claude-orchestrator.
-disable-model-invocation: true
 argument-hint: "[topic]"
 ---
 

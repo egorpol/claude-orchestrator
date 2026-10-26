@@ -310,6 +310,12 @@ def session_context(mode, path=None):
                 parts.append(text)
         except (OSError, ValueError):
             pass
+    reference = directory / "reference.md"
+    if reference.is_file():
+        parts.append(
+            "Topic tips (handoffs, decisions, data checks, shell, edits, reads): read the matching "
+            f"section of {reference.resolve()} before that kind of work."
+        )
     return "\n\n".join(parts) or None
 
 

@@ -88,7 +88,7 @@ REVIEW_PROMPT = """# Review request (read-only)
 Another coding agent made changes in this git worktree ({wt}) relative to commit {base}. Review them. This is a read-only task: do not modify, create or delete any files.
 
 The full diff is in `.delegate/review-{n}.patch` (path relative to the worktree root; new files appear as additions). Read it, then read the surrounding code in the worktree where you need context.{shell_note}
-The run's verify command and the last 80 lines of its latest verify output are in `.delegate/review-{n}.verify.log`. Read that file to check verification claims against actual output.
+The run's verify command and the last 80 lines of its latest verify output are in `.delegate/review-{n}.verify.log`. Read that file to check verification claims against actual output.{omit_note}
 
 ## The brief(s) the other agent was given
 <brief>
@@ -272,19 +272,129 @@ def save_meta(root, meta):
     (root / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
 
 
-def _exclude(repo, patterns):
-    """Add exact paths to the shared info/exclude (a `dir/` rule misses symlinks)."""
+def _exclude_file(repo):
     exclude = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=repo)) / "info" / "exclude"
     exclude.parent.mkdir(exist_ok=True)
-    lines = exclude.read_text().splitlines() if exclude.exists() else []
+    return exclude
+
+
+def _needs_link_warning(repo, path):
+    """True when --link should warn: not ignored, or only matched by our `/<path>` info/exclude line."""
+    r = subprocess.run(["git", "check-ignore", "-v", "--no-index", "--", path], cwd=repo,
+                       capture_output=True, text=True,
+                       env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    if r.returncode != 0:
+        return True
+    expected = "/" + path.strip("/")
+    for line in r.stdout.splitlines():
+        # <source>:<linenum>:<pattern>\t<path>
+        tab = line.find("\t")
+        head = line if tab < 0 else line[:tab]
+        parts = head.rsplit(":", 2)
+        if len(parts) != 3:
+            return True
+        source, _num, pattern = parts
+        if pattern.startswith("!"):
+            return True  # deciding match is a negation → path is not ignored
+        src = source.replace("\\", "/")
+        if src.endswith("/info/exclude") or src.endswith("info/exclude"):
+            if pattern == expected:
+                continue  # tool's own form: still warn; do not treat as independently ignored
+            return False  # some other exclude pattern
+        return False  # .gitignore or other source
+    return True
+
+
+def _exclude(repo, patterns):
+    """Append exact paths to the shared info/exclude. Preserve existing bytes; return newly added lines."""
+    exclude = _exclude_file(repo)
+    raw = exclude.read_bytes() if exclude.exists() else b""
+    present = set(raw.splitlines())  # splitlines strips \\r?\\n
+    added = []
+    out = raw
     for p in patterns:
-        if p not in lines:
-            lines.append(p)
-    exclude.write_text("\n".join(lines) + "\n")
+        pb = p.encode()
+        if pb in present:
+            continue
+        if out and not out.endswith(b"\n"):
+            out += b"\n"
+        out += pb + b"\n"
+        present.add(pb)
+        added.append(p)
+    if added:
+        exclude.write_bytes(out)
+    return added
+
+
+def _remove_excluded(repo, patterns):
+    """Drop exclude lines whose content (sans terminator) equals an owned pattern; keep all other bytes."""
+    if not patterns:
+        return
+    exclude = _exclude_file(repo)
+    if not exclude.exists():
+        return
+    raw = exclude.read_bytes()
+    drop = {p.encode() for p in patterns}
+    kept = []
+    for part in raw.splitlines(keepends=True):
+        if part.rstrip(b"\r\n") in drop:
+            continue
+        kept.append(part)
+    new = b"".join(kept)
+    if new != raw:
+        exclude.write_bytes(new)
+
+
+def _iter_live_linkers(repo, link, skip_root=None):
+    """Yield (run_root, meta) for live runs of repo that list link in meta['links']."""
+    repo_s = str(Path(repo).resolve())
+    skip = Path(skip_root).resolve() if skip_root is not None else None
+    for meta_path in RUNS_ROOT.glob("*/*/meta.json"):
+        other = meta_path.parent
+        if skip is not None and other.resolve() == skip:
+            continue
+        try:
+            m = json.loads(meta_path.read_text())
+            if str(Path(m.get("repo", "")).resolve()) != repo_s:
+                continue
+        except (OSError, ValueError):
+            continue
+        if not Path(m.get("worktree", "")).is_dir():
+            continue
+        if link in m.get("links", []):
+            yield other, m
+
+
+def _release_excluded(repo, root, meta):
+    """Transfer owned exclude lines to a live sibling linker, or remove them; then clear meta['excluded']."""
+    owned = list(meta.get("excluded", []))
+    if "excluded" not in meta and not owned:
+        return  # legacy: no key → change nothing
+    to_remove = []
+    for pattern in owned:
+        link = pattern.lstrip("/")
+        transferred = False
+        for other_root, other_meta in _iter_live_linkers(repo, link, skip_root=root):
+            excl = list(other_meta.get("excluded", []))
+            if pattern not in excl:
+                excl.append(pattern)
+                other_meta["excluded"] = excl
+                save_meta(other_root, other_meta)
+            transferred = True
+            break
+        if not transferred:
+            to_remove.append(pattern)
+    _remove_excluded(repo, to_remove)
+    meta["excluded"] = []
+    save_meta(root, meta)
 
 
 def add_links(repo, wt, paths, existing=()):
-    """Validate links first, then install them and share launch/followup exclusions."""
+    """Validate links first, then install them and share launch/followup exclusions.
+
+    Returns exclude lines newly appended for paths that need a warning (not independently
+    ignored). `/.delegate` is never returned.
+    """
     for link in paths:
         p = Path(link)
         if p.is_absolute() or ".." in p.parts or not p.parts or p.parts[0] in (".git", ".delegate"):
@@ -296,19 +406,28 @@ def add_links(repo, wt, paths, existing=()):
             if link in existing and dst.is_symlink() and dst.resolve() == src.resolve():
                 continue
             sys.exit(f"--link {link}: {dst} already exists in the worktree (tracked path?)")
+    recordable = []
+    for link in paths:
+        pattern = "/" + link.strip("/")
+        if _needs_link_warning(repo, link):
+            print(f"WARNING: --link {link} is not gitignored in the main checkout; until cleanup, "
+                  f".git/info/exclude hides it from git status there too", file=sys.stderr)
+            recordable.append(pattern)
     for link in paths:
         dst = wt / link
         if not dst.is_symlink():
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.symlink_to(repo / link)
-    _exclude(repo, ["/" + l.strip("/") for l in paths] + ["/.delegate"])
+    added = _exclude(repo, ["/" + l.strip("/") for l in paths] + ["/.delegate"])
+    return [p for p in added if p in recordable]
 
 
-def _abandon_launch(repo, root, wt, branch):
-    """Drop a half-created launch (bad --link or --preflight); exclude lines may stay."""
+def _abandon_launch(repo, root, wt, branch, excluded=()):
+    """Drop a half-created launch (bad --link or --preflight); undo exclude lines this attempt added."""
     git("worktree", "remove", "--force", str(wt), cwd=repo, check=False)
     git("branch", "-D", branch, cwd=repo, check=False)
     shutil.rmtree(root, ignore_errors=True)
+    _remove_excluded(repo, excluded)
 
 
 def launch(a):
@@ -343,10 +462,11 @@ def launch(a):
         print(f"note: {repo} has uncommitted changes; the delegate starts from {base_sha[:9]} and will not see them",
               file=sys.stderr)
 
+    links = [p.strip("/") for p in a.link]
     scope = ("This is a read-only task: do not modify, create or delete any files."
              if a.read_only else "Work only inside this worktree; do not modify files outside it.")
     links_txt = "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
-                        for l in a.link)
+                        for l in links)
     prompt = brief.rstrip() + CONTRACT.format(wt=wt, branch=branch, base=base_sha[:9], scope=scope,
                                               links=links_txt)
     cmd = build_cmd(a.agent, model, effort, wt, root, a.read_only, a.unsandboxed,
@@ -357,7 +477,7 @@ def launch(a):
             "read_only": a.read_only, "unsandboxed": a.unsandboxed,
             "web_search": getattr(a, "web_search", False), "verify": a.verify,
             "repo": str(repo), "worktree": str(wt), "branch": branch, "base": base_sha,
-            "links": a.link, "rounds": 1, "created": datetime.now().isoformat(timespec="seconds"),
+            "links": links, "rounds": 1, "created": datetime.now().isoformat(timespec="seconds"),
             "brief_source": str(Path(a.brief).expanduser().resolve())}
 
     if a.dry_run:
@@ -369,15 +489,16 @@ def launch(a):
 
     root.mkdir(parents=True, exist_ok=True)
     git("worktree", "add", "-b", branch, str(wt), base_sha, cwd=repo)
+    excluded = []
     try:
-        add_links(repo, wt, a.link)
+        excluded = add_links(repo, wt, links)
         if preflight:
             rc, output, elapsed = run_verify_in_worktree(repo, wt, a.verify)
     except BaseException:  # leave no orphan worktree/branch behind: there is no meta.json for cleanup to find
-        _abandon_launch(repo, root, wt, branch)
+        _abandon_launch(repo, root, wt, branch, excluded)
         raise
     if preflight:
-        _abandon_launch(repo, root, wt, branch)
+        _abandon_launch(repo, root, wt, branch, excluded)
         print("\n".join(output.rstrip().splitlines()[-30:]))
         status = ("pass" if rc == 0 else f"FAIL rc={rc}")
         print(f"preflight: verify {status} in {elapsed:.1f} s at base {base_sha[:9]}")
@@ -386,6 +507,7 @@ def launch(a):
                   "before any check runs (path, import, missing input or link) means the checker or a "
                   "--link is broken.")
         sys.exit(rc)
+    meta["excluded"] = excluded
     (root / "brief.md").write_text(brief)
     (root / "prompt.md").write_text(prompt)
     (root / "run.sh").write_text(run_sh)
@@ -454,9 +576,11 @@ def followup(a):
         print(f"[dry run] round {k + 1}: {meta['agent']} {model}"
               + (f", resuming session {sid}" if sid else ", fresh session") + f"\n---- brief ----\n{text}")
         return
-    links = list(dict.fromkeys(meta.get("links", []) + a.link))
-    add_links(Path(meta["repo"]), wt, a.link, existing=meta.get("links", []))
+    new_links = [p.strip("/") for p in a.link]
+    links = list(dict.fromkeys(meta.get("links", []) + new_links))
+    added = add_links(Path(meta["repo"]), wt, new_links, existing=meta.get("links", []))
     meta["links"] = links
+    meta["excluded"] = list(dict.fromkeys(meta.get("excluded", []) + added))
     if (root / "exit_code").exists() and not any(r.get("n", r.get("round")) == k for r in meta.get("history", [])):
         meta.setdefault("history", []).append(_round_record(root, meta, k))
     archive.mkdir(exist_ok=True)
@@ -475,7 +599,7 @@ def followup(a):
     else:
         prompt = text + FOLLOWUP_NOTE.format(round=k + 1)
         prompt += "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
-                          for l in a.link)
+                          for l in new_links)
     cmd = build_cmd(meta["agent"], model, effort, wt, root, meta.get("read_only"), meta.get("unsandboxed"),
                     resume=sid, web_search=meta.get("web_search", False))
     (root / "brief.md").write_text(text + "\n")
@@ -492,6 +616,130 @@ def followup(a):
     start(root, a.detach, meta["name"])
 
 
+def _unquote_git_path(s):
+    """Unquote a Git C-style path (`\"…\"` with backslash / octal byte escapes)."""
+    if len(s) < 2 or s[0] != '"':
+        return s
+    buf = bytearray()
+    i, end = 1, len(s) - (1 if s[-1] == '"' else 0)
+    while i < end:
+        if s[i] != "\\" or i + 1 >= end:
+            buf.extend(s[i].encode("utf-8", "surrogateescape"))
+            i += 1
+            continue
+        n = s[i + 1]
+        simple = {"\\": b"\\", '"': b'"', "a": b"\a", "b": b"\b", "t": b"\t",
+                  "n": b"\n", "v": b"\v", "f": b"\f", "r": b"\r"}
+        if n in simple:
+            buf.extend(simple[n])
+            i += 2
+        elif n in "0123456789":
+            j = i + 1
+            while j < end and j < i + 4 and s[j] in "0123456789":
+                j += 1
+            buf.append(int(s[i + 1:j], 8) & 0xFF)
+            i = j
+        else:
+            buf.extend(n.encode("utf-8", "surrogateescape"))
+            i += 2
+    return buf.decode("utf-8", "surrogateescape")
+
+
+def _path_from_diff_ab_line(rest):
+    """Path from a `+++` / `---` payload: unquote (or strip trailing TAB), then drop a/ or b/."""
+    if rest == "/dev/null":
+        return None
+    if rest.startswith('"'):
+        path = _unquote_git_path(rest)
+    else:
+        path = rest[:-1] if rest.endswith("\t") else rest
+    if path.startswith(("a/", "b/")):
+        path = path[2:]
+    return path
+
+
+def _diff_section_path(section):
+    """Best path name for a `diff --git` section (rename to / +++ / --- / equal header halves)."""
+    lines = section.splitlines()
+    rename_to = plus = minus = None
+    header = lines[0] if lines else ""
+    for line in lines:
+        if line.startswith("rename to "):
+            rename_to = line[len("rename to "):]
+        elif line.startswith("+++ "):
+            plus = _path_from_diff_ab_line(line[4:])
+        elif line.startswith("--- "):
+            minus = _path_from_diff_ab_line(line[4:])
+    if rename_to is not None:
+        return _unquote_git_path(rename_to)
+    if plus is not None:
+        return plus
+    if minus is not None:
+        return minus
+    rest = header[len("diff --git "):] if header.startswith("diff --git ") else ""
+    if rest.startswith('"'):
+        # two C-quoted paths — unquote first, then strip a/ / b/ (same order as +++ / ---)
+        paths, i = [], 0
+        while i < len(rest) and len(paths) < 2:
+            if rest[i] != '"':
+                i += 1
+                continue
+            j = i + 1
+            while j < len(rest):
+                if rest[j] == "\\" and j + 1 < len(rest):
+                    j += 2
+                    continue
+                if rest[j] == '"':
+                    break
+                j += 1
+            paths.append(_unquote_git_path(rest[i:j + 1]))
+            i = j + 1
+        if len(paths) == 2:
+            a = paths[0][2:] if paths[0].startswith("a/") else paths[0]
+            b = paths[1][2:] if paths[1].startswith("b/") else paths[1]
+            return b if a == b else b
+    elif len(rest) % 2 == 1 and rest[len(rest) // 2] == " ":
+        mid = len(rest) // 2
+        left, right = rest[:mid], rest[mid + 1:]
+        if left.startswith("a/") and right.startswith("b/") and left[2:] == right[2:]:
+            return left[2:]
+    return "?"
+
+
+def _trim_review_patch(patch, max_kb):
+    """Replace oversized per-file diff sections with a header + note. Returns (trimmed, omitted).
+
+    omitted is a list of (path, size_kb) for sections that were replaced. max_kb <= 0 disables.
+    """
+    if max_kb <= 0 or not patch:
+        return patch, []
+    cap = max_kb * 1024
+    sections, cur = [], []
+    for line in patch.splitlines(keepends=True):
+        if line.startswith("diff --git ") and cur:
+            sections.append("".join(cur))
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        sections.append("".join(cur))
+    out, omitted = [], []
+    for section in sections:
+        raw = section.encode("utf-8", "surrogateescape")
+        if len(raw) <= cap:
+            out.append(section)
+            continue
+        header = section.splitlines(keepends=True)[0]
+        if not header.endswith("\n"):
+            header += "\n"
+        path = _diff_section_path(section)
+        size_kb = (len(raw) + 1023) // 1024
+        omitted.append((path, size_kb))
+        out.append(header + f"# delegate: diff omitted from the review patch "
+                   f"({size_kb} KB > {max_kb} KB); read the file in the worktree.\n")
+    return "".join(out), omitted
+
+
 def review(a):
     root = find_run(a.run)
     meta = load_meta(root)
@@ -506,6 +754,12 @@ def review(a):
     _, patch = make_patch(root, meta)
     if not patch.strip():
         sys.exit("no changes to review")
+    max_kb = getattr(a, "patch_max_kb", 200)
+    review_patch, omitted = _trim_review_patch(patch, max_kb)
+    omit_line = ""
+    if omitted:
+        bits = ", ".join(f"{p} ({s} KB)" for p, s in omitted)
+        omit_line = f"review patch: omitted {len(omitted)} large file diff(s): {bits}"
     n = 1 + sum(1 for _ in root.glob("review-*"))
     job = root / f"review-{n}"
     # every round's brief: the original task is the spec, follow-ups amend it
@@ -520,17 +774,26 @@ def review(a):
                   " You may run read-only commands (tests, dry runs, `git diff`). The sandbox is read-only, so "
                   "a command that fails only because it cannot write is not a finding; say so instead.")
     focus = f"\n## Extra focus from the orchestrator\n{a.focus}\n" if a.focus else ""
+    omit_note = ""
+    if omitted:
+        files = ", ".join(f"{p} ({s} KB)" for p, s in omitted)
+        omit_note = (f"\nLarge file diffs omitted from the review patch (read them in the worktree instead): "
+                     f"{files}.\n")
     prompt = REVIEW_PROMPT.format(wt=wt, base=meta["base"][:9], n=n, shell_note=shell_note,
-                                  brief=brief, focus=focus)
+                                  brief=brief, focus=focus, omit_note=omit_note)
     cmd = build_cmd(agent, model, effort, wt, job, read_only=True)
     if a.dry_run:
+        if omit_line:
+            print(omit_line)
         print(f"[dry run] review {n} by {agent} {model}: {cmd}\n---- prompt.md ----\n{prompt}")
         return
     job.mkdir()
     (wt / ".delegate").mkdir(exist_ok=True)
     for old in (wt / ".delegate").glob("review-*.patch"):
         old.unlink()  # a stale diff would only confuse the reviewer
-    write_patch(wt / ".delegate" / f"review-{n}.patch", patch)
+    write_patch(wt / ".delegate" / f"review-{n}.patch", review_patch)
+    if omit_line:
+        print(omit_line)
     verify_log = root / "verify.log"
     if not verify_log.exists():
         previous = sorted(root.glob("round-*/verify.log"), key=lambda p: int(p.parent.name.split("-")[1]))
@@ -1085,18 +1348,40 @@ def cursor_last(job):
     (job / "last-message.md").write_text(text.rstrip() + "\n")
 
 
+def _link_pathspecs(meta):
+    """Literal exclude pathspecs so link paths with glob chars cannot swallow other files."""
+    return [f":(exclude,literal){l}" for l in meta.get("links", [])]
+
+
 def make_patch(root, meta):
     wt = Path(meta["worktree"])
-    git("add", "-A", "-N", cwd=wt)  # intent-to-add: new files show up in the diff; nothing is committed
+    pathspecs = _link_pathspecs(meta)
+    # intent-to-add: new files show up in the diff; nothing is committed. Literal excludes keep
+    # --link paths out even when the info/exclude line was removed (and avoid glob false matches).
+    if pathspecs:
+        r = subprocess.run(["git", "add", "-A", "-N", "--", ".", *pathspecs], cwd=wt,
+                           capture_output=True, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        if r.returncode != 0:
+            err = r.stderr.decode("utf-8", "replace")
+            # An ignored link under info/exclude makes git add exit 1 even with :(exclude,literal);
+            # other paths are still staged.
+            if "ignored by one of your .gitignore files" not in err:
+                sys.exit(f"git add -A -N failed: {err.strip()}")
+    else:
+        git("add", "-A", "-N", cwd=wt)
     head = git("rev-parse", "HEAD", cwd=wt)
     if head != meta["base"]:
         print(f"WARNING: worktree HEAD {head[:9]} != base {meta['base'][:9]}: the delegate made commits "
               f"(contract breach). The patch below covers them too.", file=sys.stderr)
     # Bytes, not text=True: universal newlines would turn \r\n into \n and break CRLF files.
-    patch = subprocess.run(["git", "diff", "--binary", meta["base"]], cwd=wt,
-                           capture_output=True, check=True).stdout.decode("utf-8", "surrogateescape")
+    diff_cmd = ["git", "diff", "--binary", meta["base"]]
+    if pathspecs:
+        diff_cmd += ["--", ".", *pathspecs]
+    patch = subprocess.run(diff_cmd, cwd=wt, capture_output=True, check=True).stdout.decode(
+        "utf-8", "surrogateescape")
     write_patch(root / "changes.patch", patch)
-    return git("diff", "--stat", meta["base"], cwd=wt), patch
+    stat_args = (meta["base"], "--", ".", *pathspecs) if pathspecs else (meta["base"],)
+    return git("diff", "--stat", *stat_args, cwd=wt), patch
 
 
 def write_patch(path, patch):
@@ -1190,6 +1475,40 @@ def _digest(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _iter_status_paths(wt):
+    """Exact paths from `git status --porcelain=v1 -z --untracked-files=all` (destination for renames)."""
+    r = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=wt,
+                       capture_output=True, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    data, i = r.stdout, 0
+    while i + 3 <= len(data):
+        code = data[i:i + 2]
+        if data[i + 2:i + 3] != b" ":
+            break
+        i += 3
+        z = data.find(b"\0", i)
+        if z < 0:
+            path_b, i = data[i:], len(data)
+        else:
+            path_b, i = data[i:z], z + 1
+        path = path_b.decode("utf-8", "surrogateescape")
+        # Rename/copy: an extra NUL-terminated source path follows.
+        if code[:1] in b"RC" or code[1:2] in b"RC":
+            z2 = data.find(b"\0", i)
+            i = len(data) if z2 < 0 else z2 + 1
+        yield path
+
+
+def _dirty_without_links(wt, meta):
+    """Status paths excluding recorded --link entries that are still real symlinks."""
+    links = set(meta.get("links", []))
+    kept = []
+    for path in _iter_status_paths(wt):
+        if path in links and (wt / path).is_symlink():
+            continue
+        kept.append(path)
+    return "\n".join(kept)
+
+
 def cleanup(a):
     root = find_run(a.run)
     meta = load_meta(root)
@@ -1197,7 +1516,7 @@ def cleanup(a):
         sys.exit("delegate or a review is still running")
     wt = Path(meta["worktree"])
     if wt.exists():
-        dirty = git("status", "--porcelain", cwd=wt, check=False)
+        dirty = _dirty_without_links(wt, meta)
         applied = root / "applied"
         if dirty and not a.force:
             if not (applied.exists() and applied.read_text().strip() == _digest(make_patch(root, meta)[1])):
@@ -1205,7 +1524,7 @@ def cleanup(a):
                          f"apply them or pass --force:\n{dirty}")
     if not (root / "logged").exists() and not (root / "applied").exists():  # apply already logged it
         # Read-only runs, reviews and runs merged by hand never pass through apply.
-        changed = wt.exists() and bool(git("status", "--porcelain", cwd=wt, check=False))
+        changed = wt.exists() and bool(_dirty_without_links(wt, meta))
         log_run(root, meta, "discarded" if changed else "read-only" if meta.get("read_only") else "no-changes")
     if wt.exists():
         for l in meta.get("links", []):
@@ -1213,6 +1532,8 @@ def cleanup(a):
                 (wt / l).unlink()
         # safe by now: changes were applied, absent, or explicitly discarded
         git("worktree", "remove", "--force", str(wt), cwd=meta["repo"])
+    # Transfer or remove owned exclude lines, then clear meta before any --purge.
+    _release_excluded(Path(meta["repo"]), root, meta)
     if not a.keep_branch:
         git("branch", "-D", meta["branch"], cwd=meta["repo"], check=False)
     if a.purge:
