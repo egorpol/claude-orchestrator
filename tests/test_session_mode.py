@@ -398,11 +398,48 @@ class SessionModeTests(unittest.TestCase):
         self.assertEqual(self.start("orchestrator", session="empty")["hookSpecificOutput"]["additionalContext"],
                          ORCHESTRATOR_LINE)
 
+    def test_reference_md_pointer_when_present(self):
+        tip = ("Topic tips (handoffs, decisions, data checks, shell, edits, reads): read the matching "
+               f"section of {(self.rules / 'reference.md').resolve()} before that kind of work.")
+        # Absent: no pointer (setUp has no reference.md)
+        orch = self.start("orchestrator", session="ref-absent-o")["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("Topic tips", orch)
+        control = self.start("claude-only", session="ref-absent-c")["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("Topic tips", control)
+        self.assertNotIn("additionalContext",
+                         self.start("vanilla", session="ref-absent-v")["hookSpecificOutput"])
+        (self.rules / "reference.md").write_text("# tips\n", encoding="utf-8")
+        orch = self.start("orchestrator", session="ref-o")["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(orch.endswith(tip), orch)
+        self.assertIn(str((self.rules / "reference.md").resolve()), orch)
+        control = self.start("claude-only", session="ref-c")["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(control.endswith(tip), control)
+        self.assertEqual(control, CONTROL_LINE + "\n\nHYGIENE_MARKER\n\n" + tip)
+        self.assertNotIn("additionalContext",
+                         self.start("vanilla", session="ref-v")["hookSpecificOutput"])
+
     @unittest.skipUnless(all((ROOT / "rules" / name).is_file() for name in ("hygiene.md", "delegation.md")),
                          "split rules are supplied by the main checkout")
     def test_real_repo_rules_exist_and_are_nonempty(self):
         for name in ("hygiene.md", "delegation.md"):
             self.assertTrue((ROOT / "rules" / name).read_text(encoding="utf-8").strip())
+
+    @unittest.skipUnless(all((ROOT / "rules" / name).is_file() for name in ("hygiene.md", "delegation.md")),
+                         "split rules are supplied by the main checkout")
+    def test_real_orchestrator_context_stays_inline(self):
+        # 7,925 bytes of SessionStart context arrived inline; 12,607 were persisted to a file with a
+        # ~2 KB preview (docs/verified-behaviour.md, 2026-10-26). Budget the longest spare-pool line.
+        quota = SESSION_MODE._load_quota()
+        now = datetime.now(timezone.utc)
+        spare = quota.format_spare_line({
+            "age_s": 23 * 3600,
+            "pools": [("codex-7d", 100.0, 999.9), ("cursor-auto", 100.0, 999.9)],
+            "codex_5h": {"used_pct": 0, "resets_at": (now + timedelta(hours=4)).isoformat()},
+        }, now)
+        with mock.patch.dict(os.environ, {"CLAUDE_SESSION_RULES_DIR": str(ROOT / "rules")}):
+            text = SESSION_MODE.session_context("orchestrator", None)
+        self.assertIn("Codex 5h 100% left", spare)
+        self.assertLessEqual(len((text + "\n\n" + spare).encode()), 7925)
 
     def test_excluded_repo_and_forced_override(self):
         self.repo = self.tmp / "claude-orchestrator"

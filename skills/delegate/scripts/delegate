@@ -177,6 +177,9 @@ def main():
     s.add_argument("--model", help="codex default gpt-6.1-sol (@xhigh); cursor default auto")
     s.add_argument("--effort")
     s.add_argument("--focus", help="extra review focus, e.g. 'race conditions in the cache'")
+    s.add_argument("--patch-max-kb", type=int, default=200, metavar="N",
+                   help="omit any single-file diff larger than N KB from the review patch "
+                        "(default 200; 0 keeps the full diff). changes.patch is never trimmed")
     s.add_argument("--detach", action="store_true")
     s.add_argument("--dry-run", action="store_true", help="print the review prompt; start nothing")
     s.set_defaults(fn=runs.review)

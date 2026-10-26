@@ -737,5 +737,322 @@ class LifecycleTests(unittest.TestCase):
                           ("delegate", "parent-session", "followup", "test", "codex")])
 
 
+    def test_link_untracked_warns_hides_in_main_and_cleanup_restores(self):
+        # (a) untracked-not-ignored in main: warn, record, hide during run, show after cleanup
+        path = self.repo / "tests/data/mei"
+        path.mkdir(parents=True)
+        (path / "sample").write_text("fixture\n")
+        before = self.git("status", "--porcelain", "--untracked-files=all")
+        self.assertIn("tests/data/mei", before)
+        r = subprocess.run(
+            [sys.executable, str(CLI), "launch", "codex", "--brief", str(self.brief),
+             "--name", "link-a", "--link", "tests/data/mei"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARNING: --link tests/data/mei is not gitignored", r.stderr)
+        meta = runs.load_meta(self.root("link-a"))
+        self.assertEqual(meta["excluded"], ["/tests/data/mei"])
+        self.assertIn("/tests/data/mei", (self.repo / ".git/info/exclude").read_text())
+        during = self.git("status", "--porcelain", "--untracked-files=all")
+        self.assertNotIn("tests/data/mei", during)
+        self.cli("cleanup", "link-a", "--force")
+        after = self.git("status", "--porcelain", "--untracked-files=all")
+        self.assertIn("tests/data/mei", after)
+        self.assertNotIn("/tests/data/mei", (self.repo / ".git/info/exclude").read_text())
+
+    def test_link_deleted_exclude_keeps_symlink_out_of_patch_and_cleanup(self):
+        # (b) user deletes the exclude line mid-run: patch has no symlink; cleanup without --force
+        path = self.repo / "tests/data/mei"
+        path.mkdir(parents=True)
+        (path / "sample").write_text("fixture\n")
+        self.launch("codex", "link-b", "--link", "tests/data/mei")
+        root = self.root("link-b")
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text("".join(l + "\n" for l in exclude.read_text().splitlines()
+                                   if l != "/tests/data/mei"))
+        self.cli("diff", "link-b")
+        patch = (root / "changes.patch").read_text()
+        self.assertNotIn("tests/data/mei", patch)
+        self.assertNotIn("new file mode 120000", patch)
+        check = subprocess.run(
+            [sys.executable, str(CLI), "apply", "link-b", "--check"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertNotIn("tests/data/mei", check.stdout + check.stderr)
+        # unapplied agent changes still block; discard those but prove links alone do not
+        self.cli("cleanup", "link-b", "--force")
+        # re-run: after apply, cleanup without force must succeed with deleted exclude
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "sample").write_text("fixture\n")
+        self.launch("codex", "link-b2", "--link", "tests/data/mei")
+        self.cli("apply", "link-b2")
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text("".join(l + "\n" for l in exclude.read_text().splitlines()
+                                   if l != "/tests/data/mei"))
+        self.cli("cleanup", "link-b2")  # no --force
+        self.assertFalse((self.root("link-b2") / "wt").exists())
+
+    def test_link_shared_exclude_kept_until_last_live_run(self):
+        # (c) two live runs link the same path: first cleanup transfers ownership, second removes
+        path = self.repo / "tests/data/mei"
+        path.mkdir(parents=True)
+        (path / "sample").write_text("fixture\n")
+        self.launch("codex", "link-c1", "--link", "tests/data/mei", "--read-only")
+        r2 = subprocess.run(
+            [sys.executable, str(CLI), "launch", "codex", "--brief", str(self.brief),
+             "--name", "link-c2", "--link", "tests/data/mei", "--read-only"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("WARNING: --link tests/data/mei is not gitignored", r2.stderr)  # (iii)
+        self.assertEqual(runs.load_meta(self.root("link-c2")).get("excluded", []), [])
+        exclude = self.repo / ".git/info/exclude"
+        self.assertIn("/tests/data/mei", exclude.read_text())
+        self.cli("cleanup", "link-c1")
+        self.assertIn("/tests/data/mei", exclude.read_text())
+        self.assertIn("/tests/data/mei", runs.load_meta(self.root("link-c2"))["excluded"])
+        self.cli("cleanup", "link-c2")
+        self.assertNotIn("/tests/data/mei", exclude.read_text())
+
+    def test_link_already_gitignored_no_warning_nothing_recorded(self):
+        # (d) path already in .gitignore: no warning, excluded list empty for that path
+        (self.repo / "data/cache").mkdir(parents=True)
+        (self.repo / "data/cache/input").write_text("x\n")
+        r = subprocess.run(
+            [sys.executable, str(CLI), "launch", "codex", "--brief", str(self.brief),
+             "--name", "link-d", "--link", "data/cache"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("WARNING: --link data/cache", r.stderr)
+        meta = runs.load_meta(self.root("link-d"))
+        self.assertEqual(meta.get("excluded", []), [])
+        self.cli("cleanup", "link-d", "--force")
+
+    def test_link_preserves_user_preexisting_exclude_line(self):
+        # (e) user's own exclude line for the same path survives cleanup
+        path = self.repo / "tests/data/mei"
+        path.mkdir(parents=True)
+        (path / "sample").write_text("fixture\n")
+        exclude = self.repo / ".git/info/exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        exclude.write_text("# user note\n/tests/data/mei\n")
+        self.launch("codex", "link-e", "--link", "tests/data/mei", "--read-only")
+        meta = runs.load_meta(self.root("link-e"))
+        self.assertEqual(meta.get("excluded", []), [])  # line was already present
+        self.cli("cleanup", "link-e")
+        text = exclude.read_text()
+        self.assertIn("/tests/data/mei", text)
+        self.assertIn("# user note", text)
+
+    def test_link_user_line_after_owner_cleanup_survives_next_run(self):
+        # ownership (i): A removes its line; user adds /cache; B does not take ownership
+        cache = self.repo / "cache"
+        cache.mkdir()
+        (cache / "x").write_text("d\n")
+        self.launch("codex", "own-a", "--link", "cache", "--read-only")
+        self.cli("cleanup", "own-a")
+        self.assertNotIn("/cache", (self.repo / ".git/info/exclude").read_text())
+        exclude = self.repo / ".git/info/exclude"
+        raw = exclude.read_bytes() if exclude.exists() else b""
+        if raw and not raw.endswith(b"\n"):
+            raw += b"\n"
+        exclude.write_bytes(raw + b"/cache\n")
+        self.launch("codex", "own-b", "--link", "cache", "--read-only")
+        self.assertEqual(runs.load_meta(self.root("own-b")).get("excluded", []), [])
+        self.cli("cleanup", "own-b")
+        self.assertIn("/cache", exclude.read_text())
+
+    def test_link_transfer_survives_purge_of_owner(self):
+        # ownership (ii): A transfers then --purge; B still removes the line
+        path = self.repo / "tests/data/mei"
+        path.mkdir(parents=True)
+        (path / "sample").write_text("fixture\n")
+        self.launch("codex", "purge-a", "--link", "tests/data/mei", "--read-only")
+        self.launch("codex", "purge-b", "--link", "tests/data/mei", "--read-only")
+        self.cli("cleanup", "purge-a", "--purge")
+        self.assertFalse(self.root("purge-a").exists())
+        self.assertIn("/tests/data/mei", (self.repo / ".git/info/exclude").read_text())
+        self.assertIn("/tests/data/mei", runs.load_meta(self.root("purge-b"))["excluded"])
+        self.cli("cleanup", "purge-b")
+        self.assertNotIn("/tests/data/mei", (self.repo / ".git/info/exclude").read_text())
+
+    def test_cleanup_blocks_on_nonsymlink_at_link_path(self):
+        # finding 1: a regular file at a recorded link path is an unapplied change
+        path = self.repo / "tests/data/mei"
+        path.mkdir(parents=True)
+        (path / "sample").write_text("fixture\n")
+        self.launch("codex", "link-file", "--link", "tests/data/mei", "--read-only")
+        wt = self.root("link-file") / "wt"
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text("".join(l + "\n" for l in exclude.read_text().splitlines()
+                                   if l != "/tests/data/mei"))
+        (wt / "tests/data/mei").unlink()
+        (wt / "tests/data/mei").write_text("replaced-with-file\n")
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "link-file"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0, rejected.stderr)
+        self.assertIn("changes that were not applied", rejected.stderr)
+        self.assertIn("tests/data/mei", rejected.stderr)
+        self.cli("cleanup", "link-file", "--force")
+
+    def test_literal_link_pathspec_keeps_glob_lookalike_changes(self):
+        # finding 2: link with [ ] must not glob-exclude a real changed file
+        link = self.repo / "tests/test_[a]sk"
+        link.mkdir(parents=True)
+        (link / "in").write_text("linked\n")
+        ask = self.repo / "tests/test_ask.py"
+        ask.parent.mkdir(parents=True, exist_ok=True)
+        ask.write_text("keep\n")
+        self.git("add", "tests/test_ask.py")
+        self.git("commit", "-qm", "ask fixture")
+        self.launch("codex", "link-glob", "--link", "tests/test_[a]sk")
+        wt = self.root("link-glob") / "wt"
+        (wt / "tests/test_ask.py").write_text("keep\nchanged\n")
+        self.cli("diff", "link-glob")
+        patch = (self.root("link-glob") / "changes.patch").read_text()
+        self.assertIn("tests/test_ask.py", patch)
+        self.assertIn("+changed", patch)
+        self.assertNotIn("test_[a]sk", patch)
+        self.cli("cleanup", "link-glob", "--force")
+
+    def test_cleanup_ignores_untracked_parent_of_link_symlink(self):
+        # finding 5: link under a new parent dir; exclude removed; only the symlink is ignorable
+        src = self.repo / "newdir/sub/link"
+        src.mkdir(parents=True)
+        (src / "x").write_text("d\n")
+        self.launch("codex", "link-deep", "--link", "newdir/sub/link", "--read-only")
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text("".join(l + "\n" for l in exclude.read_text().splitlines()
+                                   if l != "/newdir/sub/link"))
+        self.cli("cleanup", "link-deep")  # no --force
+        self.assertFalse((self.root("link-deep") / "wt").exists())
+
+    def test_exclude_edits_preserve_bytes(self):
+        # finding 6: CRLF and no-final-newline round-trip apart from the removed line
+        exclude = self.repo / ".git/info/exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        crlf = b"# note\r\n/keep\r\n/drop-me\r\n"
+        exclude.write_bytes(crlf)
+        runs._exclude(self.repo, ["/added"])
+        self.assertEqual(exclude.read_bytes(), b"# note\r\n/keep\r\n/drop-me\r\n/added\n")
+        runs._remove_excluded(self.repo, ["/drop-me"])
+        self.assertEqual(exclude.read_bytes(), b"# note\r\n/keep\r\n/added\n")
+        exclude.write_bytes(b"/alone")
+        runs._exclude(self.repo, ["/second"])
+        self.assertEqual(exclude.read_bytes(), b"/alone\n/second\n")
+        exclude.write_bytes(b"/a\n/b")
+        runs._remove_excluded(self.repo, ["/b"])
+        self.assertEqual(exclude.read_bytes(), b"/a\n")
+        exclude.write_bytes(b"/a\n/b")
+        runs._remove_excluded(self.repo, ["/a"])
+        self.assertEqual(exclude.read_bytes(), b"/b")
+
+    def test_review_patch_omits_large_file_diffs(self):
+        self.launch("codex", "bigpatch")
+        wt = self.root("bigpatch") / "wt"
+        (wt / "small.txt").write_text("tiny\n")
+        (wt / "big.bin").write_bytes(b"x" * (300 * 1024))
+        out = self.cli("review", "bigpatch")
+        self.assertIn("review patch: omitted 1 large file diff(s): big.bin", out)
+        review = (wt / ".delegate/review-1.patch").read_text(errors="replace")
+        self.assertIn("diff --git", review)
+        self.assertIn("small.txt", review)
+        self.assertIn("+tiny", review)
+        self.assertIn("diff --git a/big.bin b/big.bin", review)
+        self.assertIn("# delegate: diff omitted from the review patch", review)
+        self.assertNotIn("+" + "x" * 100, review)
+        self.assertIn("big.bin", (self.root("bigpatch") / "review-1/prompt.md").read_text())
+        self.cli("diff", "bigpatch")
+        full = (self.root("bigpatch") / "changes.patch").read_text(errors="replace")
+        self.assertIn("small.txt", full)
+        self.assertGreater(len(full.encode()), 300 * 1024)
+        # --patch-max-kb 0 keeps both in the review copy
+        self.cli("review", "bigpatch", "--patch-max-kb", "0")
+        review0 = (wt / ".delegate/review-2.patch").read_text(errors="replace")
+        self.assertIn("small.txt", review0)
+        self.assertNotIn("diff omitted", review0)
+        self.assertGreater(len(review0.encode()), 300 * 1024)
+
+    def test_review_patch_omitted_names_for_space_and_rename(self):
+        # rename-to and quoted header still parse; live review names must be exact
+        self.assertEqual(runs._diff_section_path(
+            "diff --git a/oldbig.bin b/renamed big.bin\n"
+            "similarity index 99%\nrename from oldbig.bin\nrename to renamed big.bin\n"),
+            "renamed big.bin")
+        self.assertEqual(runs._diff_section_path(
+            'diff --git "a/q\\303\\274" "b/q\\303\\274"\n'
+            "Binary files differ\n"), "qü")
+        self.launch("codex", "bigname")
+        wt = self.root("bigname") / "wt"
+        (wt / "big file.txt").write_bytes(b"y" * (300 * 1024))
+        out = self.cli("review", "bigname")
+        self.assertRegex(out, r"review patch: omitted 1 large file diff\(s\): big file\.txt \(\d+ KB\)")
+        self.assertNotIn("big file.txt\t", out)
+        self.assertIn("big file.txt", (wt / ".delegate/review-1.patch").read_text(errors="replace"))
+
+    def test_omitted_names_from_real_git_diff_space_and_cafe(self):
+        # rounds 1–2: real git +++ lines (TAB for spaces; C-quote for non-ASCII)
+        tmp = tempfile.TemporaryDirectory(prefix="delegate-omit-names-")
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=self.env)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, env=self.env)
+        subprocess.run(["git", "config", "user.email", "t@e.invalid"], cwd=repo, check=True, env=self.env)
+        subprocess.run(["git", "config", "core.quotePath", "true"], cwd=repo, check=True, env=self.env)
+        (repo / "seed").write_text("s\n")
+        subprocess.run(["git", "add", "seed"], cwd=repo, check=True, env=self.env)
+        subprocess.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True, env=self.env)
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, env=self.env,
+                              capture_output=True, text=True).stdout.strip()
+        (repo / "a b.txt").write_bytes(b"s" * (210 * 1024))
+        (repo / "café.txt").write_bytes(b"c" * (210 * 1024))
+        subprocess.run(["git", "add", "-A", "-N", "--", "a b.txt", "café.txt"], cwd=repo,
+                       check=True, env=self.env)
+        patch = subprocess.run(["git", "diff", "--binary", base], cwd=repo, check=True,
+                               capture_output=True, env=self.env).stdout.decode("utf-8", "surrogateescape")
+        self.assertIn("\t\n", patch)  # space-name +++ line ends with TAB before newline
+        self.assertIn(r"\303\251", patch)  # café C-quoted
+        trimmed, omitted = runs._trim_review_patch(patch, 200)
+        names = [p for p, _ in omitted]
+        self.assertEqual(set(names), {"a b.txt", "café.txt"})
+        self.assertNotIn("\t", "".join(names))
+        self.assertNotIn("b/café.txt", names)
+        self.assertIn("# delegate: diff omitted", trimmed)
+
+    def test_link_warning_on_gitignore_negation(self):
+        # round 3 #3: !pattern match means not ignored → warn and record
+        (self.repo / ".gitignore").write_text("data*\n!data2\n")
+        self.git("add", ".gitignore")
+        self.git("commit", "-qm", "gitignore negation")
+        (self.repo / "data2").mkdir()
+        (self.repo / "data2" / "x").write_text("d\n")
+        r = subprocess.run(
+            [sys.executable, str(CLI), "launch", "codex", "--brief", str(self.brief),
+             "--name", "link-neg", "--link", "data2", "--read-only"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARNING: --link data2 is not gitignored", r.stderr)
+        self.assertEqual(runs.load_meta(self.root("link-neg"))["excluded"], ["/data2"])
+        self.cli("cleanup", "link-neg")
+        self.assertNotIn("/data2", (self.repo / ".git/info/exclude").read_text())
+
+    def test_link_trailing_slash_normalised(self):
+        # round 3 #4: --link data/ stores data; pathspec still excludes the symlink
+        (self.repo / "data").mkdir()
+        (self.repo / "data" / "x").write_text("d\n")
+        self.launch("codex", "link-slash", "--link", "data/")
+        meta = runs.load_meta(self.root("link-slash"))
+        self.assertEqual(meta["links"], ["data"])
+        self.assertNotIn("data/", meta["links"])
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text("".join(l + "\n" for l in exclude.read_text().splitlines()
+                                   if l != "/data"))
+        self.cli("diff", "link-slash")
+        patch = (self.root("link-slash") / "changes.patch").read_text()
+        self.assertNotIn("diff --git a/data ", patch)
+        self.assertNotIn("new file mode 120000", patch)
+        self.cli("cleanup", "link-slash", "--force")
+
+
 if __name__ == "__main__":
     unittest.main()

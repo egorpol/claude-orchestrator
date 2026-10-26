@@ -40,8 +40,19 @@ Numbers come from `delegate cost --session` on each session's transcript and inc
 | 2026-10-19 | c3b22c1e | orchestrator | 68 | 169k | 1.65M | 24.3k | 16.1% |
 | 2026-10-19 | 4cd72052 | claude-only | 52 | 118k | 0.81M | 15.6k | 0 |
 | 2026-10-20 | f4ddbc11 | orchestrator | 55 | 181k | 1.58M | 28.6k | 17.3% |
+| 2026-10-20 | 63a01e88 | orchestrator | 88 | 221k | 2.07M | 23.5k | 0 |
+| 2026-10-20 | f542404f | orchestrator | 51 | 155k | 1.03M | 20.1k | 0 |
+| 2026-10-21 | aa93d7cd | orchestrator | 54 | 126k | 0.95M | 17.6k | 0 |
+| 2026-10-21 | 2a0eae26 | orchestrator | 59 | 210k | 1.78M | 30.1k | 0 |
+| 2026-10-21 | 7716b5cb | orchestrator | 55 | 127k | 0.95M | 17.3k | 0 |
+| 2026-10-21 | 404ba9fe | orchestrator | 39 | 123k | 0.77M | 19.8k | 0 |
+| 2026-10-21 | 46869c36 | claude-only | 48 | 154k | 1.07M | 22.3k | 0 |
+| 2026-10-22 | ea48f2bb | claude-only | 86 | 163k | 1.54M | 18.0k | 0 |
+| 2026-10-23 | d4b6e9de | orchestrator | 71 | 161k | 1.33M | 18.7k | 0 |
+| 2026-10-23 | 48c1baa2 | orchestrator | 89 | 275k | 2.83M | 31.8k | 0 |
+| 2026-10-26 | e464ce15 | claude-only | 80 | 198k | 1.82M | 22.7k | 0 |
 
-36 sessions, 3,230 calls, 96.1M cost units; idle rebuilds 9.1M (9.5%). The 35 sessions after the marathon averaged 24.6k units per call.
+47 sessions, 3,950 calls, 112.2M cost units; idle rebuilds 9.1M (8.1%). The 46 sessions after the marathon averaged 24.2k units per call.
 
 ## 2026-10-10
 
@@ -253,6 +264,34 @@ From 2026-10-13 10:29 the session-mode hook drew each session's mode, at weights
 - **Claude pool points are estimated, not read.** The estimate is list-price USD times the saved fit (claude-7d 0.361 points per USD), about 1.4, 1.9 and 1.6 claude-7d points per session. The SessionStart-to-SessionEnd reading deltas sum to 57.0, 28.0 and 110.0, but they also count other sessions' use and the hours a session stays open: three vanilla sessions left open for 21–92 h read 103 points between them.
 - **Delegation stayed in the orchestrator arm.** It had all 8 delegate runs (all applied, with 7 review rounds and 2 follow-ups) and all 14 `ask` calls, with Codex at 0.68M input, 12.2M cached and 0.23M output tokens, and Cursor at 1.05M, 9.8M and 0.20M. Codex and Cursor reading deltas also rise in claude-only and vanilla sessions, from other sessions' use, so those pools have no per-session estimate yet. Claude-only sessions made 138 Claude subagent calls, counted in their USD. The hook blocked one delegate call in a vanilla session.
 - **10 drawn sessions are startup ghosts** that ended before any call, with no transcript (6 vanilla, 3 orchestrator, 1 claude-only): 9 within 2 s of the start, one cleared after 5 s. They have no cost, so vanilla's USD covers 8 of its 14 sessions. `--by-mode` now lists them in a `GHOST` column and leaves them out of the per-session means, which they had lowered: vanilla's calls per session are 66.3 without them, 37.9 with them.
+
+## 2026-10-20 to 10-26: eleven sessions, four projects
+
+Each closed with `/field-report`; folded in on 2026-10-26. Numbers from `delegate cost --session <id>`. Modes: 8 orchestrator, 3 claude-only (weights 50/25/25 until 2026-10-26). Claude 7d is the share left when the report was written, on Pro.
+
+| session | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---:|---:|---:|---:|---|---|
+| 63a01e88, audiospylt: pitch spelling, MEI notation and Verovio render | Codex build, Cursor review | 88 | 221k | 2.07M | 23.5k | none | 95 |
+| f542404f, audiospylt: transform and morph modules, own independent checker | Codex build, Cursor review | 51 | 155k | 1.03M | 20.1k | none | 88 |
+| aa93d7cd, camat_v2: lazy package init, tests, wheel probe, PR | none | 54 | 126k | 0.95M | 17.6k | none | 60 |
+| 2a0eae26, camat_v2: web-edition template, builder and tests, ~60 KB written inline | none | 59 | 210k | 1.78M | 30.1k | none | 57 |
+| 7716b5cb, ddt_1_vol_11: commit cleanup, rebase onto collaborators' commits, report refresh, push | none | 55 | 127k | 0.95M | 17.3k | none | 76 |
+| 404ba9fe, ddt_1_vol_11: release mode compares bytes with the release tag | `ask --agent both` | 39 | 123k | 0.77M | 19.8k | none | 63 |
+| 46869c36, webern_op27: viewer display settings ported from another repo (claude-only) | none | 48 | 154k | 1.07M | 22.3k | none | 61 |
+| ea48f2bb, audiospylt: dependency gate fix, review by Claude's own subagent, commit, CI (claude-only) | none | 86 | 163k | 1.54M | 18.0k | none | 38 |
+| d4b6e9de, audiospylt: test exports from an external analysis tool, CLI probes | `ask --agent both` | 71 | 161k | 1.33M | 18.7k | none | 22 |
+| 48c1baa2, audiospylt: SDIF reader and writer, fixtures, docs, commit | none (believed delegation blocked) | 89 | 275k | 2.83M | 31.8k | none | 13 |
+| e464ce15, ddt_1_vol_11: a newly combined work checked against the corpus format, added to the web edition (claude-only) | none | 80 | 198k | 1.82M | 22.7k | none | 3 |
+
+- **Delegation stopped after 10-20.** Both 10-20 sessions ran a Codex build with a Cursor review. The six orchestrator sessions from 10-21 launched nothing and asked twice. In 48c1baa2 a control session's leftover line in the handoff ("work inline, delegation is blocked") was read as fact, and 27 tests and the docs were written inline; 2a0eae26 wrote ~60 KB of new code inline. On 2026-10-26, control sessions stopped writing their mode into handoffs, orchestrator sessions delete such leftovers, SessionStart names the pools ahead of pace, the rules say "delegate by default", one mid-session nudge fires, and the draw moved to 70/15/15.
+- **The injected rules were persisted, not shown.** From `c61e134` the SessionStart text (12.6 KB) went past the harness's inline limit: sessions got a ~2 KB preview, and 65 of 68 opened the file with one extra call. Hygiene and delegation rules are now cut to 6.8 KB, 7,404 bytes with the mode line and the `reference.md` pointer, below the 7,925 bytes measured to stay inline. Narrow tips moved to `rules/reference.md`, which the hook names by absolute path.
+- **Writing, not reading, grew the long sessions.** 48c1baa2 ended at 275k after one prompt ran from 38k to 266k, and 2a0eae26 reached 210k writing ~60 KB. The item rule now sizes a step by what it writes and asks the handoff to name the step's internal boundary.
+- **No idle rebuilds in eleven sessions**, against four (9.8–17.3% each) in the previous fifteen.
+- **A decided policy hid its cost.** A fill policy picked without a measurement made one file 59× larger at build time and needed a new picker. Picker options now carry numbers measured on the worst real input.
+- **Rendered output needs eyes.** In 63a01e88, 1,084 passing tests and a review APPROVE missed reversed labels in a render. SKILL.md step 5 now asks for one look at a real render and gives the reviewer the PNG.
+- **CLI fixes.** `--link` hid a path meant to be committed in the main tree via the shared `.git/info/exclude`, and cleanup then refused: launch now warns, cleanup removes the lines the run added, and links never enter a patch. A 1.4 MB schema would have filled the review patch: per-file diffs over 200 KB now go in as a header and a note. Cursor's `**Pick:**` after a preamble escaped `grep ^Pick`: `ask --agent both` now ends with one `Pick (agent):` line each.
+- **Commands.** A closing picker offered `/field-report`, which the model could not invoke (46869c36); it is model-invocable now. `/next` opens with "handoff predates N commits / M dirty files" when the handoff is older than the latest commit (e464ce15).
+- **Not adopted:** project-specific tips (SVG hover on painted children, assertions on markup form, post-merge regeneration paths, a `GIT_INDEX_FILE` export) and the triage's "inline is cheaper for ≤5-call rewrites", which the delegate-by-default decision supersedes apart from the <~10-line exception.
 
 ## Still open
 
