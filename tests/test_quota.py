@@ -335,6 +335,150 @@ class QuotaTests(unittest.TestCase):
         self.assertEqual(self.rows()[0]["source"], "daemon")
         self.assertEqual(json.loads(self.calls.read_text().splitlines()[-1])["args"][-1], "daemon")
 
+    def test_cycle_window_clamps_short_months(self):
+        reset = datetime(2026, 3, 31, tzinfo=timezone.utc)
+        self.assertEqual(quota.cycle_window_start(reset),
+                         datetime(2026, 2, 28, tzinfo=timezone.utc))
+
+    def test_pace_floor_is_five_percent(self):
+        # Nearly exhausted window: raw tlf << 0.05, so pace uses the 0.05 floor.
+        reading = datetime(2026, 10, 26, 17, 0, tzinfo=timezone.utc)
+        entry = {"used_pct": 0.0, "resets_at": (reading + timedelta(minutes=10)).isoformat(),
+                 "stale": False}
+        # window_h=5 → tlf = 10/300 ≈ 0.0333; floor 0.05 → pace = 1/0.05 = 20
+        pace = quota._entry_pace("codex-5h", entry, reading)
+        self.assertAlmostEqual(pace, 20.0, places=3)
+
+    def _spare_row(self, ts, **pool_overrides):
+        pools = {
+            "claude-5h": {"used_pct": 5.0, "resets_at": "2026-10-26T22:00:00+00:00", "stale": False},
+            "claude-7d": {"used_pct": 1.0, "resets_at": "2026-10-26T22:00:00+00:00", "stale": False},
+            "codex-5h": {"used_pct": 90.0, "resets_at": "2026-10-26T20:55:14+01:00", "stale": False},
+            "codex-7d": {"used_pct": 14.0, "resets_at": "2026-11-02T15:55:14+01:00", "stale": False},
+            "cursor-auto": {"used_pct": 4.6956, "resets_at": "2026-11-18T01:53:54+00:00", "stale": False},
+        }
+        for pid, entry in pool_overrides.items():
+            pools[pid] = {**pools.get(pid, {}), **entry}
+        return {"ts": ts, "source": "direct", "reason": "session-start", "session": "x",
+                "run": None, "pools": pools}
+
+    def test_spare_pools_real_2026_10_26_fixture(self):
+        # Independent datetime arithmetic (brief): cursor-auto pace 1.3224, codex-7d 0.8745.
+        ts = "2026-10-26T17:42:27+00:00"
+        hook = datetime(2026, 10, 26, 18, 0, tzinfo=timezone.utc)
+        self.write_rows(self._spare_row(ts))
+        info = quota.spare_pools(self.log, now=hook)
+        self.assertIsNotNone(info)
+        by_pid = {pid: (left, pace) for pid, left, pace in info["pools"]}
+        self.assertEqual(set(by_pid), {"cursor-auto"})
+        left, pace = by_pid["cursor-auto"]
+        self.assertAlmostEqual(pace, 1.3224, delta=0.001)
+        self.assertAlmostEqual(left / 100, 0.953044, delta=0.001)
+        # Confirm the non-qualifying paces stay within the brief's ±0.001.
+        seven = quota._entry_pace("codex-7d", self.rows()[0]["pools"]["codex-7d"],
+                                  quota.parse_ts(ts))
+        five = quota._entry_pace("codex-5h", self.rows()[0]["pools"]["codex-5h"],
+                                 quota.parse_ts(ts))
+        self.assertAlmostEqual(seven, 0.8745, delta=0.001)
+        self.assertAlmostEqual(five, 0.2259, delta=0.001)
+        line = quota.format_spare_line(info, now=hook)
+        self.assertIn("Cursor Auto", line)
+        self.assertNotIn("Codex 7d", line)
+        self.assertNotIn("Codex 5h", line)
+
+    def test_spare_line_absent_for_bad_or_stale_readings(self):
+        hook = datetime(2026, 10, 26, 18, 0, tzinfo=timezone.utc)
+        self.assertIsNone(quota.spare_pools(self.tmp / "missing.jsonl", now=hook))
+        self.write_rows({"ts": "2026-10-26T17:00:00+00:00", "error": "failed"})
+        self.assertIsNone(quota.spare_pools(self.log, now=hook))
+        self.log.write_text("not json\n{}\n", encoding="utf-8")
+        self.assertIsNone(quota.spare_pools(self.log, now=hook))
+        # Older than 12 h.
+        old = (hook - timedelta(hours=13)).isoformat()
+        self.write_rows(self._spare_row(old))
+        self.assertIsNone(quota.spare_pools(self.log, now=hook))
+        # Reset already passed at hook time.
+        self.write_rows(self._spare_row(
+            "2026-10-26T17:42:27+00:00",
+            **{"cursor-auto": {"used_pct": 1.0, "resets_at": "2026-10-26T17:50:00+00:00", "stale": False},
+               "codex-7d": {"used_pct": 90.0, "stale": False}}))
+        self.assertIsNone(quota.spare_pools(self.log, now=hook))
+        # Pace ≤ 1 (codex-7d at the real fixture values).
+        self.write_rows(self._spare_row(
+            "2026-10-26T17:42:27+00:00",
+            **{"cursor-auto": {"used_pct": 50.0, "stale": False}}))  # left 50% / ~0.72 ≈ 0.69
+        self.assertIsNone(quota.spare_pools(self.log, now=hook))
+
+    def test_spare_line_shows_codex_5h_beside_7d(self):
+        hook = datetime(2026, 10, 26, 18, 0, tzinfo=timezone.utc)
+        # Make codex-7d qualify: nearly unused near the end of its window.
+        self.write_rows(self._spare_row(
+            "2026-10-26T17:42:27+00:00",
+            **{"codex-7d": {"used_pct": 1.0, "resets_at": "2026-10-27T18:00:00+00:00", "stale": False},
+               "cursor-auto": {"used_pct": 90.0, "stale": False}}))
+        info = quota.spare_pools(self.log, now=hook)
+        self.assertEqual([p[0] for p in info["pools"]], ["codex-7d"])
+        line = quota.format_spare_line(info, now=hook)
+        self.assertIn("Codex 7d", line)
+        self.assertIn("Codex 5h", line)
+        self.assertRegex(line, r"Codex 5h 10% left, resets \d{2}:\d{2}")
+        # 5h reset already passed at hook time → "reset since the reading".
+        self.write_rows(self._spare_row(
+            "2026-10-26T17:42:27+00:00",
+            **{"codex-7d": {"used_pct": 1.0, "resets_at": "2026-10-27T18:00:00+00:00", "stale": False},
+               "codex-5h": {"used_pct": 90.0, "resets_at": "2026-10-26T17:50:00+00:00", "stale": False},
+               "cursor-auto": {"used_pct": 90.0, "stale": False}}))
+        line = quota.format_spare_line(quota.spare_pools(self.log, now=hook), now=hook)
+        self.assertIn("Codex 5h reset since the reading", line)
+
+    def test_spare_selector_ignores_claude_and_prefers_newer_row(self):
+        # Older: Cursor Auto spare (5% used). Newer: Claude errors, Cursor Auto 99% used (pace < 1).
+        hook = datetime(2026, 10, 26, 18, 0, tzinfo=timezone.utc)
+        older = self._spare_row(
+            "2026-10-26T16:00:00+00:00",
+            **{"cursor-auto": {"used_pct": 5.0, "resets_at": "2026-11-18T01:53:54+00:00", "stale": False},
+               "codex-7d": {"used_pct": 90.0, "stale": False}})
+        newer = {
+            "ts": "2026-10-26T17:42:27+00:00", "source": "direct", "reason": "launch",
+            "pools": {
+                "claude-5h": {"error": "metric usage_five_hour missing"},
+                "claude-7d": {"error": "metric usage_seven_day missing"},
+                "codex-5h": {"used_pct": 90.0, "resets_at": "2026-10-26T20:55:14+01:00", "stale": False},
+                "codex-7d": {"used_pct": 90.0, "resets_at": "2026-11-02T15:55:14+01:00", "stale": False},
+                "cursor-auto": {"used_pct": 99.0, "resets_at": "2026-11-18T01:53:54+00:00", "stale": False},
+            },
+        }
+        self.write_rows(older, newer)
+        # _last_good still picks the older Claude-complete row.
+        good, good_ts = quota._last_good(self.log)
+        self.assertEqual(good["ts"], older["ts"])
+        self.assertEqual(good_ts, quota.parse_ts(older["ts"]))
+        info = quota.spare_pools(self.log, now=hook)
+        line = quota.format_spare_line(info, now=hook) or ""
+        self.assertNotIn("Cursor Auto", line)
+        # Newer row won: 99% used → pace < 1, so no spare line at all.
+        self.assertIsNone(info)
+
+    def test_format_codex_5h_unknown_and_reset_cases(self):
+        now = datetime(2026, 10, 26, 18, 0, tzinfo=timezone.utc)
+        self.assertEqual(quota._format_codex_5h({"error": "metric missing"}, now), "Codex 5h unknown")
+        self.assertEqual(quota._format_codex_5h(None, now), "Codex 5h unknown")
+        self.assertEqual(quota._format_codex_5h({"used_pct": 10.0}, now), "Codex 5h unknown")
+        self.assertEqual(
+            quota._format_codex_5h({"used_pct": 10.0, "resets_at": "2026-10-26T17:50:00+00:00"}, now),
+            "Codex 5h reset since the reading")
+        self.assertRegex(
+            quota._format_codex_5h({"used_pct": 10.0, "resets_at": "2026-10-26T20:55:14+01:00"}, now),
+            r"Codex 5h 90% left, resets \d{2}:\d{2}")
+        # Missing key in spare_pools → format still says unknown beside 7d.
+        self.write_rows(self._spare_row(
+            "2026-10-26T17:42:27+00:00",
+            **{"codex-7d": {"used_pct": 1.0, "resets_at": "2026-10-27T18:00:00+00:00", "stale": False},
+               "codex-5h": {"error": "metric missing"},
+               "cursor-auto": {"used_pct": 90.0, "stale": False}}))
+        line = quota.format_spare_line(quota.spare_pools(self.log, now=now), now=now)
+        self.assertIn("Codex 5h unknown", line)
+
 
 if __name__ == "__main__":
     unittest.main()

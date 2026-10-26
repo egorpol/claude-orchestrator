@@ -2,6 +2,10 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-10-26
+
+- **SessionStart `additionalContext` preview.** With Claude Code persisting a large SessionStart `additionalContext` to a file and showing the model only a ~2 KB preview of whole lines, a 12,607-byte injection ended the preview at character 1,867 of 12,605. Before commit `c61e134`, 7,925 bytes stayed inline. Across 68 sessions since 2026-10-20, 65 opened the file (one extra call each) and 3 never did, so those three never saw past the hygiene rules when hygiene was first.
+
 ## 2026-10-09
 
 - **`cursor-agent --force` silently disables `--sandbox enabled`.** Without `--force`, headless sandboxed commands auto-run, writes outside the worktree fail with EPERM, the edit tool rejects outside paths, and there is no network. The launcher never passes `--force` unless you give it `--unsandboxed`.

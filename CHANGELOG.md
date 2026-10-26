@@ -37,6 +37,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- Session-mode and context-guard push delegation again after orchestrator sessions stopped launching (2 launches across ~30 sessions from 2026-10-21 to 10-26, against 16 in the prior week): an orchestrator mode line that overrides leftover "work inline / no delegate" handoff notes (not experiment-description text), a SessionStart spare-pool line from `quota.jsonl` when Codex 7d or Cursor Auto is ahead of pace (newest row with usable Codex/Cursor data, not Claude-gated; Codex 5h shown beside 7d, or "unknown" / "reset since the reading"), `rules/delegation.md` rewritten to delegate by default with measured unused-pool numbers, and a once-per-session mid-session `delegate` nudge in `context-guard.py`. Control lines say the mode must not be written into HANDOFF.md. Injected context is ordered so the treatment fits the ~2 KB SessionStart preview.
 - `delegate cost --session` adds dated list-price USD by model and source, including deduplicated subagents and separate 5m/1h cache writes; `delegate report` logs these totals while preserving historical main-only measurements.
 - SKILL.md: acceptance scripts in linked folders, each checker branch run once before launch, and seeds pinned for two-run comparisons; known issues marked as handled in `--focus`, and no second review for a small, covered follow-up.
 - The context guard, `hygiene.md` and SKILL.md suggest "`/clear`, then `/next`" instead of "continue from the handoff".
