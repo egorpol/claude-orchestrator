@@ -31,7 +31,7 @@ The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysi
 |---|---|
 | [`delegate`](skills/delegate/SKILL.md) skill and CLI | Hands work to **Codex CLI** or **Cursor's headless agent** (`cursor-agent --model auto`). Shows live quota per pool via openusage and ranks models per task type with [Artificial Analysis](https://artificialanalysis.ai/) ratings. Each delegate runs in its own git worktree with a brief, a log and an optional check command. The other vendor reviews the result read-only, and fix rounds resume the same agent session. Claude reviews the diff and applies it uncommitted. |
 | [`/field-report`](skills/field-report/SKILL.md) skill | Writes a field report on the current session from any project's chat: `delegate report` fills in the numbers, then Claude writes the narrative. |
-| [`hooks/context-guard.py`](hooks/context-guard.py) | Asks for a handoff before a new work item once context passes about 120k tokens. Holds the first prompt after an hour idle. |
+| [`hooks/context-guard.py`](hooks/context-guard.py) | Asks for a handoff before a new work item once context passes about 120k tokens. Holds the first prompt after an hour idle. In orchestrator sessions, nudges once toward `delegate` when spare pools remain unused. |
 | [`hooks/secret-guard.py`](hooks/secret-guard.py) | PreToolUse (Bash) and optional git pre-commit/pre-push: catches API tokens, private keys, home paths, key/env files, private names and added working files (`HANDOFF.md`, direct `feedback/*.md` or `*.jsonl`). Private literals go in `${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/private-names.txt`, one per line (blanks and `#` comments ignored); output masks names. Per-repo opt-outs: `git config secretGuard.homePaths false`, `git config secretGuard.privateNames false`, `git config secretGuard.workingFiles false`. |
 | [`rules/orchestrator.md`](rules/orchestrator.md) | Short rules for every session, including sessions that never load a skill. It imports [`hygiene.md`](rules/hygiene.md) (handoffs, pickers, data checks, shell) and [`delegation.md`](rules/delegation.md) (when to delegate, second opinions). |
 
@@ -101,7 +101,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 ```text
 install.sh                         link/copy skills and commands, check prerequisites; --hooks, --git-hook=DIR, --rules, --experiment, --timer, --bin
 commands/next.md                   /next: continue from HANDOFF.md after /clear
-hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle
+hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle; mid-session `delegate` nudge when spare pools sit unused
 hooks/secret-guard.py              PreToolUse (Bash), git pre-commit/pre-push, --check: secrets, private names, working files
 hooks/session-mode.py              SessionStart/PreToolUse/SessionEnd: control-session draw, rules, summary rows
 rules/orchestrator.md              user-level rules for every session (install.sh --rules, or the session-mode hook)

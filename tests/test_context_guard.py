@@ -8,7 +8,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-HOOK = Path(__file__).resolve().parents[1] / "hooks" / "context-guard.py"
+ROOT = Path(__file__).resolve().parents[1]
+HOOK = ROOT / "hooks" / "context-guard.py"
 
 
 def _ago(minutes=0, hours=0):
@@ -27,8 +28,14 @@ class ContextGuardTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
         self.transcript = self.tmp / "session.jsonl"
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith("CONTEXT_GUARD_")}
+        self.session_log = self.tmp / "sessions.jsonl"
+        self.quota_log = self.tmp / "quota.jsonl"
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith("CONTEXT_GUARD_") and k != "CLAUDE_SESSION_LOG"}
         self.env["CONTEXT_GUARD_STATE"] = str(self.tmp / "state")
+        # Never read the real ~/.cache/claude-delegate/ session or quota logs.
+        self.env["CLAUDE_SESSION_LOG"] = str(self.session_log)
+        self.env["XDG_CACHE_HOME"] = str(self.tmp / "cache")
 
     def prompt(self, context, *, timestamp=None, session_id="s1", append=True,
                is_sidechain=False, model="claude-opus-5-5", text="next step", event=None):
@@ -52,6 +59,44 @@ class ContextGuardTests(unittest.TestCase):
             env=self.env, capture_output=True, text=True, check=True,
         )
         return json.loads(r.stdout) if r.stdout.strip() else None
+
+    def write_start(self, session="s1", mode="orchestrator", excluded=False):
+        row = {"event": "start", "session": session, "mode": mode, "excluded": excluded,
+               "ts": datetime.now(timezone.utc).isoformat()}
+        with self.session_log.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row) + "\n")
+
+    def write_delegate(self, session="s1"):
+        with self.session_log.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"event": "delegate", "session": session,
+                                     "command": "launch"}) + "\n")
+
+    def write_spare_quota(self):
+        now = datetime.now(timezone.utc)
+        row = {"ts": (now - timedelta(minutes=30)).isoformat(), "pools": {
+            "claude-5h": {"used_pct": 1.0, "resets_at": (now + timedelta(hours=4)).isoformat(),
+                          "stale": False},
+            "claude-7d": {"used_pct": 1.0, "resets_at": (now + timedelta(days=2)).isoformat(),
+                          "stale": False},
+            "codex-5h": {"used_pct": 90.0, "resets_at": (now + timedelta(hours=2)).isoformat(),
+                         "stale": False},
+            "codex-7d": {"used_pct": 90.0, "resets_at": (now + timedelta(days=6)).isoformat(),
+                         "stale": False},
+            "cursor-auto": {"used_pct": 1.0, "resets_at": (now + timedelta(days=20)).isoformat(),
+                            "stale": False},
+        }}
+        self.quota_log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    def write_tool_calls(self, n, *, sidechain=False, start_id=0):
+        with self.transcript.open("a", encoding="utf-8") as stream:
+            for i in range(n):
+                rec = {"type": "assistant",
+                       "message": {"id": f"m{start_id + i}",
+                                   "content": [{"type": "tool_use", "id": f"toolu_{start_id + i}",
+                                                "name": "Bash", "input": {}}]}}
+                if sidechain:
+                    rec["isSidechain"] = True
+                stream.write(json.dumps(rec) + "\n")
 
     def test_fires_at_item_boundaries_from_120k_then_every_60k(self):
         self.assertIsNone(self.prompt(119_000))
@@ -156,6 +201,119 @@ class ContextGuardTests(unittest.TestCase):
         self.assertEqual(blocked["decision"], "block")
         self.assertTrue(blocked["reason"].startswith("context guard:"))
         self.assertIn("~150k", self.prompt(150_000, append=False)["systemMessage"])
+
+    def _nudge_ready(self, session="s1", tools=30):
+        self.write_start(session)
+        self.write_spare_quota()
+        self.write_tool_calls(tools)
+        # Usage row so last_context finds something; stay under FIRST so size reminder is quiet.
+        return self.prompt(50_000, session_id=session)
+
+    def test_delegate_nudge_fires_once_at_threshold(self):
+        first = self._nudge_ready(tools=30)
+        self.assertIsNotNone(first)
+        self.assertIn("Delegation nudge", first["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("Cursor Auto", first["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("delegate", first["systemMessage"])
+        self.assertIsNone(self.prompt(50_000, append=False))  # once per session
+
+    def test_delegate_nudge_silent_when_blocked_or_ineligible(self):
+        cases = [
+            ("claude-only", dict(mode="claude-only")),
+            ("vanilla", dict(mode="vanilla")),
+            ("excluded", dict(excluded=True)),
+            ("no-start", None),
+            ("has-delegate", "delegate"),
+            ("sidechain", "sidechain"),
+            ("below-threshold", "below"),
+            ("no-spare", "no-spare"),
+            ("disabled", "disabled"),
+            ("idle-block", "idle"),
+        ]
+        for name, setup in cases:
+            with self.subTest(name=name):
+                self.setUp()  # fresh temp dir per case
+                if setup == "disabled":
+                    self.env["CONTEXT_GUARD_NUDGE"] = "0"
+                    self.write_start()
+                    self.write_spare_quota()
+                    self.write_tool_calls(30)
+                    self.assertIsNone(self.prompt(50_000))
+                elif setup == "idle":
+                    self.write_start()
+                    self.write_spare_quota()
+                    self.write_tool_calls(30)
+                    blocked = self.prompt(150_000, timestamp=_ago(hours=2))
+                    self.assertEqual(blocked["decision"], "block")
+                    self.assertNotIn("Delegation nudge", json.dumps(blocked))
+                elif setup is None:
+                    self.write_spare_quota()
+                    self.write_tool_calls(30)
+                    self.assertIsNone(self.prompt(50_000))
+                elif setup == "delegate":
+                    self.write_start()
+                    self.write_delegate()
+                    self.write_spare_quota()
+                    self.write_tool_calls(30)
+                    self.assertIsNone(self.prompt(50_000))
+                elif setup == "sidechain":
+                    self.write_start()
+                    self.write_spare_quota()
+                    self.write_tool_calls(30, sidechain=True)
+                    self.assertIsNone(self.prompt(50_000))
+                elif setup == "below":
+                    self.write_start()
+                    self.write_spare_quota()
+                    self.write_tool_calls(29)
+                    self.assertIsNone(self.prompt(50_000))
+                elif setup == "no-spare":
+                    self.write_start()
+                    self.write_tool_calls(30)
+                    self.assertIsNone(self.prompt(50_000))
+                else:
+                    self.write_start(**setup)
+                    self.write_spare_quota()
+                    self.write_tool_calls(30)
+                    self.assertIsNone(self.prompt(50_000))
+
+    def test_delegate_nudge_merges_with_size_reminder(self):
+        self.write_start()
+        self.write_spare_quota()
+        self.write_tool_calls(30)
+        out = self.prompt(121_000)
+        self.assertIsNotNone(out)
+        self.assertNotIn("decision", out)
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Context guard:", context)
+        self.assertIn("Delegation nudge", context)
+        self.assertIn("~121k", out["systemMessage"])
+        self.assertIn("delegate", out["systemMessage"])
+        self.assertIn(" | ", out["systemMessage"])
+
+    def test_tool_call_count_rereads_partial_last_line(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("context_guard", HOOK)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        guard.STATE = self.tmp / "state"
+        guard.NUDGE_CALLS = 30
+        session = "partial"
+        complete = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "id": "toolu_partial",
+                                     "name": "Bash", "input": {}}]},
+        })
+        # First pass: truncated last line (no trailing newline) must not advance offset past it.
+        self.transcript.write_bytes(complete.encode("utf-8")[:-10])  # cut mid-JSON, no \n
+        self.assertEqual(guard._tool_call_count(self.transcript, session), 0)
+        cache = json.loads((guard.STATE / f"{session}.tools").read_text(encoding="utf-8"))
+        self.assertEqual(cache["offset"], 0)
+        # Complete the line and recount: the id appears once.
+        self.transcript.write_bytes(complete.encode("utf-8") + b"\n")
+        self.assertEqual(guard._tool_call_count(self.transcript, session), 1)
+        cache = json.loads((guard.STATE / f"{session}.tools").read_text(encoding="utf-8"))
+        self.assertEqual(cache["ids"], ["toolu_partial"])
+        self.assertEqual(guard._tool_call_count(self.transcript, session), 1)
 
 
 if __name__ == "__main__":

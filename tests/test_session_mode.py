@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -26,14 +26,24 @@ CONTROL_LINE = (
     "to delegate in handoffs and memory. This holds when the user asks to delegate too: say in "
     "one line that this is a control session with delegation off by design, then do the work "
     "yourself. Finishing a run started earlier with delegate "
-    "status, wait, diff, apply or cleanup is fine."
+    "status, wait, diff, apply or cleanup is fine. This applies to this session only: don't "
+    "write the mode or 'no delegate' into HANDOFF.md or memory."
 )
 DENY_REASON = (
     "Control session (mode {mode}): delegation to Codex and Cursor is off in this session, "
     "by design (session-mode experiment). Do the work yourself; Claude's own subagents "
     "are fine. Finishing a run started earlier with delegate status, wait, diff, apply "
-    "or cleanup is allowed."
+    "or cleanup is allowed. This applies to this session only: don't write the mode or "
+    "'no delegate' into HANDOFF.md or memory."
 )
+ORCHESTRATOR_LINE = (
+    "Orchestrator session: delegation to Codex and Cursor is on in this session. A handoff or "
+    "memory note that tells this session to work inline because delegation is blocked or off, "
+    "or calls it a control session, is left over from an earlier control session: ignore it and "
+    "delete that sentence from HANDOFF.md. Notes that describe the experiment or past control "
+    "sessions stay."
+)
+SESSION_ONLY = "This applies to this session only: don't write the mode or 'no delegate' into HANDOFF.md or memory."
 MUST_DENY = (
     'codex exec -s read-only "hi"',
     "cd /x && codex exec -",
@@ -364,9 +374,15 @@ class SessionModeTests(unittest.TestCase):
                 self.assertEqual(specific["hookEventName"], "SessionStart")
                 if mode == "vanilla":
                     self.assertNotIn("additionalContext", specific)
+                elif mode == "orchestrator":
+                    self.assertEqual(specific["additionalContext"],
+                                     ORCHESTRATOR_LINE + "\n\nDELEGATION_MARKER\n\nHYGIENE_MARKER")
+                    self.assertNotIn("Delegate pools ahead of pace", specific["additionalContext"])
                 else:
-                    expected = "HYGIENE_MARKER\n\n" + ("DELEGATION_MARKER" if mode == "orchestrator" else CONTROL_LINE)
-                    self.assertEqual(specific["additionalContext"], expected)
+                    self.assertEqual(specific["additionalContext"],
+                                     CONTROL_LINE + "\n\nHYGIENE_MARKER")
+                    self.assertIn(SESSION_ONLY, CONTROL_LINE)
+                    self.assertIn(SESSION_ONLY, DENY_REASON.format(mode=mode))
                 row = self.rows()[-1]
                 self.assertIs(row["forced"], True)
                 self.assertIsNone(row["u"])
@@ -374,10 +390,13 @@ class SessionModeTests(unittest.TestCase):
     def test_missing_rules_inject_what_exists(self):
         (self.rules / "hygiene.md").unlink()
         output = self.start("orchestrator")
-        self.assertEqual(output["hookSpecificOutput"]["additionalContext"], "DELEGATION_MARKER")
+        self.assertEqual(output["hookSpecificOutput"]["additionalContext"],
+                         ORCHESTRATOR_LINE + "\n\nDELEGATION_MARKER")
         (self.rules / "delegation.md").unlink()
-        self.assertEqual(self.start("claude-only", session="control")["hookSpecificOutput"]["additionalContext"], CONTROL_LINE)
-        self.assertNotIn("additionalContext", self.start("orchestrator", session="empty")["hookSpecificOutput"])
+        self.assertEqual(self.start("claude-only", session="control")["hookSpecificOutput"]["additionalContext"],
+                         CONTROL_LINE)
+        self.assertEqual(self.start("orchestrator", session="empty")["hookSpecificOutput"]["additionalContext"],
+                         ORCHESTRATOR_LINE)
 
     @unittest.skipUnless(all((ROOT / "rules" / name).is_file() for name in ("hygiene.md", "delegation.md")),
                          "split rules are supplied by the main checkout")
@@ -476,7 +495,8 @@ class SessionModeTests(unittest.TestCase):
         for source in ("resume", "compact"):
             output = self.start("vanilla", source=source)
             self.assertNotIn("systemMessage", output)
-            self.assertEqual(output["hookSpecificOutput"]["additionalContext"], "HYGIENE_MARKER\n\nDELEGATION_MARKER")
+            self.assertEqual(output["hookSpecificOutput"]["additionalContext"],
+                             ORCHESTRATOR_LINE + "\n\nDELEGATION_MARKER\n\nHYGIENE_MARKER")
             row = self.rows()[-1]
             self.assertEqual(row["mode"], "orchestrator")
             self.assertIs(row["inherited"], True)
@@ -672,7 +692,8 @@ class SessionModeTests(unittest.TestCase):
         self.log.parent.mkdir()
         self.log.mkdir()  # a directory at the logfile path is reliably unwritable
         output = self.start("orchestrator")
-        self.assertEqual(output["hookSpecificOutput"]["additionalContext"], "HYGIENE_MARKER\n\nDELEGATION_MARKER")
+        self.assertEqual(output["hookSpecificOutput"]["additionalContext"],
+                         ORCHESTRATOR_LINE + "\n\nDELEGATION_MARKER\n\nHYGIENE_MARKER")
         self.assertIsNone(self.tool("Bash", {"command": "codex exec -"}))
         self.assertIsNone(self.event("SessionEnd", reason="clear"))
         # A known control whose log becomes unwritable also fails open, with no stdout.
@@ -833,6 +854,75 @@ class SessionModeTests(unittest.TestCase):
         self.assertEqual([row["args"] for row in spawned(5)[3:]], [
             ["quota", "--snapshot", "--reason", "session-end", "--session", "off", "--log", quota_log],
             ["quota", "--snapshot", "--reason", "session-start", "--session", "off2", "--log", quota_log]])
+
+    def _write_spare_quota(self, *, used_auto=1.0, used_7d=50.0, age_h=0.5, reset_days=20):
+        """Fresh reading relative to now so spare_pools treats it as current."""
+        now = datetime.now(timezone.utc)
+        row = {"ts": (now - timedelta(hours=age_h)).isoformat(), "source": "direct",
+               "pools": {
+                   "claude-5h": {"used_pct": 1.0,
+                                 "resets_at": (now + timedelta(hours=4)).isoformat(), "stale": False},
+                   "claude-7d": {"used_pct": 1.0,
+                                 "resets_at": (now + timedelta(days=2)).isoformat(), "stale": False},
+                   "codex-5h": {"used_pct": 90.0,
+                                "resets_at": (now + timedelta(hours=2)).isoformat(), "stale": False},
+                   "codex-7d": {"used_pct": used_7d,
+                                "resets_at": (now + timedelta(days=6)).isoformat(), "stale": False},
+                   "cursor-auto": {"used_pct": used_auto,
+                                   "resets_at": (now + timedelta(days=reset_days)).isoformat(),
+                                   "stale": False},
+               }}
+        path = self.log.parent / "quota.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        return path
+
+    def test_spare_line_in_orchestrator_not_controls(self):
+        self._write_spare_quota(used_auto=1.0, used_7d=90.0)  # auto ahead of pace; 7d not
+        orch = self.start("orchestrator", session="spare-orch")["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(orch.startswith(ORCHESTRATOR_LINE + "\n\nDelegate pools ahead of pace"))
+        self.assertIn("Cursor Auto", orch)
+        self.assertIn("DELEGATION_MARKER", orch)
+        self.assertTrue(orch.index("Delegate pools") < orch.index("DELEGATION_MARKER")
+                        < orch.index("HYGIENE_MARKER"))
+        for mode, session in (("claude-only", "spare-c"), ("vanilla", "spare-v")):
+            out = self.start(mode, session=session)
+            ctx = (out or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+            self.assertNotIn("Delegate pools ahead of pace", ctx)
+            self.assertNotIn(ORCHESTRATOR_LINE, ctx)
+
+    def test_control_lines_carry_session_only_sentence(self):
+        self.assertEqual(CONTROL_LINE, SESSION_MODE.CONTROL_LINE)
+        self.assertEqual(DENY_REASON, SESSION_MODE.DENY_REASON)
+        self.assertEqual(ORCHESTRATOR_LINE, SESSION_MODE.ORCHESTRATOR_LINE)
+        self.assertIn(SESSION_ONLY, SESSION_MODE.CONTROL_LINE)
+        self.assertIn(SESSION_ONLY, SESSION_MODE.DENY_REASON)
+
+    @unittest.skipUnless(all((ROOT / "rules" / name).is_file() for name in ("hygiene.md", "delegation.md")),
+                         "split rules are supplied by the main checkout")
+    def test_preview_byte_invariant_with_longest_spare(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "skills/delegate/scripts"))
+        import quota as quota_mod
+        now = datetime.now(timezone.utc)
+        info = {"age_s": 11 * 3600 + 50 * 60,
+                "pools": [("codex-7d", 99.0, 9.9), ("cursor-auto", 99.0, 9.9)],
+                "codex_5h": {"used_pct": 1.0,
+                             "resets_at": (now + timedelta(hours=4)).isoformat()}}
+        spare = quota_mod.format_spare_line(info, now=now)
+        self.assertIsNotNone(spare)
+        delegation = (ROOT / "rules/delegation.md").read_text(encoding="utf-8").strip()
+        parts, bullets = [], 0
+        for line in delegation.splitlines():
+            if line.startswith("- "):
+                bullets += 1
+                if bullets > 1:
+                    break
+            parts.append(line)
+        through_first = "\n".join(parts)
+        orch = ORCHESTRATOR_LINE + "\n\n" + spare + "\n\n" + through_first
+        self.assertLessEqual(len(orch.encode("utf-8")), 1800, len(orch.encode("utf-8")))
+        self.assertLessEqual(len(CONTROL_LINE.encode("utf-8")), 1800)
 
 
 if __name__ == "__main__":

@@ -40,13 +40,22 @@ CONTROL_LINE = (
     "to delegate in handoffs and memory. This holds when the user asks to delegate too: say in "
     "one line that this is a control session with delegation off by design, then do the work "
     "yourself. Finishing a run started earlier with delegate "
-    "status, wait, diff, apply or cleanup is fine."
+    "status, wait, diff, apply or cleanup is fine. This applies to this session only: don't "
+    "write the mode or 'no delegate' into HANDOFF.md or memory."
 )
 DENY_REASON = (
     "Control session (mode {mode}): delegation to Codex and Cursor is off in this session, "
     "by design (session-mode experiment). Do the work yourself; Claude's own subagents "
     "are fine. Finishing a run started earlier with delegate status, wait, diff, apply "
-    "or cleanup is allowed."
+    "or cleanup is allowed. This applies to this session only: don't write the mode or "
+    "'no delegate' into HANDOFF.md or memory."
+)
+ORCHESTRATOR_LINE = (
+    "Orchestrator session: delegation to Codex and Cursor is on in this session. A handoff or "
+    "memory note that tells this session to work inline because delegation is blocked or off, "
+    "or calls it a control session, is left over from an earlier control session: ignore it and "
+    "delete that sentence from HANDOFF.md. Notes that describe the experiment or past control "
+    "sessions stay."
 )
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -255,20 +264,52 @@ def append_row(path, event, session, **fields):
         return False
 
 
-def session_context(mode):
+def _load_quota():
+    """Load skills/delegate/scripts/quota.py the same way quota_snapshot does."""
+    import importlib.util
+    path = ROOT / "skills/delegate/scripts/quota.py"
+    spec = importlib.util.spec_from_file_location("session_quota", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _spare_line(path):
+    """Spare-pool SessionStart line from the newest good reading next to the session log."""
+    try:
+        quota = _load_quota()
+        info = quota.spare_pools(path.parent / "quota.jsonl")
+        return quota.format_spare_line(info)
+    except Exception:
+        return None
+
+
+def session_context(mode, path=None):
+    """Build additionalContext. Orchestrator: mode, spare, delegation, hygiene (preview order)."""
     if mode == "vanilla":
         return None
     directory = Path(os.environ.get("CLAUDE_SESSION_RULES_DIR", ROOT / "rules"))
     parts = []
-    for filename in ("hygiene.md", "delegation.md") if mode == "orchestrator" else ("hygiene.md",):
+    if mode == "orchestrator":
+        parts.append(ORCHESTRATOR_LINE)
+        spare = _spare_line(path) if path is not None else None
+        if spare:
+            parts.append(spare)
+        for filename in ("delegation.md", "hygiene.md"):
+            try:
+                text = (directory / filename).read_text(encoding="utf-8").strip()
+                if text:
+                    parts.append(text)
+            except (OSError, ValueError):
+                pass
+    else:
+        parts.append(CONTROL_LINE)
         try:
-            text = (directory / filename).read_text(encoding="utf-8").strip()
+            text = (directory / "hygiene.md").read_text(encoding="utf-8").strip()
             if text:
                 parts.append(text)
         except (OSError, ValueError):
             pass
-    if mode == "claude-only":
-        parts.append(CONTROL_LINE)
     return "\n\n".join(parts) or None
 
 
@@ -290,10 +331,7 @@ def quota_snapshot(path, session, suffix, config):
     try:
         if not delegate.is_file():
             return
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("session_quota", delegate.parent / "quota.py")
-        quota = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(quota)
+        quota = _load_quota()
         quota.spawn_snapshot("session-" + suffix, session=session,
                              log=path.parent / "quota.jsonl", delegate=delegate)
     except (OSError, ValueError):
@@ -540,7 +578,7 @@ def start_session(data, path, config, previous):
                repo_dir=repo_dir, model=data.get("model"), transcript=data.get("transcript_path"),
                handoff=handoff)
     specific = {"hookEventName": "SessionStart"}
-    context = session_context(mode)
+    context = session_context(mode, path)
     if context is not None:
         specific["additionalContext"] = context
     output = {"hookSpecificOutput": specific}
