@@ -97,7 +97,10 @@ def from_page():
         slug = o.get("slug")
         if not slug or "intelligenceIndex" not in o or slug in models:
             continue
-        coding_parts = [v for v in (o.get("terminalBench40"), o.get("scicode")) if v is not None]
+        # Per-benchmark scores moved into a nested `scores` dict (seen 2026-10-27).
+        sc = o.get("scores") or {}
+        coding_parts = [v for v in (sc.get("terminalbench-4-0", o.get("terminalBench40")),
+                                    sc.get("scicode", o.get("scicode"))) if v is not None]
         models[slug] = {
             "name": o.get("name"),
             "creator": o.get("modelCreatorName"),
@@ -112,6 +115,8 @@ def from_page():
         }
     if len(models) < 20:
         raise RuntimeError(f"leaderboard page parsed to only {len(models)} models; page layout changed?")
+    if not any(m["coding"] is not None for m in models.values()):
+        raise RuntimeError("leaderboard page has no Terminal-Bench 4.0 or SciCode scores; page layout changed?")
     return models
 
 

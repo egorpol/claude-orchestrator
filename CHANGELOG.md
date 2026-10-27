@@ -30,6 +30,8 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Fixed
 
+- The Artificial Analysis page scrape reads Terminal-Bench 4.0 and SciCode from the page's nested `scores` dict. AA had moved them there, so `route` showed no coding score for any of the 161 models and the coding weight (0.45–0.55 for review, refactor and implement) counted for nothing. A page with neither score now fails the refresh, which keeps the cache with a warning, instead of passing silently.
+- `delegate ask --agent codex` (and `rate --agent codex`) passes `--skip-git-repo-check`, so `--dir` may name a folder outside a trusted git repo; the sandbox stays read-only.
 - `delegate launch` removes the half-created worktree, branch and run folder when setting up the `--link`s fails for any reason, such as a `PermissionError`; before, only a rejected `--link` was rolled back, and other errors left a worktree with no `meta.json` for `cleanup` to find.
 - `install.sh --hooks` backs up and rewrites `settings.json` only when it changes, replaces an older registration of its own command (another matcher or timeout) instead of keeping both, tolerates `"hooks": null` groups, stops with a message instead of a traceback on invalid JSON, and never overwrites an earlier backup made in the same second.
 - The context guard ignores events other than `UserPromptSubmit`: cursor-agent runs the hooks in `~/.claude/settings.json` as `beforeSubmitPrompt`.
