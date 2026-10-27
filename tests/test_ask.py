@@ -241,6 +241,10 @@ class TestAsk(unittest.TestCase):
         self.assertEqual(ask.extract_pick("- Pick: C"), "C")
         self.assertEqual(ask.extract_pick("### Pick: A"), "A")
         self.assertIsNone(ask.extract_pick("nope\nPick me\n"))
+        # Cursor's result joins its preamble message and the answer without a newline.
+        self.assertEqual(ask.extract_pick("I'll read the doc first.**Pick: A**\n\n**Why:** x"), "A")
+        self.assertEqual(ask.extract_pick("what's already decided in-repo.Pick: C  \nWhy: y"), "C")
+        self.assertIsNone(ask.extract_pick("the best pick: none of them"))
 
     def _fallback_report(self, catalog, default_codex):
         def rating(name, intelligence, cost, creator="OpenAI"):
