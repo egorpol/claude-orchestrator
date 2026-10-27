@@ -360,6 +360,8 @@ def _atomic_write(path, data):
 
 
 def cmd_report(a):
+    if a.select or a.digest:
+        return cmd_automatic(a)
     if (a.backfill or a.exclude or a.transcript or a.log or a.trigger) and not a.auto:
         _fail("--backfill, --exclude, --transcript, --log and --trigger need --auto", 2)
     if a.auto:
@@ -652,6 +654,37 @@ def cmd_auto(a):
     print(json.dumps(row, ensure_ascii=False))
 
 
+def cmd_automatic(a):
+    import autoreport
+
+    if a.select and a.digest:
+        _fail("--select and --digest cannot be combined", 2)
+    if a.digest and not a.out:
+        _fail("--digest needs --out", 2)
+    if a.auto or a.backfill or a.exclude or a.transcript or a.trigger:
+        _fail("automatic field-report dry runs cannot be combined with session summaries", 2)
+    try:
+        rows = rate.json_rows(runs.session_log_path(a.log))
+        if a.select:
+            result = autoreport.select_sessions(rows, feedback_dir(a.feedback_dir),
+                                                a.since, a.until, a.seed)
+            print(json.dumps(result, ensure_ascii=False) if a.json else autoreport.render_selection(result))
+            return
+        result = autoreport.write_digests(rows, a.digest, a.out)
+    except ValueError as exc:
+        _fail(str(exc), 2)
+    except OSError:
+        _fail("cannot read the session log or write automatic field-report evidence")
+    if a.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        for session in result["sessions"]:
+            detail = session["reason"] or f"{session['digest_chars']} digest chars, {session['transcript_chars']} transcript chars"
+            print(f"{session['session'][:8]} {session['status']}: {detail}")
+    if any(s["status"] == "dropped" for s in result["sessions"]):
+        sys.exit(1)
+
+
 def _add_args(p):
     p.add_argument("--session", metavar="ID|latest|PATH", help="default: CLAUDE_CODE_SESSION_ID or latest")
     p.add_argument("--repo", help="report repo name (default: GitHub owner/name or directory name)")
@@ -673,6 +706,13 @@ def _add_args(p):
                       help="session log (default: CLAUDE_SESSION_LOG or ~/.cache/claude-delegate/sessions.jsonl)")
     auto.add_argument("--trigger", choices=["end", "manual"],
                       help="end: written by the SessionEnd hook (default manual)")
+    afr = p.add_argument_group("automatic field reports (dry runs; no agent calls)")
+    afr.add_argument("--select", action="store_true", help="select sessions and explain each pick")
+    afr.add_argument("--digest", nargs="+", metavar="ID", help="build evidence for full session ids or unique prefixes")
+    afr.add_argument("--since", metavar="DATE", help="first call at or after this time (bare date: local midnight)")
+    afr.add_argument("--until", metavar="DATE", help="first call before this time")
+    afr.add_argument("--seed", type=int, metavar="N", help="replay the selection's random draws")
+    afr.add_argument("--out", metavar="DIR", help="write each digest and transcript under DIR/<prefix>/")
     p.set_defaults(fn=cmd_report)
 
 
