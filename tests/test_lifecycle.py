@@ -673,6 +673,21 @@ class LifecycleTests(unittest.TestCase):
                 delegate.main()
             self.assertEqual(rank.call_args.kwargs["prefer"], ["cursor-auto", "codex-sol"])
 
+    def test_review_started_and_effort_reach_runs_log(self):
+        self.launch()
+        self.cli("review", "test")
+        rv = self.root("test") / "review-1"
+        rv_meta = runs.load_meta(rv)
+        self.assertIn("started", rv_meta)
+        self.assertTrue(rv_meta["started"])
+        self.assertIn("effort", rv_meta)
+        self.cli("apply", "test")
+        record = json.loads((self.storage / "runs.jsonl").read_text().splitlines()[0])
+        review = record["reviews"][0]
+        self.assertEqual(review["started"], rv_meta["started"])
+        self.assertEqual(review["effort"], rv_meta.get("effort"))
+        self.assertRegex(review["started"], r"^\d{4}-\d{2}-\d{2}")
+
     def test_quota_snapshot_spawn_is_detached_optional_and_best_effort(self):
         with patch.dict(os.environ, self.env, clear=True), \
              patch.object(runs.quota.subprocess, "Popen") as popen:
@@ -707,10 +722,13 @@ class LifecycleTests(unittest.TestCase):
                 spawn(*args, **kwargs)
                 collected.append(popen.call_args.args[0])
 
+        expected_jobs = ("round-1", "review-1", "round-2")
+
         def start(job, detach, name):
             self.assertEqual(collected[-1],
                              [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "launch",
-                              "--session", "parent-session", "--run", name])
+                              "--session", "parent-session", "--run", name,
+                              "--job", expected_jobs[agent_start.call_count - 1]])
 
         commands = (("launch", "codex", "--brief", str(self.brief), "--name", "spawn",
                      "--repo", str(self.repo)),

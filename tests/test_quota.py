@@ -158,6 +158,14 @@ class QuotaTests(unittest.TestCase):
         self.assertEqual(len(self.rows()), 2)
         self.assertTrue(all(row["session"] is None and row["run"] is None for row in self.rows()))
 
+    def test_snapshot_job_tag_is_written_when_valid(self):
+        self.collect("--reason", "launch", "--job", "round-1", "--run", "demo")
+        self.assertEqual(self.rows()[0]["job"], "round-1")
+        self.collect("--reason", "job-end", "--job", "review-2", "--run", "demo")
+        self.assertEqual(self.rows()[1]["job"], "review-2")
+        self.collect("--reason", "launch", "--job", "not-a-job", "--run", "demo")
+        self.assertNotIn("job", self.rows()[2])
+
     def test_missing_openusage_writes_error(self):
         self.binary.unlink()
         output = self.collect("--reason", "launch", "--session", "s", "--run", "r", code=1)

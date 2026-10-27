@@ -158,5 +158,25 @@ class TestRealCatalog(unittest.TestCase):
         self.assertIn("orchestrator_cost", cat)
 
 
+class TestRoundsColumn(unittest.TestCase):
+    def test_render_rounds_column_and_footnote(self):
+        cat = _catalog()
+        task, rows = route.rank("implement", cat, _pools_ok(), {}, prefer=[])
+        for r in rows:
+            r["rounds_left"] = 4 if r["delegate"]["id"] == "codex-sol" else None
+            r["round_cost"] = {"codex-5h": 15.0} if r["delegate"]["id"] == "codex-sol" else None
+        text = route.render("implement", task, rows)
+        self.assertRegex(text, r"ROUNDS")
+        self.assertRegex(text, r"codex-sol\s+\d+.*\s+4\s+")
+        self.assertIn("rounds left in the delegate's tightest pool", text)
+        # Rows without the new keys still render.
+        for r in rows:
+            r.pop("rounds_left", None)
+            r.pop("round_cost", None)
+        text2 = route.render("implement", task, rows)
+        self.assertIn("ROUNDS", text2)
+        self.assertIn("-", text2)
+
+
 if __name__ == "__main__":
     unittest.main()

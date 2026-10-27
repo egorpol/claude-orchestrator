@@ -8,6 +8,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
 
 - `skills/delegate/scripts/delegate`: argparse entry point (no `.py` extension), dispatching to:
   - `quota.py`: pools from `openusage export`
+  - `monitor.py`: closed-window unused share (`quota --unused`) and per-job pool costs / rounds left
   - `ratings.py`: Artificial Analysis via API key or leaderboard scrape, cached 24h
   - `route.py`: per-task score = ratings × weights × quota
   - `runs.py`: worktree/launch/followup/review/verify/status/wait/diff/apply/cleanup, `meta.json`, environment scrubbing
@@ -38,7 +39,7 @@ bash -n install.sh
 
 - **What the tests cover:**
   - `tests/test_lifecycle.py` drives launch, the exit packet, followup, review, status, diff, apply, the run log and cleanup, using the fake `codex`/`cursor-agent` in `tests/fake_agents/`.
-  - `test_route.py`, `test_cost.py`, `test_calibrate.py` and `test_ask.py` cover routing preferences, cost accounting, pool calibration and `ask`.
+  - `test_route.py`, `test_cost.py`, `test_calibrate.py`, `test_ask.py` and `test_monitor.py` cover routing preferences, cost accounting, pool calibration, `ask`, and quota windows / per-job costs.
 - **Real-data checks** (read-only, maintainer's machine only):
   - `delegate status <run>` against the old records in `~/.cache/claude-delegate/runs/PublicDomainSheetMusicFinder/`;
   - `delegate cost --session 762dc86f` must print 389 calls and cache_read 174,522,404. The session was resumed for 3 calls after the 2026-10-09 analysis, so older docs quote 386.

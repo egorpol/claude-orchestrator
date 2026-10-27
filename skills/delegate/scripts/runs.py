@@ -520,7 +520,8 @@ def launch(a):
     print(f"last msg: {root / 'last-message.md'}")
     if a.verify:
         print(f"verify:   {a.verify}")
-    quota.spawn_snapshot("launch", run=name, session=os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    quota.spawn_snapshot("launch", run=name, session=os.environ.get("CLAUDE_CODE_SESSION_ID"),
+                         job="round-1")
     log_delegation("launch", run=name, agent=a.agent)
     start(root, a.detach, name)
 
@@ -611,7 +612,8 @@ def followup(a):
     print(f"round {k} archived to {archive}")
     print(f"round {k + 1}: {meta['agent']} {model}" + (f" @{effort}" if effort else "")
           + (f", resuming session {sid}" if sid else ", fresh session"))
-    quota.spawn_snapshot("launch", run=meta["name"], session=os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    quota.spawn_snapshot("launch", run=meta["name"], session=os.environ.get("CLAUDE_CODE_SESSION_ID"),
+                         job=f"round-{k + 1}")
     log_delegation("followup", run=meta["name"], agent=meta["agent"])
     start(root, a.detach, meta["name"])
 
@@ -810,7 +812,8 @@ def review(a):
     print(f"review {n} of {meta['name']} (round {meta.get('rounds', 1)}) by {agent} {model}"
           + (f" @{effort}" if effort else ""))
     print(f"result:   {job / 'last-message.md'}")
-    quota.spawn_snapshot("launch", run=meta["name"], session=os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    quota.spawn_snapshot("launch", run=meta["name"], session=os.environ.get("CLAUDE_CODE_SESSION_ID"),
+                         job=f"review-{n}")
     log_delegation("review", run=meta["name"], agent=agent)
     start(job, a.detach, meta["name"])
 
@@ -974,14 +977,20 @@ def finalize(job):
         sys.exit(f"job is not finished: {job}")
     if review_meta is not None:
         review_meta.update(minutes=_minutes(job), usage=usage(job, review_meta["agent"]),
-                           verdict=_verdict(job))
+                           verdict=_verdict(job), started=_read(job, "started_at"))
         save_meta(job, review_meta)
+        job_id = job.name  # review-N
     else:
         n = meta.get("rounds", 1)
         history = [r for r in meta.get("history", []) if r.get("n", r.get("round")) != n]
         history.append(_round_record(job, meta, n))
         meta["history"] = sorted(history, key=lambda r: r.get("n", r.get("round", 0)))
         save_meta(root, meta)
+        job_id = f"round-{n}"
+    try:
+        quota.spawn_snapshot("job-end", run=meta["name"], job=job_id)
+    except Exception:
+        pass
     print("\n".join(packet(job)))
 
 
@@ -1452,6 +1461,8 @@ def log_run(root, meta, outcome):
     for path in sorted(root.glob("review-*/meta.json"), key=lambda p: int(p.parent.name.split("-")[1])):
         job, rv = path.parent, load_meta(path.parent)
         reviews.append({"n": int(job.name.split("-")[1]), "agent": rv["agent"], "model": rv["model"],
+                        "effort": rv.get("effort"),
+                        "started": rv.get("started", _read(job, "started_at")),
                         "minutes": rv.get("minutes", _minutes(job)),
                         "verdict": rv.get("verdict", _verdict(job)),
                         "usage": rv.get("usage", usage(job, rv["agent"]))})

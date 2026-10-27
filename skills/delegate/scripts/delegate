@@ -33,12 +33,44 @@ def load_catalog():
 
 
 def cmd_quota(a):
+    if getattr(a, "unused", False):
+        if a.snapshot:
+            sys.exit("quota --unused cannot be combined with --snapshot")
+        import monitor
+        pools = None
+        if a.pool:
+            pools = [p.strip() for p in a.pool.split(",") if p.strip()]
+            unknown = [p for p in pools if p not in quota.POOLS]
+            if unknown:
+                sys.exit(f"unknown pool(s): {', '.join(unknown)}")
+        now = None
+        if a.now:
+            now = quota.parse_ts(a.now)
+            if now is None:
+                sys.exit(f"invalid --now timestamp: {a.now!r}")
+        out = monitor.unused(
+            log=a.log, run_log=a.run_log, session_log=a.session_log,
+            since=a.since, pools=pools, now=now, catalog=load_catalog(), as_json=a.json,
+        )
+        print(json.dumps(out, indent=2) if a.json else out)
+        return
     source = a.source or ("direct" if a.snapshot else "auto")
     if a.snapshot:
         sys.exit(quota.snapshot(reason=a.reason, session=a.session, run=a.run,
-                                if_active=a.if_active, log=a.log, source=source))
+                                if_active=a.if_active, log=a.log, source=source,
+                                job=getattr(a, "job", None)))
     res = quota.pools(quota.fetch(source))
-    print(json.dumps(res, indent=2) if a.json else quota.render(res))
+    if a.json:
+        print(json.dumps(res, indent=2))
+        return
+    rounds_lines = []
+    try:
+        import monitor
+        groups = monitor.load_cost_groups(catalog=load_catalog())
+        rounds_lines = monitor.render_rounds_left_lines(groups, res)
+    except Exception:
+        rounds_lines = []
+    print(quota.render(res, rounds_lines=rounds_lines))
 
 
 def cmd_ratings(a):
@@ -91,10 +123,20 @@ def cmd_route(a):
     if a.prefer is not None:
         options["prefer"] = [s.strip() for s in a.prefer.split(",") if s.strip()]
     task, rows = route.rank(a.task, cat, pools, aa, **options)
+    try:
+        import monitor
+        groups = monitor.load_cost_groups(catalog=cat)
+        monitor.annotate_route_rows(rows, groups, pools)
+    except Exception:
+        for r in rows:
+            r.setdefault("rounds_left", None)
+            r.setdefault("round_cost", None)
     if a.json:
         print(json.dumps([{"id": r["delegate"]["id"], "score": r["score"], "quality": r["quality"],
                            "quota_left": r["left"], "pace": r["pace"], "excluded": r["excluded"],
                            "metrics": r["metrics"], "source": r["source"],
+                           "rounds_left": r.get("rounds_left"),
+                           "round_cost": r.get("round_cost"),
                            "launch": route.launch_hint(r["delegate"], task)} for r in rows], indent=2))
         return
     print(route.render(a.task, task, rows))
@@ -110,11 +152,20 @@ def main():
     s.add_argument("--source", choices=["auto", "direct", "daemon"],
                    help="openusage collection source; 'direct' polls providers now (slower, fresher)")
     s.add_argument("--snapshot", action="store_true", help="append a quota.jsonl reading (default source: direct)")
-    s.add_argument("--reason", choices=["session-start", "session-end", "backfill", "launch", "timer", "manual"])
+    s.add_argument("--unused", action="store_true",
+                   help="report closed quota windows' unused share and per-job pool costs from local logs")
+    s.add_argument("--since", help="with --unused: keep windows/jobs ending/starting on or after this date")
+    s.add_argument("--pool", help="with --unused: comma-separated pool ids")
+    s.add_argument("--now", help="with --unused: ISO time with offset (reproducible reports)")
+    s.add_argument("--run-log", help="with --unused: runs.jsonl path")
+    s.add_argument("--session-log", help="with --unused: sessions.jsonl path")
+    s.add_argument("--reason", choices=["session-start", "session-end", "backfill", "launch",
+                                        "timer", "manual", "job-end"])
     s.add_argument("--session")
     s.add_argument("--run")
+    s.add_argument("--job", help="with --snapshot: round-N or review-N job id")
     s.add_argument("--if-active", action="store_true", help="poll only when a timer reading is due")
-    s.add_argument("--log", help="snapshot JSONL path")
+    s.add_argument("--log", help="snapshot / --unused quota JSONL path")
     s.set_defaults(fn=cmd_quota)
 
     s = sub.add_parser("ratings", help="Artificial Analysis ratings for catalog models")
@@ -251,6 +302,8 @@ def main():
             p.error("route --frontier cannot be used with a task")
         if not a.frontier and a.task is None:
             p.error("route requires a task or --frontier")
+    if a.cmd == "quota" and a.snapshot and getattr(a, "unused", False):
+        p.error("quota --unused cannot be combined with --snapshot")
     if a.cmd == "quota" and a.snapshot and not a.if_active and a.reason is None:
         p.error("quota --snapshot requires --reason unless --if-active is set")
     a.fn(a)
