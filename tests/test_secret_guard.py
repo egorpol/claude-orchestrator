@@ -39,6 +39,10 @@ class _SecretGuardHarness:
         self.tmp = Path(tmp.name)
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith("SECRET_GUARD_")}
+        # Cwd-guard reads these; keep the default harness silent unless a test sets them.
+        self.env.pop("CLAUDE_PROJECT_DIR", None)
+        self.env.pop("CWD_GUARD_DISABLE", None)
+        self.env.pop("CLAUDE_SESSION_LOG", None)
         self.env["HOME"] = str(self.tmp / "home")
         (self.tmp / "home").mkdir()
 
@@ -53,13 +57,16 @@ class _SecretGuardHarness:
         )
         return result
 
-    def claude(self, command, cwd=None, env=None):
-        return self.run_hook({
+    def claude(self, command, cwd=None, env=None, extra=None):
+        payload = {
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": command},
             "cwd": str(cwd or self.tmp),
-        }, env=env)
+        }
+        if extra:
+            payload.update(extra)
+        return self.run_hook(payload, env=env)
 
     def make_pair(self):
         """Local repo + bare remote named origin."""
@@ -1696,6 +1703,232 @@ class SecretGuardP2Tests(_SecretGuardHarness, unittest.TestCase):
             with self.subTest(command=command):
                 result = self.claude(command, cwd=local, env={"PATH": str(self.tmp / "no-git")})
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+
+class CwdGuardTests(_SecretGuardHarness, unittest.TestCase):
+    """PreToolUse cd/pushd check (CLAUDE_PROJECT_DIR) and drift notice."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        _init_repo(self.repo)
+        (self.repo / "sub").mkdir()
+        (self.repo / "docs").mkdir()
+        self.log = self.tmp / "sessions.jsonl"
+        self.log.write_text("")
+        self.env["CLAUDE_PROJECT_DIR"] = str(self.repo)
+        self.env["CLAUDE_SESSION_LOG"] = str(self.log)
+
+    def _out(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        if not result.stdout.strip():
+            return None
+        return json.loads(result.stdout)["hookSpecificOutput"]
+
+    def _deny(self, command, **kwargs):
+        out = self._out(self.claude(command, cwd=self.repo, **kwargs))
+        self.assertIsNotNone(out)
+        self.assertEqual(out.get("permissionDecision"), "deny")
+        self.assertTrue(out["permissionDecisionReason"].startswith("cwd guard:"))
+        return out["permissionDecisionReason"]
+
+    def _silent(self, command, cwd=None, **kwargs):
+        out = self._out(self.claude(command, cwd=cwd or self.repo, **kwargs))
+        self.assertIsNone(out)
+
+    def _notice(self, command, cwd=None, **kwargs):
+        out = self._out(self.claude(command, cwd=cwd or self.repo, **kwargs))
+        self.assertIsNotNone(out)
+        self.assertNotIn("permissionDecision", out)
+        self.assertTrue(out["additionalContext"].startswith("cwd guard:"))
+        return out["additionalContext"]
+
+    def test_deny_sticking_cd_and_wrap(self):
+        reason = self._deny("cd sub && ls")
+        self.assertIn("sub/", reason)
+        self.assertIn("sticks for later Bash calls", reason)
+        self.assertIn("( cd sub && ls )", reason)
+        self.assertIn("git -C DIR", reason)
+
+    def test_deny_cd_docs_pushd_eval_or(self):
+        self._deny("cd docs")
+        self._deny("pushd sub")
+        self._deny("eval cd sub")
+        self._deny("cd sub || exit 1")
+        self._deny("builtin cd sub")
+        self._deny("command cd sub")
+
+    def test_deny_mkdir_cd_build_missing(self):
+        reason = self._deny("mkdir -p build && cd build && cmake ..")
+        self.assertIn("build/", reason)
+
+    def test_unknown_scoped_absolute_recovers(self):
+        root = str(self.repo.resolve())
+        self._deny("(cd $D && make) && cd sub")
+        self._deny(f"cd $X && cd {root}/sub")
+        self._silent("cd $X && cd sub")
+        self._deny("env -C $D ls && cd sub")
+
+    def test_control_operators_pipeline_background(self):
+        root = str(self.repo.resolve())
+        self._deny(f"cd docs || cd {root}")
+        self._silent("cd sub &")
+        self._silent("cd docs & wait")
+        self._silent("cd sub & wait")
+        self._silent("cd sub | cat")
+        self._deny("cd sub && make || cd ..")
+        self._deny("ls & cd sub")
+        # Redirect ampersands are not background terminators.
+        self._deny("cd sub 2>&1 && ls")
+        self._deny("cd sub &>/dev/null")
+        self._deny("cd sub >/dev/null 2>&1; make")
+        self._deny("cd sub && make 2>&1 | tail")
+
+    def test_pushd_rotate_and_substitution_target_silent(self):
+        self._silent("pushd +1")
+        self._silent("pushd -1")
+        self._silent('cd "$(printf /tmp)"')
+
+    def test_silent_subshell_subst_bash_c_env_c_git_c(self):
+        for command in (
+            "(cd sub && ls)",
+            "echo $(cd sub && ls)",
+            "echo `cd sub && ls`",
+            "bash -c 'cd sub && ls'",
+            "env -C sub ls",
+            "git -C sub status",
+            "cd /tmp && ls",
+            "D=sub; cd $D && ls",
+            "cd sub; cd ..",
+            f'cd sub && cd "{self.repo}"',
+            "ls",
+        ):
+            with self.subTest(command=command):
+                self._silent(command)
+
+    def test_heredoc_body_silent_prefix_deny(self):
+        self._silent("cat > s.sh <<'EOF'\ncd sub && make\nEOF")
+        self._deny("cd sub && python3 - <<'EOF'\nprint(1)\nEOF")
+        # Here-string must not swallow the rest of the script as a heredoc body.
+        self._deny('grep x <<< "$v"\ncd sub')
+        # Heredoc opened before | on the same line: body includes later lines.
+        self._silent("python3 - <<'EOF' | head\ncd sub\nEOF")
+        # cd after && on the opener line still sticks.
+        self._deny("cat <<EOF > f && cd sub\nbody\nEOF")
+
+    def test_wrap_multiline_for_heredoc_and_comment(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sg", HOOK)
+        sg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sg)
+        cases = [
+            ("cd sub && ls", "( cd sub && ls )"),
+            ("cd sub && cat <<'EOF'\nx\nEOF", "(\ncd sub && cat <<'EOF'\nx\nEOF\n)"),
+            ("cd sub && ls  # look", "(\ncd sub && ls  # look\n)"),
+        ]
+        for command, expected in cases:
+            with self.subTest(command=command):
+                wrap = sg._cwd_wrap_suggestion(command)
+                self.assertEqual(wrap, expected)
+                r = subprocess.run(["bash", "-n"], input=wrap, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+        reason = self._deny("cd sub && ls  # look")
+        self.assertIn("(\ncd sub && ls  # look\n)", reason)
+
+    def test_gates_event_tool_project_agent_disable(self):
+        # Wrong / missing / empty event or tool: cwd check no-op (exact match only).
+        for payload in (
+            {"hook_event_name": "preToolUse", "tool_name": "Bash",
+             "tool_input": {"command": "cd sub && ls"}, "cwd": str(self.repo)},
+            {"hook_event_name": "PreToolUse", "tool_name": "Shell",
+             "tool_input": {"command": "cd sub && ls"}, "cwd": str(self.repo)},
+            {"hook_event_name": None, "tool_name": "Bash",
+             "tool_input": {"command": "cd sub && ls"}, "cwd": str(self.repo)},
+            {"hook_event_name": "", "tool_name": "Bash",
+             "tool_input": {"command": "cd sub && ls"}, "cwd": str(self.repo)},
+            {"hook_event_name": "PreToolUse", "tool_name": "",
+             "tool_input": {"command": "cd sub && ls"}, "cwd": str(self.repo)},
+            {"tool_name": "Bash",
+             "tool_input": {"command": "cd sub && ls"}, "cwd": str(self.repo)},
+            {"hook_event_name": "PreToolUse",
+             "tool_input": {"command": "cd sub && ls"}, "cwd": str(self.repo)},
+        ):
+            r = self.run_hook(payload)
+            self.assertEqual((r.returncode, r.stdout), (0, ""), payload)
+        # No CLAUDE_PROJECT_DIR.
+        r = self.claude("cd sub && ls", cwd=self.repo,
+                        env={"CLAUDE_PROJECT_DIR": ""})
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        # Subagent.
+        self._silent("cd sub && ls", extra={"agent_id": "agent-1"})
+        # CWD_GUARD_DISABLE only.
+        self._silent("cd sub && ls", env={"CWD_GUARD_DISABLE": "1"})
+        # SECRET_GUARD_DISABLE must not turn the cd check off.
+        self._deny("cd sub && ls", env={"SECRET_GUARD_DISABLE": "1"})
+        # CWD_GUARD_DISABLE must not turn secret checks off.
+        local, _ = self.make_pair()
+        token = _fake_token("ghp_", 36)
+        (local / "leak.txt").write_text(f"{token}\n")
+        _git(local, "add", "leak.txt")
+        _git(local, "commit", "-m", "leak")
+        self.env["CLAUDE_PROJECT_DIR"] = str(local)
+        r = self.claude("git push origin main", cwd=local, env={"CWD_GUARD_DISABLE": "1"})
+        out = self._out(r)
+        self.assertEqual(out["permissionDecision"], "ask")
+        self.assertIn("GitHub token", out["permissionDecisionReason"])
+        self.assertNotIn("additionalContext", out)
+        self.env["CLAUDE_PROJECT_DIR"] = str(self.repo)
+
+    def test_vanilla_silences_claude_only_and_no_row_deny(self):
+        self.log.write_text(json.dumps(
+            {"event": "start", "session": "van", "mode": "vanilla"}) + "\n")
+        self._silent("cd sub && ls", extra={"session_id": "van"})
+        self.log.write_text(json.dumps(
+            {"event": "start", "session": "co", "mode": "claude-only"}) + "\n")
+        self._deny("cd sub && ls", extra={"session_id": "co"})
+        self.log.write_text("")
+        self._deny("cd sub && ls", extra={"session_id": "missing"})
+        self._deny("cd sub && ls")  # no session_id, no start row
+
+    def test_drift_notice_and_return_silent(self):
+        notice = self._notice("ls", cwd=self.repo / "sub")
+        self.assertIn("sub", notice)
+        self.assertIn(str(self.repo.resolve()), notice)
+        self.assertIn("earlier command", notice)
+        self._silent(f"cd {self.repo} && ls", cwd=self.repo / "sub")
+        # Outside the root counts as drift too.
+        notice = self._notice("ls", cwd=self.tmp)
+        self.assertIn(str(self.tmp.resolve()), notice)
+
+    def test_drift_notice_merged_into_secret_ask(self):
+        local, _ = self.make_pair()
+        (local / "sub").mkdir()
+        token = _fake_token("ghp_", 36)
+        (local / "leak.txt").write_text(f"{token}\n")
+        _git(local, "add", "leak.txt")
+        _git(local, "commit", "-m", "leak")
+        self.env["CLAUDE_PROJECT_DIR"] = str(local)
+        r = self.claude("git push origin main", cwd=local / "sub")
+        out = self._out(r)
+        self.assertEqual(out["permissionDecision"], "ask")
+        self.assertIn("GitHub token", out["permissionDecisionReason"])
+        self.assertTrue(out["additionalContext"].startswith("cwd guard:"))
+        self.assertIn("sub", out["additionalContext"])
+
+    def test_cwd_deny_skips_secret_scan(self):
+        local, _ = self.make_pair()
+        (local / "sub").mkdir()
+        token = _fake_token("ghp_", 36)
+        (local / "leak.txt").write_text(f"{token}\n")
+        _git(local, "add", "leak.txt")
+        _git(local, "commit", "-m", "leak")
+        self.env["CLAUDE_PROJECT_DIR"] = str(local)
+        # Sticking cd before a push: cwd deny is final (no secret ask).
+        out = self._out(self.claude("cd sub && git push origin main", cwd=local))
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertTrue(out["permissionDecisionReason"].startswith("cwd guard:"))
+        self.assertNotIn("GitHub", out["permissionDecisionReason"])
+        self.assertNotIn("additionalContext", out)
 
 
 if __name__ == "__main__":
