@@ -29,7 +29,7 @@ One CLI: `~/.claude/skills/delegate/scripts/delegate` (stdlib Python; full path,
 | `delegate followup NAME --brief F \| --from-review N [--fresh --model M] [--link PATH]` | next round in the same worktree, resuming the session; `--link` as on launch |
 | `delegate verify NAME [--cmd C]` | re-run the check in the worktree |
 | `delegate status [NAME] [--full]` | compact exit packet (default); `--full` for log tail and whole last message |
-| `delegate wait NAME… [--timeout S]` | blocks until the run's round and reviews have finished, verify included; prints their packets. Exit 0 done, 1 failed, 3 timeout |
+| `delegate wait NAME… [--timeout S]` | blocks until the run's round and reviews have finished and recorded, verify included; prints their packets. Exit 0 done, 1 failed, 3 timeout |
 | `delegate diff NAME` / `apply NAME [--check]` / `cleanup NAME` | inspect, merge, tidy up. Each run is logged once to `runs.jsonl` in the runs root (what `cost` summarises): at `apply`, or at `cleanup` for read-only, hand-merged or discarded runs |
 
 ## Sessions

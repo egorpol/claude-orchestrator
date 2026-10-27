@@ -24,7 +24,7 @@ RUNS_ROOT = Path(os.environ.get("CLAUDE_DELEGATE_ROOT",
                                 / "claude-delegate" / "runs"))
 DEFAULTS = {"codex": ("gpt-6.1-sol", "xhigh"), "cursor": ("auto", None)}
 ROUND_FILES = ("brief.md", "prompt.md", "run.sh", "log", "last-message.md", "exit_code", "pid",
-               "started_at", "finished_at", "verify.log", "verify_code", "verify-adhoc.log")
+               "started_at", "finished_at", "finalized_at", "verify.log", "verify_code", "verify-adhoc.log")
 
 # Claude Code here runs inside Cursor's AppImage; these leak into children and
 # can break other binaries, or make a delegate think it is talking to an IDE.
@@ -269,7 +269,10 @@ def load_meta(root):
 
 
 def save_meta(root, meta):
-    (root / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    path = root / "meta.json"
+    tmp = path.with_name(f".meta.json.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(meta, indent=2) + "\n")
+    os.replace(tmp, path)
 
 
 def _exclude_file(repo):
@@ -550,9 +553,9 @@ def session_id(job, agent):
 
 def followup(a):
     root = find_run(a.run)
-    meta = load_meta(root)
-    if state(root) in BUSY:
+    if state(root) in BUSY or _finalizing(root):
         sys.exit("delegate is still running")
+    meta = load_meta(root)  # after the guard, or finalize's history could be saved back stale
     wt = Path(meta["worktree"])
     if not wt.exists():
         sys.exit("worktree was removed; start a new run instead")
@@ -744,9 +747,9 @@ def _trim_review_patch(patch, max_kb):
 
 def review(a):
     root = find_run(a.run)
-    meta = load_meta(root)
-    if state(root) in BUSY:
+    if state(root) in BUSY or _finalizing(root):
         sys.exit("delegate is still running")
+    meta = load_meta(root)  # after the guard, or finalize's history could be saved back stale
     wt = Path(meta["worktree"])
     if not wt.exists():
         sys.exit("worktree was removed")
@@ -848,6 +851,20 @@ def _pid_alive(job):
     except PermissionError:
         return True
     except (OSError, ValueError):
+        return False
+
+
+def _finalizing(job):
+    """run.sh wrote finished_at but is still in _finalize (meta.json, packet).
+
+    The 120 s bound keeps runs from before the finalized_at marker from looking busy
+    when their old PID has been reused."""
+    if (not (job / "exit_code").exists() or not (job / "finished_at").exists()
+            or (job / "finalized_at").exists() or not _pid_alive(job)):
+        return False
+    try:
+        return time.time() - (job / "finished_at").stat().st_mtime < 120
+    except OSError:
         return False
 
 
@@ -991,7 +1008,11 @@ def finalize(job):
         quota.spawn_snapshot("job-end", run=meta["name"], job=job_id)
     except Exception:
         pass
-    print("\n".join(packet(job)))
+    lines = packet(job)  # runs git in the worktree, so it comes before the marker
+    # last write: wait and the command guards key off this marker; a broken stdout can't skip it
+    (job / "finalized_at").write_text(
+        datetime.now().astimezone().isoformat(timespec="seconds") + "\n")
+    print("\n".join(lines))
 
 
 def _numstat(text):
@@ -1222,7 +1243,7 @@ def _job_busy(job):
             return (time.time() - (job / "meta.json").stat().st_mtime) < 60
         except OSError:
             return False
-    return False
+    return _finalizing(job)
 
 
 def _started_sort_key(job):
@@ -1420,9 +1441,9 @@ def diff(a):
 
 def apply(a):
     root = find_run(a.run)
-    meta = load_meta(root)
-    if state(root) in BUSY:
+    if state(root) in BUSY or _finalizing(root):
         sys.exit("delegate is still running")
+    meta = load_meta(root)  # after the guard, or finalize's history could be saved back stale
     _, patch = make_patch(root, meta)
     if not patch.strip():
         sys.exit("nothing to apply")
@@ -1522,9 +1543,10 @@ def _dirty_without_links(wt, meta):
 
 def cleanup(a):
     root = find_run(a.run)
-    meta = load_meta(root)
-    if state(root) in BUSY or any(state(rv) in BUSY for rv in root.glob("review-*")):
+    if state(root) in BUSY or _finalizing(root) or any(
+            state(rv) in BUSY or _finalizing(rv) for rv in root.glob("review-*")):
         sys.exit("delegate or a review is still running")
+    meta = load_meta(root)  # after the guard, or finalize's history could be saved back stale
     wt = Path(meta["worktree"])
     if wt.exists():
         dirty = _dirty_without_links(wt, meta)
