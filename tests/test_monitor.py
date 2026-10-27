@@ -1,10 +1,12 @@
 """Synthetic-log tests for quota windows, per-job costs and --unused plumbing."""
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -513,10 +515,12 @@ class CliPlumbingTests(unittest.TestCase):
             "branch": "delegate/fixture", "base": "abc",
         }))
         (root / "wt").mkdir()
+        out = io.StringIO()
         with mock.patch.object(runs.quota, "spawn_snapshot") as snap, \
-             mock.patch.object(runs, "packet", return_value=["ok"]):
+             mock.patch.object(runs, "packet", return_value=["ok"]), redirect_stdout(out):
             runs.finalize(root)
         snap.assert_called_once_with("job-end", run="fixture", job="round-1")
+        self.assertEqual(out.getvalue(), "ok\n")
 
         review = root / "review-1"
         review.mkdir()
@@ -529,7 +533,7 @@ class CliPlumbingTests(unittest.TestCase):
         }))
         snap.reset_mock()
         with mock.patch.object(runs.quota, "spawn_snapshot") as snap2, \
-             mock.patch.object(runs, "packet", return_value=["ok"]):
+             mock.patch.object(runs, "packet", return_value=["ok"]), redirect_stdout(io.StringIO()):
             runs.finalize(review)
         snap2.assert_called_once_with("job-end", run="fixture", job="review-1")
         meta = json.loads((review / "meta.json").read_text())
