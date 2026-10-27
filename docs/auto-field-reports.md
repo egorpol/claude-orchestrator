@@ -1,6 +1,6 @@
 # Automatic field reports: design
 
-Decided 2026-10-26, with second opinions from Cursor Auto. A Codex review on 2026-10-27 changed the sampling (1), the pass bar (4) and the leak guards. Build steps 1–4 are done and step 5 has its stage-2 list; the Codex judge and the report pipeline itself are not built yet.
+Decided 2026-10-26, with second opinions from Cursor Auto. A Codex review on 2026-10-27 changed the sampling (1), the pass bar (4) and the leak guards. Build steps 1–5 are done. The validation trial failed two of the three pass-bar checks (2026-10-27), so the report pipeline (step 6) is not built.
 
 ## Goal
 
@@ -47,4 +47,6 @@ A denied or blocked call is an `is_error` tool result that starts with a hook er
    - **Stage 1** returns JSON Lines. A row is kept only if its evidence is found verbatim (whitespace-normalised) in the digest or the transcript file. A run whose stream shows no complete read of the transcript file is retried once with the file inlined.
    - **Stage 2** cites row ids, every id exactly once, and code attaches each row's session and evidence, so no quote is copied twice.
    - **Result on Cursor Auto:** all 10 runs read the transcript file in full; 69 rows kept and 1 dropped (a near-miss quote), 4–9 per session against the hand reports' median of 10 lessons. Stage 2 merged them into 63 lessons on its first attempt. 12 calls in all, 18 minutes, 275k input and 69k output tokens.
+   - **Judge: fail.** Codex (gpt-6.1-sol, medium) judged each session in one call, with the digest and transcript inlined (36–74k characters), in 40–58 seconds; every reply passed the format check on the first attempt. For support, the judge first lists each lesson's factual claims about the session, and one failed claim makes the lesson unsupported (Codex's pick; Cursor preferred one verdict per lesson). Pooled recall was 41.7% (42.5 of 102 bullets: 26 found, 33 partly, 43 missed; 32–55% per session), which fails the 50% bar. No session fell below 25% recall, which passes. Unsupported was 15.9% (11 of 69 citations), which fails the 10% bar.
+   - **Why it failed.** All 11 unsupported lessons cite a single session, so the errors come from stage 1, not from the merge: an inferred cause, events in the wrong order, or a stretched detail. Two of the 11 verdicts were checked by hand against the transcript, and the judge was right both times. The misses cluster in two places. The first is context growth: the digest has the session's maximum context but not how it grew. The second is harness and shell friction that the digest doesn't carry: in 4 sessions with such bullets, it has no cwd-reset note, no harness reminder and no error text. Suggestions scored lower than Friction (18 of 47 against 24.5 of 55).
 6. The `--batch` command, plus a fold-in note in `CLAUDE.md`, only if the trial passes.
