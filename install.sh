@@ -8,7 +8,8 @@
 #   ./install.sh --hooks    also register hooks/context-guard.py as a UserPromptSubmit hook in
 #                           settings.json (handoff nudge at item boundaries past ~120k context)
 #                           and hooks/secret-guard.py as a PreToolUse (Bash) hook (timeout 30)
-#                           that asks before a commit or push that would expose secrets
+#                           that asks before a commit or push that would expose secrets, and
+#                           denies a sticking cd/pushd into a project subdirectory
 #   ./install.sh --git-hook=DIR
 #                           link hooks/secret-guard.py as DIR's pre-push and pre-commit hooks
 #                           (respects core.hooksPath / worktrees); refuses a different existing

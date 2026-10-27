@@ -6,7 +6,10 @@ Four entry points, one file:
 * Claude Code PreToolUse (Bash): JSON on stdin, no argv. Cheap substring prefilter,
   then parse commits and pushes; findings or an unfinished scan return "ask"
   (never "allow", which would skip the user's own permission rules). A commit-making
-  git segment before a push in the same Bash call returns "deny".
+  git segment before a push in the same Bash call returns "deny". Also denies a
+  top-level ``cd``/``pushd`` that would leave the shell in a project subdirectory
+  (Claude Code keeps that directory for later Bash calls), and notices when the
+  input ``cwd`` has already drifted from ``CLAUDE_PROJECT_DIR``.
 * git pre-push: argv = remote name and URL; stdin lines are the ref updates. Findings
   or errors go to stderr and exit 1 (override with git push --no-verify).
 * git pre-commit (symlink name), or ``--pre-commit [DIR]``: scan the inherited
@@ -20,7 +23,8 @@ Repo opt-outs: secretGuard.homePaths, secretGuard.privateNames, secretGuard.work
 Approving Claude's ask still hits an installed git hook; --no-verify is scanned again.
 
 Env: SECRET_GUARD_BUDGET_S (default 20 for git/Claude hooks; bounds --check only when set),
-SECRET_GUARD_DISABLE=1 (exit 0 silently, same convention as CONTEXT_GUARD_DISABLE).
+SECRET_GUARD_DISABLE=1 (skip secret scans only), CWD_GUARD_DISABLE=1 (skip the cd check
+only). Same disable convention as CONTEXT_GUARD_DISABLE.
 
 Guiding principle: false positives cost one click; a miss leaks a secret. Where
 emulating git exactly is hard, scan more, not less.
@@ -955,6 +959,156 @@ def resolve_cwd(path, base):
     return base
 
 
+_SUBSTITUTION_MARK = " __substitution__ "
+
+
+def resolve_cd_target(path, base):
+    """Lexically resolve a cd/pushd target; None if unknown (vars, ``-``, empty).
+
+    Unlike ``resolve_cwd``, a missing final component still resolves (so
+    ``mkdir -p build && cd build`` is visible before ``build`` exists), and
+    failure is distinct from "unchanged". ``base`` may be None (unknown cwd):
+    a relative target stays unknown, an absolute one still resolves.
+    """
+    if path is None or path == "" or path == "-":
+        return None
+    if "$" in path or "`" in path or "__substitution__" in path:
+        return None
+    text = os.path.expanduser(path)
+    if text.startswith("~"):
+        return None
+    if os.path.isabs(text):
+        candidate = Path(text)
+    elif base is None:
+        return None
+    else:
+        candidate = Path(base) / text
+    try:
+        # realpath keeps a missing tail; normalises .. and resolves symlinks
+        # that already exist on the prefix.
+        return os.path.realpath(str(candidate))
+    except OSError:
+        return None
+
+
+def _realpath(path):
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return path
+
+
+def _session_log_path():
+    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return Path(os.environ.get("CLAUDE_SESSION_LOG", cache / "claude-delegate/sessions.jsonl"))
+
+
+def _latest_start(path, session):
+    latest = None
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(row, dict) and row.get("event") == "start"
+                        and row.get("session") == session):
+                    latest = row
+    except (OSError, ValueError):
+        pass
+    return latest
+
+
+def _session_is_vanilla(session_id):
+    if not session_id:
+        return False
+    start = _latest_start(_session_log_path(), session_id)
+    return isinstance(start, dict) and start.get("mode") == "vanilla"
+
+
+def _heredoc_infos(segment):
+    """Return ``[(delimiter, strip_tabs), ...]`` for every heredoc opener in segment.
+
+    Here-strings (``<<<``) are skipped entirely so they are not misread as ``<<``.
+    """
+    found, quote, i, text = [], None, 0, segment
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and quote != "'":
+            i += 2
+            continue
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            i += 1
+            continue
+        if quote is None and text.startswith("<<<", i):
+            i += 3
+            continue
+        if quote is None and text.startswith("<<", i):
+            i += 2
+            strip_tabs = False
+            if i < len(text) and text[i] == "-":
+                strip_tabs = True
+                i += 1
+            while i < len(text) and text[i] in " \t":
+                i += 1
+            if i >= len(text):
+                break
+            if text[i] == "'":
+                end = text.find("'", i + 1)
+                if end >= 0:
+                    found.append((text[i + 1:end], strip_tabs))
+                    i = end + 1
+                continue
+            if text[i] == '"':
+                end = text.find('"', i + 1)
+                if end >= 0:
+                    found.append((text[i + 1:end], strip_tabs))
+                    i = end + 1
+                continue
+            if text[i] == "\\":
+                i += 1
+            start = i
+            while i < len(text) and not text[i].isspace() and text[i] not in ";&|<>()":
+                i += 1
+            if i > start:
+                found.append((text[start:i], strip_tabs))
+            continue
+        i += 1
+    return found
+
+
+def _skip_heredoc_body(text, i, delim, strip_tabs):
+    """Advance past a heredoc body starting at i; return new index."""
+    while i < len(text):
+        end = text.find("\n", i)
+        line = text[i:] if end < 0 else text[i:end]
+        nxt = len(text) if end < 0 else end + 1
+        compare = line.lstrip("\t") if strip_tabs else line
+        if compare == delim:
+            return nxt
+        i = nxt
+    return i
+
+
+def _cd_arg(words):
+    """First path operand of cd/pushd, or None for bare cd (home) / no operand."""
+    i = 1
+    while i < len(words):
+        w = words[i]
+        if w == "--":
+            return words[i + 1] if i + 1 < len(words) else None
+        if w.startswith("-") and w != "-":
+            i += 1
+            continue
+        return w
+    return None
+
+
 def _skip_keywords(words):
     while words and words[0] in SHELL_KEYWORDS:
         words = words[1:]
@@ -1383,6 +1537,124 @@ def _commit_scans_worktree(args):
     return False
 
 
+def _walk_shell(text, work, handle_one, depth=0, *, skip_heredocs=False,
+                cwd_control=False):
+    """Walk shell text like analyze_command: (…)/$(…)/`…` isolate cwd changes.
+
+    ``handle_one(segment, work, depth) -> new_work``. When ``skip_heredocs``,
+    heredoc bodies after the line that opened them are data, not commands.
+    ``cwd_control`` (cd check only) recognises ``&&``/``||``, isolates
+    background and non-last pipeline segments, and skips ``||`` alternatives
+    under an every-command-succeeds model. Leave it False for push/commit
+    analysis so that path stays unchanged.
+    """
+    if depth > 32:
+        return work
+    buffer, quote, i = [], None, 0
+    pending_heredocs = []
+    skip_after_or = False
+
+    def flush_heredocs_at(idx):
+        nonlocal pending_heredocs
+        for delim, strip_tabs in pending_heredocs:
+            idx = _skip_heredoc_body(text, idx, delim, strip_tabs)
+        pending_heredocs = []
+        return idx
+
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and quote != "'" and i + 1 < len(text):
+            if text[i + 1] != "\n":
+                buffer.extend(text[i:i + 2])
+            i += 2
+            continue
+        if quote is None and char == "#" and (not buffer or buffer[-1].isspace()):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            continue
+        if quote != "'" and (text.startswith("$(", i) or char == "`"):
+            backtick = char == "`"
+            start = i + (1 if backtick else 2)
+            end = _substitution_end(text, start, backtick)
+            _walk_shell(text[start:end], work, handle_one, depth + 1,
+                        skip_heredocs=skip_heredocs, cwd_control=cwd_control)
+            buffer.append(_SUBSTITUTION_MARK)
+            i = end + 1
+            continue
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif quote is None and char == "(":
+            seg = "".join(buffer)
+            buffer = []
+            if skip_heredocs:
+                pending_heredocs.extend(
+                    info for info in _heredoc_infos(seg) if info[0] is not None)
+            if seg.strip() and not (cwd_control and skip_after_or):
+                # Subshell opener: apply any prefix command, then isolate (...).
+                work = handle_one(seg, work, depth)
+            end = _substitution_end(text, i + 1, backtick=False)
+            _walk_shell(text[i + 1:end], work, handle_one, depth + 1,
+                        skip_heredocs=skip_heredocs, cwd_control=cwd_control)
+            i = end + 1
+            continue
+        elif quote is None and char in ";&|\n)":
+            if not cwd_control:
+                # Push/commit path: keep the original single-character split.
+                seg = "".join(buffer)
+                buffer = []
+                if seg.strip():
+                    work = handle_one(seg, work, depth)
+                i += 1
+                continue
+            # Cd-check path: multi-char operators and isolation rules.
+            # Redirect ampersands (&>, &>>, >&, <&, 2>&1, >&-) are not operators.
+            if char == "&":
+                if i + 1 < len(text) and text[i + 1] == ">":
+                    buffer.append(char)
+                    i += 1
+                    continue
+                if buffer and buffer[-1] in "><":
+                    buffer.append(char)
+                    i += 1
+                    continue
+            if char == "&" and i + 1 < len(text) and text[i + 1] == "&":
+                term, consume = "&&", 2
+            elif char == "|" and i + 1 < len(text) and text[i + 1] == "|":
+                term, consume = "||", 2
+            elif char == "|" and i + 1 < len(text) and text[i + 1] == "&":
+                term, consume = "|", 2  # |& : pipe stderr, still a pipeline
+            else:
+                term, consume = char, 1
+            seg = "".join(buffer)
+            buffer = []
+            if skip_heredocs:
+                pending_heredocs.extend(
+                    info for info in _heredoc_infos(seg) if info[0] is not None)
+            isolate = term in ("|", "&")
+            if seg.strip() and not skip_after_or:
+                if isolate:
+                    handle_one(seg, work, depth)  # discard: background / pipe head
+                else:
+                    work = handle_one(seg, work, depth)
+            i += consume
+            if term == "||":
+                skip_after_or = True
+            elif term in ("&&", ";", "\n", "&"):
+                skip_after_or = False
+            if term == "\n" and skip_heredocs:
+                i = flush_heredocs_at(i)
+            continue
+        buffer.append(char)
+        i += 1
+    seg = "".join(buffer)
+    if seg.strip() and not (cwd_control and skip_after_or):
+        work = handle_one(seg, work, depth)
+    return work
+
+
 def analyze_command(command, cwd, guard, commits=None):
     """Return (pushes, commit_before_push).
 
@@ -1409,9 +1681,9 @@ def analyze_command(command, cwd, guard, commits=None):
                 if kind == "env_s":
                     combined = list(_tokens(text)) + list(rest)
                     text = " ".join(shlex.quote(w) for w in combined)
-                walk(text, child, depth + 1)
+                _walk_shell(text, child, handle_one, depth + 1)
                 return work
-            nested_work = walk(text, child, depth + 1)
+            nested_work = _walk_shell(text, child, handle_one, depth + 1)
             if kind == "eval":
                 return nested_work
             return work
@@ -1424,7 +1696,7 @@ def analyze_command(command, cwd, guard, commits=None):
                 text = " ".join(shlex.quote(w) for w in combined)
             else:
                 text = " ".join(shlex.quote(w) for w in words)
-            walk(text, child, depth + 1)
+            _walk_shell(text, child, handle_one, depth + 1)
             return work
         if not words:
             return work
@@ -1459,60 +1731,155 @@ def analyze_command(command, cwd, guard, commits=None):
             state["pushes"].append(push)
         return work
 
-    def walk(text, work, depth=0):
-        """Like _shell_segments, but (…)/$(…)/`…` isolate directory changes."""
+    _walk_shell(command, cwd, handle_one, 0)
+    return state["pushes"], state["commit_before_push"]
+
+
+def predict_shell_cwd(command, cwd):
+    """Return ``(final_cwd, known)`` after top-level directory changes.
+
+    Directory state is the path string, or ``None`` when unknown. A relative
+    ``cd`` from unknown stays unknown; an absolute ``cd`` recovers. Isolated
+    scopes (``( … )``, ``$( … )``, backticks, ``bash -c``, ``env -C``,
+    background and non-last pipeline segments) leave the parent state alone.
+    """
+
+    def handle_one(segment, work, depth=0):
         if depth > 32:
             return work
-        buffer, quote, i = [], None, 0
-        while i < len(text):
-            char = text[i]
-            if char == "\\" and quote != "'" and i + 1 < len(text):
-                if text[i + 1] != "\n":
-                    buffer.extend(text[i:i + 2])
-                i += 2
-                continue
-            if quote is None and char == "#" and (not buffer or buffer[-1].isspace()):
-                end = text.find("\n", i)
-                i = len(text) if end < 0 else end
-                continue
-            if quote != "'" and (text.startswith("$(", i) or char == "`"):
-                backtick = char == "`"
-                start = i + (1 if backtick else 2)
-                end = _substitution_end(text, start, backtick)
-                walk(text[start:end], work, depth + 1)  # isolated
-                buffer.append(" __substitution__ ")
-                i = end + 1
-                continue
-            if char in ("'", '"'):
-                if quote is None:
-                    quote = char
-                elif quote == char:
-                    quote = None
-            elif quote is None and char == "(":
-                seg = "".join(buffer)
-                buffer = []
-                if seg.strip():
-                    work = handle_one(seg, work, depth)
-                end = _substitution_end(text, i + 1, backtick=False)
-                walk(text[i + 1:end], work, depth + 1)  # isolated
-                i = end + 1
-                continue
-            elif quote is None and char in ";&|\n)":
-                seg = "".join(buffer)
-                buffer = []
-                if seg.strip():
-                    work = handle_one(seg, work, depth)
-                i += 1
-                continue
-            buffer.append(char)
-            i += 1
-        seg = "".join(buffer)
-        if seg.strip():
-            work = handle_one(seg, work, depth)
+        raw = _tokens(segment)
+        if not raw:
+            return work
+        nested = _nested_shell(raw)
+        if nested is not None:
+            kind, text, rest, chdir = nested
+            child = resolve_cd_target(chdir, work) if chdir else work
+            if kind in ("env_s", "env_c"):
+                if kind == "env_s":
+                    combined = list(_tokens(text)) + list(rest)
+                    text = " ".join(shlex.quote(w) for w in combined)
+                _walk_shell(text, child, handle_one, depth + 1,
+                            skip_heredocs=True, cwd_control=True)
+                return work
+            nested_work = _walk_shell(text, child, handle_one, depth + 1,
+                                      skip_heredocs=True, cwd_control=True)
+            if kind == "eval":
+                return nested_work
+            return work
+        words = _skip_keywords(raw)
+        # Cd check only: ``builtin cd`` is a real directory change (``command cd``
+        # is already stripped by _skip_wrappers).
+        if words and Path(words[0]).name == "builtin":
+            words = words[1:]
+        words, _, env_s, chdir = _skip_wrappers(words)
+        if env_s is not None or chdir is not None:
+            child = resolve_cd_target(chdir, work) if chdir else work
+            if env_s is not None:
+                combined = list(_tokens(env_s)) + list(words)
+                text = " ".join(shlex.quote(w) for w in combined)
+            else:
+                text = " ".join(shlex.quote(w) for w in words)
+            _walk_shell(text, child, handle_one, depth + 1,
+                        skip_heredocs=True, cwd_control=True)
+            return work
+        if not words:
+            return work
+        name = Path(words[0]).name
+        if name in ("cd", "pushd"):
+            target = _cd_arg(words)
+            if target is None:
+                return None
+            if name == "pushd" and re.fullmatch(r"[+-]\d+", target):
+                return None
+            return resolve_cd_target(target, work)
+        if name == "popd":
+            return None
         return work
 
-    walk(command, cwd, 0)
-    return state["pushes"], state["commit_before_push"]
+    final = _walk_shell(command or "", cwd, handle_one, 0,
+                        skip_heredocs=True, cwd_control=True)
+    return final, final is not None
+
+
+def _cwd_rel_display(path, root):
+    root_r, path_r = _realpath(root), _realpath(path)
+    if path_r == root_r:
+        return "."
+    prefix = root_r + os.sep
+    if path_r.startswith(prefix):
+        return path_r[len(prefix):] or "."
+    return path_r
+
+
+def _cwd_wrap_suggestion(command):
+    """Return a reusable ``( … )`` wrap; multiline when needed for heredocs/#."""
+    if command is None or len(command) > 300:
+        return None
+    if "\n" in command or "#" in command:
+        return "(\n" + command + "\n)"
+    return f"( {command} )"
+
+
+def _cwd_deny_reason(command, rel):
+    body = (
+        f"cwd guard: this command would leave the shell in {rel}/; "
+        "that directory sticks for later Bash calls. "
+    )
+    wrap = _cwd_wrap_suggestion(command)
+    if wrap is not None:
+        if "\n" in wrap:
+            body += f"Wrap as:\n{wrap}\n"
+        else:
+            body += f"Wrap as: {wrap}. "
+    body += "Alternatives: git -C DIR, a tool's own directory flag, or absolute paths."
+    return body
+
+
+def _cwd_notice_reason(cwd, root):
+    here = _cwd_rel_display(cwd, root)
+    root_r = _realpath(root)
+    return (
+        f"cwd guard: this call ran in {here}, not the project root {root_r}, "
+        "because an earlier command's cd stuck. "
+        f"Return with `cd {root_r}` alone or at the start of the next command."
+    )
+
+
+def cwd_guard_decision(data, command, cwd):
+    """Return ``(deny_reason_or_None, notice_or_None)`` for the PreToolUse cwd check.
+
+    Reads the session log only when a deny or notice is about to be returned.
+    """
+    project = os.environ.get("CLAUDE_PROJECT_DIR") or ""
+    if not project:
+        return None, None
+    if "agent_id" in data:
+        return None, None
+    root = _realpath(project)
+    start = _realpath(cwd) if cwd else root
+    final, known = predict_shell_cwd(command or "", cwd or project)
+
+    def at_root(path):
+        return path is not None and _realpath(path) == root
+
+    def inside_not_root(path):
+        if path is None:
+            return False
+        rp = _realpath(path)
+        return rp.startswith(root + os.sep)
+
+    deny = None
+    notice = None
+    if known and inside_not_root(final) and at_root(start):
+        deny = _cwd_deny_reason(command, _cwd_rel_display(final, root))
+    elif not at_root(start) and not (known and at_root(final)):
+        notice = _cwd_notice_reason(cwd or start, root)
+
+    if not deny and not notice:
+        return None, None
+    if _session_is_vanilla(data.get("session_id")):
+        return None, None
+    return deny, notice
 
 
 def format_reason(findings, target, extra_prefix=None, guard=None):
@@ -1579,22 +1946,33 @@ def format_reason(findings, target, extra_prefix=None, guard=None):
     return guard.redact(reason) if guard is not None else reason
 
 
-def print_ask(reason, guard=None):
+def print_ask(reason, guard=None, additional_context=None):
+    payload = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "ask",
+        "permissionDecisionReason": guard.redact(reason) if guard else redact(reason),
+    }
+    if additional_context:
+        payload["additionalContext"] = additional_context
+    print(json.dumps({"hookSpecificOutput": payload}))
+
+
+def print_deny(reason, guard=None, additional_context=None):
+    payload = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": guard.redact(reason) if guard else redact(reason),
+    }
+    if additional_context:
+        payload["additionalContext"] = additional_context
+    print(json.dumps({"hookSpecificOutput": payload}))
+
+
+def print_cwd_notice(notice):
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": "ask",
-            "permissionDecisionReason": guard.redact(reason) if guard else redact(reason),
-        }
-    }))
-
-
-def print_deny(reason, guard=None):
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": guard.redact(reason) if guard else redact(reason),
+            "additionalContext": notice,
         }
     }))
 
@@ -1652,7 +2030,8 @@ def run_push_scans(guard, pushes):
         push["_had_findings"] = guard._scan_hits > 0
 
 
-def _ask_could_not_finish(exc, repo_dir=None, guard=None, operation="push"):
+def _ask_could_not_finish(exc, repo_dir=None, guard=None, operation="push",
+                          additional_context=None):
     name = type(exc).__name__
     script = Path(__file__).resolve()
     repo = repo_dir or os.getcwd()
@@ -1660,6 +2039,7 @@ def _ask_could_not_finish(exc, repo_dir=None, guard=None, operation="push"):
     print_ask(
         f"secret guard could not finish: {name}: {exc}; "
         f"scan without a time limit: {hint}; {operation} anyway?", guard=guard,
+        additional_context=additional_context,
     )
 
 
@@ -1679,10 +2059,9 @@ def run_commit_scans(guard, commits, command):
 
 
 def claude_main(data):
-    if os.environ.get("SECRET_GUARD_DISABLE") == "1":
-        return 0
     if not isinstance(data, dict):
         return 0
+    # Secret path: lenient (missing event/tool still runs). Existing tests rely on it.
     if data.get("hook_event_name") and data.get("hook_event_name") != "PreToolUse":
         return 0
     if data.get("tool_name") and data.get("tool_name") != "Bash":
@@ -1690,18 +2069,40 @@ def claude_main(data):
     inputs = data.get("tool_input") or {}
     command = inputs.get("command") if isinstance(inputs, dict) else None
     cwd = data.get("cwd") or os.getcwd()
-    if not might_push(command or ""):
+
+    # Cd check: exact PreToolUse/Bash only (null/empty/other → no-op for cwd).
+    cwd_notice = None
+    if (os.environ.get("CWD_GUARD_DISABLE") != "1"
+            and data.get("hook_event_name") == "PreToolUse"
+            and data.get("tool_name") == "Bash"):
+        cwd_deny, cwd_notice = cwd_guard_decision(data, command, cwd)
+        if cwd_deny:
+            print_deny(cwd_deny)
+            return 0
+
+    if os.environ.get("SECRET_GUARD_DISABLE") == "1":
+        if cwd_notice:
+            print_cwd_notice(cwd_notice)
         return 0
+
+    if not might_push(command or ""):
+        if cwd_notice:
+            print_cwd_notice(cwd_notice)
+        return 0
+
     guard = Guard(budget_s=None)  # default 20 s (or SECRET_GUARD_BUDGET_S)
     commits = []
     try:
         pushes, commit_before = analyze_command(command, cwd, guard, commits=commits)
         if not pushes and not commits:
+            if cwd_notice:
+                print_cwd_notice(cwd_notice)
             return 0
         if commit_before:
             print_deny(
                 "secret guard: this Bash call creates a commit and then pushes; "
-                "run the push as its own Bash call so the new commit can be scanned", guard=guard,
+                "run the push as its own Bash call so the new commit can be scanned",
+                guard=guard, additional_context=cwd_notice,
             )
             return 0
         guard.require_private_names()
@@ -1711,16 +2112,21 @@ def claude_main(data):
         except GitError as exc:
             msg = str(exc)
             if "is not a git repository" in msg.lower():
-                print_ask(f"secret guard could not finish: {msg}", guard=guard)
+                print_ask(f"secret guard could not finish: {msg}", guard=guard,
+                          additional_context=cwd_notice)
                 return 0
             _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
-                                  operation="commit" if commits else "push")
+                                  operation="commit" if commits else "push",
+                                  additional_context=cwd_notice)
             return 0
         except Exception as exc:
             _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
-                                  operation="commit" if commits else "push")
+                                  operation="commit" if commits else "push",
+                                  additional_context=cwd_notice)
             return 0
         if not guard.findings:
+            if cwd_notice:
+                print_cwd_notice(cwd_notice)
             return 0
         targets = []
         for p in pushes + commits:
@@ -1732,23 +2138,28 @@ def claude_main(data):
             first = (pushes + commits)[0]
             targets = [first.get("_target") or first.get("remote") or "remote"]
         target = ", ".join(str(t) for t in targets)
-        print_ask(format_reason(guard.findings, target, guard=guard))
+        print_ask(format_reason(guard.findings, target, guard=guard),
+                  additional_context=cwd_notice)
         return 0
     except BudgetExceeded as exc:
         _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
-                              operation="commit" if commits else "push")
+                              operation="commit" if commits else "push",
+                              additional_context=cwd_notice)
         return 0
     except GitError as exc:
         msg = str(exc)
         if "is not a git repository" in msg.lower():
-            print_ask(f"secret guard could not finish: {msg}", guard=guard)
+            print_ask(f"secret guard could not finish: {msg}", guard=guard,
+                      additional_context=cwd_notice)
             return 0
         _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
-                              operation="commit" if commits else "push")
+                              operation="commit" if commits else "push",
+                              additional_context=cwd_notice)
         return 0
     except Exception as exc:
         _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
-                              operation="commit" if commits else "push")
+                              operation="commit" if commits else "push",
+                              additional_context=cwd_notice)
         return 0
 
 
