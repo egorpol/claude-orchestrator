@@ -1,7 +1,8 @@
 """Artificial Analysis model ratings: intelligence, coding, speed, price.
 
 Uses the official API when ARTIFICIAL_ANALYSIS_API_KEY is set (free key from
-artificialanalysis.ai). Without a key it reads the public leaderboard page,
+artificialanalysis.ai), supplemented with leaderboard task costs by exact slug.
+Without a key it reads the public leaderboard page,
 whose payload carries the same per-model numbers except an explicit Coding
 Index; there `coding` is a proxy: mean of Terminal-Bench 4.0 and SciCode x100.
 """
@@ -47,6 +48,7 @@ def from_api(key):
             "price_in": pr.get("price_1m_input_tokens"),
             "price_out": pr.get("price_1m_output_tokens"),
             "price_blended": pr.get("price_1m_blended_3_to_1"),
+            "cost_per_task": None,  # No API field has been verified.
             "deprecated": bool(m.get("deprecated")),
         }
     return models
@@ -111,6 +113,7 @@ def from_page():
             "price_in": o.get("price1mInputTokens"),
             "price_out": o.get("price1mOutputTokens"),
             "price_blended": _blend(o.get("price1mInputTokens"), o.get("price1mOutputTokens")),
+            "cost_per_task": o.get("intelligenceIndexCostPerTask"),
             "deprecated": bool(o.get("deprecated")),
         }
     if len(models) < 20:
@@ -128,12 +131,20 @@ def load(refresh=False, log=lambda msg: None):
             cached = json.loads(CACHE.read_text())
         except ValueError:
             cached = None
-    if cached and not refresh and time.time() - cached.get("fetched_at", 0) < TTL_S:
+    if cached and cached.get("schema") == 2 and not refresh and time.time() - cached.get("fetched_at", 0) < TTL_S:
         return cached
     key = os.environ.get("ARTIFICIAL_ANALYSIS_API_KEY")
     try:
         if key:
             models, source = from_api(key), "api"
+            try:
+                page_models = from_page()
+            except Exception as exc:  # Task costs are optional; retain the API refresh.
+                log(f"warning: AA leaderboard task costs unavailable ({exc}); "
+                    "keeping API models without $/task")
+            else:
+                for slug, model in models.items():
+                    model["cost_per_task"] = page_models.get(slug, {}).get("cost_per_task")
         else:
             models, source = from_page(), "leaderboard-page"
     except Exception as exc:  # network, layout change, auth
@@ -142,7 +153,7 @@ def load(refresh=False, log=lambda msg: None):
                 f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(cached['fetched_at']))}")
             return cached
         raise
-    env = {"fetched_at": time.time(), "source": source, "models": models}
+    env = {"schema": 2, "fetched_at": time.time(), "source": source, "models": models}
     CACHE.parent.mkdir(parents=True, exist_ok=True)
     CACHE.write_text(json.dumps(env, indent=1))
     return env
