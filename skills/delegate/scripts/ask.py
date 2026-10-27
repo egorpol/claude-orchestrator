@@ -246,12 +246,13 @@ def _normalize_pick_prefix(line):
 
 
 def extract_pick(answer):
-    """First Pick: value in answer, or None. Tolerates markdown wrappers around Pick."""
+    """First Pick: value in answer, or None. Tolerates markdown wrappers around Pick,
+    and a Pick glued to a preamble sentence (Cursor's result joins its messages)."""
     if not answer:
         return None
     for line in answer.splitlines():
         s = _normalize_pick_prefix(line)
-        m = re.match(r"(?i)^pick\s*:(.*)$", s)
+        m = re.match(r"(?i)^pick\s*:(.*)$", s) or re.search(r"[.!?]\s*Pick\s*:(.*)$", s)
         if m:
             return m.group(1).strip()
     return None

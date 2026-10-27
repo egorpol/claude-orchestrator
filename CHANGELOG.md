@@ -33,6 +33,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Fixed
 
+- `delegate ask --agent both` finds a Cursor `Pick:` glued to the end of its preamble sentence (`…already decided.**Pick: A**`). Cursor's result joins its messages without a newline, so on 2026-10-27 both Cursor picks printed as "(no Pick line found)".
 - The Artificial Analysis page scrape reads Terminal-Bench 4.0 and SciCode from the page's nested `scores` dict. AA had moved them there, so `route` showed no coding score for any of the 161 models and the coding weight (0.45–0.55 for review, refactor and implement) counted for nothing. A page with neither score now fails the refresh, which keeps the cache with a warning, instead of passing silently.
 - `delegate ask --agent codex` (and `rate --agent codex`) passes `--skip-git-repo-check`, so `--dir` may name a folder outside a trusted git repo; the sandbox stays read-only.
 - `delegate launch` removes the half-created worktree, branch and run folder when setting up the `--link`s fails for any reason, such as a `PermissionError`; before, only a rejected `--link` was rolled back, and other errors left a worktree with no `meta.json` for `cleanup` to find.
