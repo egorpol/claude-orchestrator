@@ -298,13 +298,13 @@ def redact(text):
     return re.sub("|".join(REDACT), "[redacted]", text, flags=re.I)
 
 
-def session_commits(cwd, first, last):
+def session_commits(cwd, first, last, *, slack_minutes=10):
     if not cwd or first is None or last is None:
         return "(unavailable)"
     try:
         result = subprocess.run(
             ["git", "-C", str(cwd), "log", "--all", "--since=" + first.isoformat(),
-             "--until=" + (last + timedelta(minutes=10)).isoformat(), "--max-count=50",
+             "--until=" + (last + timedelta(minutes=slack_minutes)).isoformat(), "--max-count=50",
              "--format=%h %s", "--shortstat"],
             capture_output=True, text=True, timeout=30, check=False,
         )
