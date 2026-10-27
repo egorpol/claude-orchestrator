@@ -147,6 +147,7 @@ def run_codex(prompt, model, effort, directory, timeout):
         "-m", model,
         "-c", f'model_reasoning_effort="{effort}"',
         "-s", "read-only",
+        "--skip-git-repo-check",
         "-C", str(directory),
         "--json",
         "-o", str(out_path),

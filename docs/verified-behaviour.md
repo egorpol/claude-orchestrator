@@ -2,6 +2,12 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-10-27
+
+- **Artificial Analysis page layout.** Per-benchmark scores now sit in a nested `scores` dict (`terminalbench-4-0`, `scicode`, a new `frontiercode`); the flat `terminalBench40` key is gone. The page also carries `intelligenceIndexCostPerTask` (cost of one index task, verbosity included) for 109 of 161 models. `gpt-5-6-terra` is no longer listed.
+- **`codex exec` needs `--skip-git-repo-check` outside a trusted git repo, even with `-s read-only`.** Two `delegate ask --agent codex --dir <scratch folder>` runs exited 1 with "Not inside a trusted directory"; with the flag both answered. One answer cited line numbers of `catalog.json` in this checkout, so Codex's read-only sandbox reads outside `-C` too (as Cursor's ask mode does, below).
+- **Model lists.** `cursor-agent models` lists 270 ids, including DeepSeek V4.1 Flash 1017 (`deepseek-v41-flash-1017-{none,low,medium,high,max}`), Kimi K3, GLM 5.2, Gemini 4 Argon and GPT-5.6 Sol; Codex's `models_cache.json` lists OpenAI models only. Which Cursor pool DeepSeek bills is not verified.
+
 ## 2026-10-26
 
 - **SessionStart `additionalContext` preview.** With Claude Code persisting a large SessionStart `additionalContext` to a file and showing the model only a ~2 KB preview of whole lines, a 12,607-byte injection ended the preview at character 1,867 of 12,605. Before commit `c61e134`, 7,925 bytes stayed inline. Across 68 sessions since 2026-10-20, 65 opened the file (one extra call each) and 3 never did, so those three never saw past the hygiene rules when hygiene was first.
