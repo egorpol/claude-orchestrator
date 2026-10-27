@@ -441,16 +441,19 @@ def parse_reply(text, prompt_count, report_starts=()):
     return items
 
 
+# Codex reads outside its -C folder and logs reads only as shell strings, so no guard can keep it blind.
+CODEX_REFUSED = "--agent codex is refused: its reads can't be confined; rate with Cursor (the default)"
+
+
 def rate_packet(packet, prompt_count, agent="cursor", model=None, timeout=600, report_starts=()):
-    model = model or ("auto" if agent == "cursor" else "gpt-6.1-sol")
+    if agent != "cursor":
+        raise ValueError(CODEX_REFUSED)
+    model = model or "auto"
     prompt = RUBRIC_TEXT + "\n\n" + packet
     for attempt in range(2):
         # A fresh workspace on each attempt, with no repo, logs, or mode-bearing files.
         with tempfile.TemporaryDirectory(prefix="item-rating-") as directory:
-            if agent == "cursor":
-                answer, _, _, _ = ask.run_cursor(prompt, model, Path(directory), timeout)
-            else:
-                answer, _, _, _ = ask.run_codex(prompt, model, "medium", Path(directory), timeout)
+            answer, _, _, _ = ask.run_cursor(prompt, model, Path(directory), timeout, confine=True)
         try:
             return parse_reply(answer, prompt_count, report_starts)
         except ValueError as exc:
@@ -583,6 +586,8 @@ def attach_items(result, rows, weights, prices):
 
 
 def cmd_rate(args):
+    if args.agent == "codex":
+        sys.exit(f"rate: {CODEX_REFUSED}")
     if args.print_packet and not args.dry_run:
         sys.exit("rate: --print-packet requires --dry-run")
     if not math.isfinite(args.min_age) or args.min_age < 0:
@@ -596,7 +601,7 @@ def cmd_rate(args):
     except (OSError, ValueError) as exc:
         print(f"rate: {exc}", file=sys.stderr)
         sys.exit(2)
-    model = args.model or ("auto" if args.agent == "cursor" else "gpt-6.1-sol")
+    model = args.model or "auto"
     failed = False
     for record in selected:
         session = record["session"]
@@ -629,7 +634,7 @@ def _add_args(parser):
     parser.add_argument("--since", metavar="DATE", help="earliest assignment date (local date or ISO timestamp)")
     parser.add_argument("--force", action="store_true", help="re-rate even with a current rating")
     parser.add_argument("--agent", choices=("cursor", "codex"), default="cursor")
-    parser.add_argument("--model", help="default cursor auto; codex gpt-6.1-sol")
+    parser.add_argument("--model", help="Cursor model (default auto)")
     parser.add_argument("--timeout", type=float, default=600, metavar="S")
     parser.add_argument("--dry-run", action="store_true", help="select and build packets; no calls or writes")
     parser.add_argument("--print-packet", action="store_true", help="print packets with --dry-run")

@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import re
+import selectors
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,6 +29,13 @@ class AskFailed(Exception):
     def __init__(self, message, code):
         super().__init__(message)
         self.code = code or 1
+
+
+class OutsideRead(AskFailed):
+    """A confined Cursor call attempted an unobservable or out-of-workspace tool."""
+
+    def __init__(self, message):
+        super().__init__(message, 4)
 
 
 def clean_env():
@@ -77,7 +86,9 @@ def _usage_bits(usage):
     return " ".join(parts)
 
 
-def run_cursor(prompt, model, directory, timeout):
+def run_cursor(prompt, model, directory, timeout, confine=False):
+    if confine:
+        return _run_cursor_confined(prompt, model, directory, timeout)
     cmd = [
         "cursor-agent", "-p",
         "--model", model,
@@ -100,6 +111,170 @@ def run_cursor(prompt, model, directory, timeout):
     if r.returncode != 0:
         raise AskFailed(_tail(r.stderr) or f"cursor-agent exited {r.returncode}", r.returncode)
     answer, usage = _parse_cursor(r.stdout)
+    return answer, usage, elapsed, model
+
+
+def _inside_cursor_workspace(path, workspace, kind):
+    if not isinstance(path, str) or not path or "\0" in path:
+        raise OutsideRead(f"cursor-agent: {kind} missing or invalid path")
+    if path.startswith("~"):
+        raise OutsideRead(f"cursor-agent: {kind} outside workspace: {path}")
+    try:
+        resolved = os.path.realpath(os.path.join(workspace, path))
+    except (OSError, ValueError):
+        raise OutsideRead(f"cursor-agent: {kind} invalid path")
+    if resolved != workspace and not resolved.startswith(workspace + os.sep):
+        raise OutsideRead(f"cursor-agent: {kind} outside workspace: {path}")
+    return resolved
+
+
+def _check_cursor_glob(tool, workspace, subtype):
+    kind = "globToolCall"
+    args = tool["args"]
+    searched = workspace
+    if "targetDirectory" in args:
+        searched = _inside_cursor_workspace(args["targetDirectory"], workspace, kind)
+    pattern = args.get("globPattern")
+    if not isinstance(pattern, str) or "\0" in pattern:
+        raise OutsideRead(f"cursor-agent: {kind} missing or invalid globPattern")
+    if os.path.isabs(pattern) or pattern.startswith("~") or ".." in pattern.split(os.sep):
+        raise OutsideRead(f"cursor-agent: {kind} unsafe globPattern: {pattern}")
+    if subtype != "completed":
+        return
+    result = tool.get("result")
+    if not isinstance(result, dict) or "error" in result or not isinstance(result.get("success"), dict):
+        raise OutsideRead(f"cursor-agent: {kind} missing or invalid success result")
+    success = result["success"]
+    files = success.get("files")
+    if not isinstance(files, list):
+        raise OutsideRead(f"cursor-agent: {kind} missing or invalid files list")
+    for path in files:
+        _inside_cursor_workspace(path, searched, kind)
+    path = success.get("path", "")
+    if path != "":
+        _inside_cursor_workspace(path, workspace, kind)
+
+
+def _cursor_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate stream JSON key")
+        obj[key] = value
+    return obj
+
+
+def _cursor_constant(value):
+    raise ValueError("non-JSON stream constant")
+
+
+def _check_cursor_event(line, workspace):
+    try:
+        event = json.loads(line, object_pairs_hook=_cursor_object, parse_constant=_cursor_constant)
+    except (ValueError, UnicodeError, RecursionError):
+        raise OutsideRead("cursor-agent: invalid stream JSON")
+    if not isinstance(event, dict) or event.get("type") not in (
+            "system", "user", "assistant", "thinking", "tool_call", "result"):
+        raise OutsideRead("cursor-agent: unknown stream event type")
+    if event["type"] != "tool_call":
+        return event
+    call = event.get("tool_call")
+    if not isinstance(call, dict):
+        raise OutsideRead("cursor-agent: missing or invalid tool_call")
+    kinds = [k for k in call if k.endswith("ToolCall")]
+    if len(kinds) != 1:
+        names = ", ".join(kinds) or "none"
+        raise OutsideRead(f"cursor-agent: expected one ToolCall kind, got {names}")
+    kind = kinds[0]
+    if event.get("subtype") not in ("started", "completed"):
+        raise OutsideRead(f"cursor-agent: {kind} unknown tool event subtype")
+    if kind not in ("readToolCall", "grepToolCall", "globToolCall", "getMcpToolsToolCall"):
+        raise OutsideRead(f"cursor-agent: {kind} forbidden tool")
+    tool = call[kind]
+    if not isinstance(tool, dict) or not isinstance(tool.get("args"), dict):
+        raise OutsideRead(f"cursor-agent: {kind} missing or invalid args")
+    args = tool["args"]
+    if kind in ("readToolCall", "grepToolCall"):
+        _inside_cursor_workspace(args.get("path"), workspace, kind)
+    elif kind == "globToolCall":
+        _check_cursor_glob(tool, workspace, event["subtype"])
+    return event
+
+
+def _cursor_stream(stdout, workspace, deadline):
+    pending, result = b"", None
+    with selectors.DefaultSelector() as selector:
+        selector.register(stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise subprocess.TimeoutExpired("cursor-agent", 0)
+            chunk = os.read(stdout.fileno(), 65536)
+            pending += chunk
+            lines = pending.split(b"\n")
+            pending = lines.pop() if chunk else b""
+            for line in lines:
+                if line.strip():
+                    event = _check_cursor_event(line, workspace)
+                    if event["type"] == "result":
+                        result = event
+            if not chunk:
+                return result
+
+
+def _stop_cursor(process):
+    pgid = process.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.wait()
+
+
+def _run_cursor_confined(prompt, model, directory, timeout):
+    cmd = [
+        "cursor-agent", "-p",
+        "--model", model,
+        "--mode", "ask",
+        "--trust",
+        "--workspace", str(directory),
+        "--output-format", "stream-json",
+        prompt,
+    ]
+    workspace = os.path.realpath(directory)
+    t0 = time.monotonic()
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr:
+        with subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=stderr, env=clean_env(), cwd=str(directory),
+                              start_new_session=True) as process:
+            try:
+                result = _cursor_stream(process.stdout, workspace, t0 + timeout)
+                process.wait(timeout=max(0, timeout - (time.monotonic() - t0)))
+            except subprocess.TimeoutExpired:
+                _stop_cursor(process)
+                stderr.seek(0)
+                raise AskFailed(_tail(stderr.read()) or f"cursor-agent timed out after {timeout}s", 124)
+            finally:
+                _stop_cursor(process)
+            elapsed = time.monotonic() - t0
+            if process.returncode != 0:
+                stderr.seek(0)
+                raise AskFailed(_tail(stderr.read()) or f"cursor-agent exited {process.returncode}",
+                                process.returncode)
+    if result is None:
+        raise AskFailed("cursor-agent: missing result event", 1)
+    if result.get("is_error"):
+        raise AskFailed("cursor-agent: result reported an error", 1)
+    answer, usage = _parse_cursor(json.dumps(result))
     return answer, usage, elapsed, model
 
 
