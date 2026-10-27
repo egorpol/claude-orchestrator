@@ -19,6 +19,21 @@ HANDOFF_WRITE = re.compile(
 WRITERS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 MODES = ("orchestrator", "claude-only", "vanilla")
 PRIORITY = {"denied": 0, "idle": 1, "error": 2}
+CONTEXT_CAP, HARNESS_CAP, ERRORS_CAP, CWD_CAP = 3000, 4000, 8000, 2500
+ERROR_LINE = re.compile(
+    r"^(?:Traceback \(most recent call last\):|(?:[\w./-]+: )?(?:error|fatal|ERROR|FATAL|Error)"
+    r"(?:\[[\w-]+\])?:\s|.*\bcommand not found\b|.*No such file or directory|"
+    r"(?:rc|exit|exit_code|status)[=:] ?[1-9]\d*\s*$|\w+(?:Error|Exception): )")
+EXIT_STATUS = re.compile(r"^(?:rc|exit|exit_code|status)[=:] ?[1-9]\d*\s*$")
+EXCEPTION_LINE = re.compile(r"\w+(?:Error|Exception): ")
+SYSTEM_REMINDER = re.compile(r"<system-reminder>(.*?)</system-reminder>", re.S)
+CWD_RESET = re.compile(r"Shell cwd was reset to (.+)$", re.M)
+ATTACHMENT_NOISE = {
+    "total_tokens_reminder", "deferred_tools_record", "deferred_tools_delta", "prompt_snapshot",
+    "skill_listing", "instructions", "environment", "model", "date", "session_context",
+    "credential_org", "remote_session_change", "auto_mode", "mcp_instructions_delta",
+    "agent_listing_delta", "command_permissions", "queued_command",
+}
 
 
 def _blocks(row):
@@ -204,6 +219,484 @@ def _minutes(row, first):
     return f"{(ts - first).total_seconds() / 60:.1f}" if ts and first else "?"
 
 
+def _k(n):
+    return f"{n / 1000:.0f}k"
+
+
+def _one_line(text, limit):
+    text = " | ".join(line.strip() for line in _clean(text).splitlines())
+    return re.sub(r"[ \t]+", " ", text).strip()[:limit]
+
+
+def _collapse(text, limit):
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def _prompt_at(prompts, row_index):
+    found = None
+    for i, (idx, _) in enumerate(prompts):
+        if idx <= row_index:
+            found = i
+        else:
+            break
+    return f"P{found}" if found is not None else "P-"
+
+
+def _show_path(path, start):
+    if not path:
+        return "-"
+    if start and path == start:
+        return "."
+    if start:
+        try:
+            return str(Path(path).resolve().relative_to(Path(start).resolve()))
+        except (ValueError, OSError):
+            pass
+    home = str(Path.home())
+    if path == home:
+        return "~"
+    if path.startswith(home + "/"):
+        return "~" + path[len(home):]
+    return path
+
+
+def _start_path(path):
+    if not path:
+        return "-"
+    home = str(Path.home())
+    if path == home:
+        return "~"
+    if path.startswith(home + "/"):
+        return "~" + path[len(home):]
+    return path
+
+
+def _fit_section(title, counts, items, limit, more_word):
+    head = f"## {title}\n" + "\n".join(counts)
+    for n in range(len(items), -1, -1):
+        body = [head, *items[:n]]
+        if n < len(items):
+            body.append(f"({len(items) - n} more {more_word}: see transcript.txt)")
+        text = "\n".join(body)
+        if len(text) <= limit:
+            return text
+    return head
+
+
+def _guard_system_uuids(rows):
+    return {row.get("uuid") for row in rows
+            if not row.get("isSidechain") and row.get("type") == "attachment"
+            and (row.get("attachment") or {}).get("type") == "hook_system_message"
+            and (row.get("attachment") or {}).get("hookEvent") == "UserPromptSubmit"
+            and row.get("uuid")}
+
+
+def _hook_decision(stdout):
+    try:
+        payload = json.loads(stdout or "")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    out = payload.get("hookSpecificOutput")
+    if not isinstance(out, dict):
+        return None, None
+    return out.get("permissionDecision"), out.get("permissionDecisionReason")
+
+
+def _tool_result_evidence(rows, prompts, first):
+    uses = _tool_uses_by_id(rows)
+    results, by_tool = [], Counter()
+    for row in rows:
+        if row.get("isSidechain") or row.get("type") not in ("user", "assistant"):
+            continue
+        for block in _blocks(row):
+            if block.get("type") != "tool_result":
+                continue
+            text = _text(block.get("content"))
+            use = uses.get(block.get("tool_use_id"))
+            name = use[1].get("name") if use else "?"
+            by_tool[name] += len(text)
+            results.append((len(text), row, use, block))
+    results.sort(key=lambda item: (-item[0],))
+    items = []
+    for length, row, use, _ in results[:8]:
+        if use is None:
+            continue
+        index = next((i for i, r in enumerate(rows) if r is row), 0)
+        use_row, use_block = use
+        use_index = next((i for i, r in enumerate(rows) if r is use_row), index)
+        items.append(f"+{_minutes(use_row, first)} min ({_prompt_at(prompts, use_index)}) "
+                     f"{use_block.get('name')} {_short(use_block.get('input'), 120)} "
+                     f"-> {length:,} chars")
+    top_tools = "; ".join(f"{name} {total:,}" for name, total in by_tool.most_common(8)) or "none"
+    return items, top_tools
+
+
+def _tool_uses_by_id(rows):
+    return {b["id"]: (row, b) for row in rows
+            if not row.get("isSidechain") and row.get("type") == "assistant"
+            for b in _blocks(row) if b.get("type") == "tool_use" and b.get("id")}
+
+
+def _last_tool_before(rows, index):
+    for row in reversed(rows[:index]):
+        if row.get("isSidechain") or row.get("type") != "assistant":
+            continue
+        for block in reversed(_blocks(row)):
+            if block.get("type") == "tool_use":
+                return block
+    return None
+
+
+def _ok_error_lines(text):
+    lines = [line for line in text.splitlines() if "Shell cwd was reset to" not in line]
+    matches = []
+    has_exc = any(EXCEPTION_LINE.search(line) for line in lines)
+    for i, line in enumerate(lines):
+        if not ERROR_LINE.search(line):
+            continue
+        if line.startswith("Traceback (most recent call last):") and has_exc:
+            continue
+        display = line.strip()
+        if EXIT_STATUS.match(display):
+            prev = next((lines[j].strip() for j in range(i - 1, -1, -1) if lines[j].strip()), None)
+            if prev:
+                display = f"{prev} | {display}"
+        matches.append(display[:200])
+        if len(matches) >= 3:
+            break
+    return matches
+
+
+def _context_calls(rows):
+    seen, calls = set(), []
+    for index, row in enumerate(rows):
+        if row.get("isSidechain") or row.get("type") != "assistant":
+            continue
+        message = row.get("message") or {}
+        if message.get("model") == "<synthetic>":
+            continue
+        mid = message.get("id") or row.get("requestId")
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        usage = message.get("usage") or {}
+        ctx = sum(int(usage.get(key) or 0) for key in (
+            "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        if ctx:
+            calls.append({"index": index, "row": row, "ctx": ctx})
+    return calls
+
+
+def _crossing_thresholds(max_ctx):
+    thresholds = [100_000, 120_000, 150_000, 200_000, 250_000, 300_000]
+    t = 400_000
+    while t <= max_ctx:
+        thresholds.append(t)
+        t += 100_000
+    return thresholds
+
+
+def _section_context(rows, prompts, first, summary_only=False):
+    calls = _context_calls(rows)
+    items, top_tools = _tool_result_evidence(rows, prompts, first)
+    intro = ("(Main-thread calls before the cut; context = input + cache read + cache write "
+             "tokens.)")
+    if calls:
+        start, last = calls[0], calls[-1]
+        peak = max(calls, key=lambda c: (c["ctx"], -c["index"]))
+        at_prompt = []
+        for i, (idx, _) in enumerate(prompts):
+            after = next((c for c in calls if c["index"] > idx), None)
+            at_prompt.append(f"P{i} {_k(after['ctx']) if after else '-'}")
+        crossings = []
+        for threshold in _crossing_thresholds(peak["ctx"]):
+            hit = next((c for c in calls if c["ctx"] >= threshold), None)
+            if hit:
+                crossings.append(f"{threshold // 1000}k at +{_minutes(hit['row'], first)} min "
+                                 f"({_prompt_at(prompts, hit['index'])})")
+        drops = []
+        for prev, cur in zip(calls, calls[1:]):
+            if cur["ctx"] < prev["ctx"] * 0.7:
+                drops.append(f"{_k(prev['ctx'])} -> {_k(cur['ctx'])} at "
+                             f"+{_minutes(cur['row'], first)} min "
+                             f"({_prompt_at(prompts, cur['index'])})")
+        calls_line = (f"Calls: {len(calls)}; start {_k(start['ctx'])}; max {_k(peak['ctx'])} at "
+                      f"+{_minutes(peak['row'], first)} min ({_prompt_at(prompts, peak['index'])}); "
+                      f"last {_k(last['ctx'])}.")
+    else:
+        at_prompt = [f"P{i} -" for i in range(len(prompts))]
+        crossings, drops = [], []
+        calls_line = "Calls: 0; start -; max -; last -."
+    list_full = [at_prompt, crossings, drops]
+    list_meta = [
+        ("At each typed prompt: ", "(none)"),
+        ("Crossings: ", "none"),
+        ("Drops over 30%: ", "none"),
+    ]
+    # Full lists first (byte-identical for real sessions); shrink only when over the cap.
+    kept = [list(parts) for parts in list_full]
+    tail = "Tool result chars by tool: " + top_tools
+
+    def count_lines(kept_parts):
+        lines = [intro, calls_line]
+        for (label, empty), parts, full in zip(list_meta, kept_parts, list_full):
+            if parts == full:
+                lines.append(label + (", ".join(parts) if parts else empty))
+            elif not full:
+                lines.append(label + empty)
+            elif not parts:
+                lines.append(label + f"({len(full)} more)")
+            else:
+                lines.append(label + ", ".join(parts) + f", ({len(full) - len(parts)} more)")
+        lines.append("Largest tool results:")
+        return lines
+
+    def render(kept_parts, with_items):
+        counts = count_lines(kept_parts)
+        if summary_only or not with_items:
+            return _fit_section("Context", counts + [tail], [], CONTEXT_CAP, "tool results")
+        body = _fit_section("Context", counts, items, CONTEXT_CAP - len(tail) - 1, "tool results")
+        return body + "\n" + tail
+
+    def head_len(kept_parts):
+        return len("## Context\n" + "\n".join(count_lines(kept_parts) + [tail]))
+
+    # Binary-search each variable list so the count block fits; real sessions stay full.
+    if head_len(kept) > CONTEXT_CAP:
+        for i, full in enumerate(list_full):
+            if not full or head_len(kept) <= CONTEXT_CAP:
+                continue
+            lo, hi, best = 0, len(full), 0
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                trial = [list(parts) for parts in kept]
+                trial[i] = full[:mid]
+                if head_len(trial) <= CONTEXT_CAP:
+                    best, lo = mid, mid + 1
+                else:
+                    hi = mid - 1
+            kept[i] = full[:best]
+    text = render(kept, with_items=not summary_only)
+    if len(text) > CONTEXT_CAP:
+        text = render([[], [], []], with_items=False)
+    return text if len(text) <= CONTEXT_CAP else rate._truncate(text, CONTEXT_CAP)
+
+
+def _section_harness(rows, prompts, first, summary_only=False):
+    system_uuids, items = _guard_system_uuids(rows), []
+    guards = silent = decisions = edited = ide = reminders = 0
+    edited_names, ide_names, other = [], [], Counter()
+    for index, row in enumerate(rows):
+        if row.get("isSidechain"):
+            continue
+        if row.get("type") == "attachment":
+            att = row.get("attachment") or {}
+            kind, hook = att.get("type"), att.get("hookName") or ""
+            if kind in ATTACHMENT_NOISE or (isinstance(hook, str) and hook.startswith("SessionStart")):
+                continue
+            if isinstance(att.get("hookEvent"), str) and att["hookEvent"].startswith("SessionStart"):
+                continue
+            stamp = f"+{_minutes(row, first)} min ({_prompt_at(prompts, index)})"
+            if kind == "hook_system_message" and att.get("hookEvent") == "UserPromptSubmit":
+                guards += 1
+                items.append(f"guard {stamp}: {_collapse(str(att.get('content') or ''), 200)}")
+            elif kind == "hook_additional_context" and att.get("hookEvent") == "UserPromptSubmit":
+                if row.get("parentUuid") in system_uuids:
+                    continue
+                guards += 1
+                content = att.get("content")
+                text = " ".join(content) if isinstance(content, list) else str(content or "")
+                items.append(f"guard {stamp}: {_collapse(text, 200)}")
+            elif kind == "silent_turn_reminder":
+                silent += 1
+                prev = _last_tool_before(rows, index)
+                if prev:
+                    items.append(f"silent-turn reminder {stamp} after {prev.get('name')} "
+                                 f"{_short(prev.get('input'), 100)}")
+                else:
+                    items.append(f"silent-turn reminder {stamp}")
+            elif kind == "hook_success":
+                decision, reason = _hook_decision(att.get("stdout"))
+                if decision in ("ask", "deny"):
+                    decisions += 1
+                    items.append(f"hook {decision} {stamp} {hook}: {_collapse(str(reason or ''), 200)}")
+            elif kind == "hook_system_message":
+                items.append(f"hook message {stamp} {hook}: "
+                             f"{_collapse(str(att.get('content') or ''), 200)}")
+            elif kind == "edited_text_file":
+                edited += 1
+                name = Path(str(att.get("filename") or "")).name
+                if name and name not in edited_names and len(edited_names) < 5:
+                    edited_names.append(name)
+            elif kind == "hook_additional_context" and att.get("hookEvent") == "PostToolUse":
+                content = att.get("content")
+                text = " ".join(content) if isinstance(content, list) else str(content or "")
+                if "<ide_diagnostics>" in text:
+                    ide += 1
+                    for path in re.findall(r'"filePath"\s*:\s*"([^"]+)"', text):
+                        name = Path(path).name
+                        if name and name not in ide_names and len(ide_names) < 5:
+                            ide_names.append(name)
+            elif kind not in ("hook_success", "hook_additional_context"):
+                other[kind or "?"] += 1
+            continue
+        if row.get("type") not in ("user", "assistant"):
+            continue
+        for block in _blocks(row):
+            if block.get("type") != "tool_result":
+                continue
+            raw = _text(block.get("content"))
+            for rem in SYSTEM_REMINDER.findall(raw):
+                reminders += 1
+                use = _tool_uses_by_id(rows).get(block.get("tool_use_id"))
+                name = use[1].get("name") if use else "?"
+                items.append(f"tool reminder +{_minutes(row, first)} min "
+                             f"({_prompt_at(prompts, index)}) {name}: {_collapse(rem, 200)}")
+    edited_s = f"File-changed notices: {edited}" + (f" ({', '.join(edited_names)})" if edited_names else "")
+    ide_s = f"IDE diagnostics after edits: {ide}" + (f" ({', '.join(ide_names)})" if ide_names else "")
+    other_s = ("Other attachments: " + ", ".join(f"{k} {n}" for k, n in sorted(other.items()))
+               if other else "Other attachments: none")
+    counts = [f"Context-guard messages: {guards}", f"Silent-turn reminders: {silent}",
+              f"Hook ask/deny decisions: {decisions}", edited_s, ide_s,
+              f"Reminders inside tool results: {reminders}", other_s]
+    if summary_only:
+        return _fit_section("Harness notes", counts, [], HARNESS_CAP, "harness notes")
+    # Other attachments stays last; item lines sit before it.
+    head, tail = counts[:-1], counts[-1]
+    body = _fit_section("Harness notes", head, items, HARNESS_CAP - len(tail) - 1, "harness notes")
+    return body + "\n" + tail
+
+
+def _section_errors(rows, prompts, first, summary_only=False):
+    uses = _tool_uses_by_id(rows)
+    items, err_n, denied_n, ok_n = [], 0, 0, 0
+    for index, row in enumerate(rows):
+        if row.get("isSidechain") or row.get("type") != "user":
+            continue
+        for block in _blocks(row):
+            if block.get("type") != "tool_result":
+                continue
+            use = uses.get(block.get("tool_use_id"))
+            name = use[1].get("name") if use else "?"
+            args = _short((use[1].get("input") if use else None) or {}, 160)
+            use_row = use[0] if use else row
+            use_index = next((i for i, r in enumerate(rows) if r is use_row), index)
+            stamp = f"+{_minutes(use_row, first)} min ({_prompt_at(prompts, use_index)})"
+            if block.get("is_error"):
+                err_n += 1
+                kind = "denied" if _denied(block) else "error"
+                denied_n += kind == "denied"
+                text = _one_line(_text(block.get("content")), 300)
+                key = (name, kind, text)
+                if items and items[-1]["key"] == key:
+                    items[-1]["n"] += 1
+                else:
+                    items.append({"key": key, "n": 1, "stamp": stamp, "name": name,
+                                  "args": args, "kind": kind, "text": text})
+            elif name == "Bash":
+                lines = _ok_error_lines(_text(block.get("content")))
+                if lines:
+                    ok_n += 1
+                    text = " | ".join(lines)
+                    key = (name, "ok", text)
+                    if items and items[-1]["key"] == key:
+                        items[-1]["n"] += 1
+                    else:
+                        items.append({"key": key, "n": 1, "stamp": stamp, "name": name,
+                                      "args": args, "kind": "ok", "text": text})
+    rendered = []
+    for item in items:
+        if item["kind"] == "ok":
+            line = (f"{item['stamp']} {item['name']} {item['args']} "
+                    f"-> ok with error lines: {item['text']}")
+        else:
+            line = (f"{item['stamp']} {item['name']} {item['args']} "
+                    f"-> {item['kind']}: {item['text']}")
+        if item["n"] > 1:
+            line += f" (x{item['n']})"
+        rendered.append(line)
+    counts = [f"Error results: {err_n} (denied {denied_n})", f"Error lines in ok results: {ok_n}"]
+    if summary_only:
+        return _fit_section("Errors", counts, [], ERRORS_CAP, "errors")
+    return _fit_section("Errors", counts, rendered, ERRORS_CAP, "errors")
+
+
+def _section_cwd(rows, prompts, first, summary_only=False):
+    main_rows = [(i, r) for i, r in enumerate(rows)
+                 if r.get("type") in ("user", "assistant") and not r.get("isSidechain")
+                 and not r.get("isMeta")]
+    start = next((r.get("cwd") for _, r in main_rows if r.get("cwd")), None)
+    moves, prev = [], None
+    for index, row in main_rows:
+        cwd = row.get("cwd")
+        if not cwd:
+            continue
+        if prev is not None and cwd != prev:
+            bash = None
+            for _, earlier in reversed(main_rows[:main_rows.index((index, row)) + 1]):
+                if earlier.get("type") != "assistant":
+                    continue
+                for block in reversed(_blocks(earlier)):
+                    if block.get("type") == "tool_use" and block.get("name") == "Bash":
+                        bash = block
+                        break
+                if bash:
+                    break
+            after = f" after Bash {_short(bash.get('input'), 160)}" if bash else ""
+            moves.append(f"+{_minutes(row, first)} min ({_prompt_at(prompts, index)}) "
+                         f"{_show_path(prev, start)} -> {_show_path(cwd, start)}{after}")
+        prev = cwd
+    uses = _tool_uses_by_id(rows)
+    resets = []
+    for index, row in enumerate(rows):
+        if row.get("isSidechain") or row.get("type") != "user":
+            continue
+        for block in _blocks(row):
+            if block.get("type") != "tool_result":
+                continue
+            text = _text(block.get("content"))
+            match = CWD_RESET.search(text)
+            if not match:
+                continue
+            use = uses.get(block.get("tool_use_id"))
+            args = _short((use[1].get("input") if use else None) or {}, 160)
+            use_row = use[0] if use else row
+            use_index = next((i for i, r in enumerate(rows) if r is use_row), index)
+            resets.append(f"+{_minutes(use_row, first)} min ({_prompt_at(prompts, use_index)}) "
+                          f"Bash {args} -> reset to {_start_path(match.group(1).strip())}")
+    move_items = moves[:10] + ([f"({len(moves) - 10} more)"] if len(moves) > 10 else [])
+    reset_items = resets[:10] + ([f"({len(resets) - 10} more)"] if len(resets) > 10 else [])
+    counts = [f"Start cwd: {_start_path(start)}", f"cwd moves: {len(moves)}"]
+    if summary_only:
+        counts += [f"Shell cwd resets: {len(resets)}"]
+        return _fit_section("Shell cwd", counts, [], CWD_CAP, "cwd events")
+    # Interleave: moves under their count, then resets count + items, under one cap.
+    head = f"## Shell cwd\nStart cwd: {_start_path(start)}\ncwd moves: {len(moves)}"
+    mid = "\n".join([head, *move_items, f"Shell cwd resets: {len(resets)}"])
+    items = reset_items
+    # Prefer keeping move lines; fit reset items into remaining budget.
+    for n in range(len(items), -1, -1):
+        body = [mid, *items[:n]]
+        if n < len(items):
+            body.append(f"({len(items) - n} more cwd events: see transcript.txt)")
+        text = "\n".join(body)
+        if len(text) <= CWD_CAP:
+            return text
+    # If moves alone overflow, trim move items next.
+    base = f"## Shell cwd\nStart cwd: {_start_path(start)}\ncwd moves: {len(moves)}"
+    for n in range(len(move_items), -1, -1):
+        body = [base, *move_items[:n], f"Shell cwd resets: {len(resets)}"]
+        if n < len(move_items):
+            body.append(f"({len(move_items) - n} more cwd events: see transcript.txt)")
+        text = "\n".join(body)
+        if len(text) <= CWD_CAP:
+            return text
+    return (f"## Shell cwd\nStart cwd: {_start_path(start)}\ncwd moves: {len(moves)}\n"
+            f"Shell cwd resets: {len(resets)}")
+
+
 def _results(rows):
     return {b["tool_use_id"]: (row, b) for row in rows for b in _blocks(row)
             if b.get("type") == "tool_result" and b.get("tool_use_id")}
@@ -283,6 +776,7 @@ def _row_text(row, prompt, tool_limit=300):
 
 def compressed_transcript(rows, prompts, first):
     results = _results(_main(rows))
+    system_uuids = _guard_system_uuids(rows)
     lines = []
     for i, row in enumerate(rows):
         if row.get("isSidechain") or row.get("isMeta"):
@@ -290,6 +784,29 @@ def compressed_transcript(rows, prompts, first):
         minutes = _minutes(row, first)
         if i in prompts:
             lines.append(f"USER [+{minutes}]: {rate._truncate(prompts[i]['text'], 2000)}")
+        if row.get("type") == "attachment":
+            att = row.get("attachment") or {}
+            kind, hook = att.get("type"), att.get("hookName") or ""
+            if isinstance(hook, str) and hook.startswith("SessionStart"):
+                continue
+            if isinstance(att.get("hookEvent"), str) and att["hookEvent"].startswith("SessionStart"):
+                continue
+            if kind == "hook_system_message" and att.get("hookEvent") == "UserPromptSubmit":
+                lines.append(f"HARNESS [+{minutes}] guard: "
+                             f"{_collapse(str(att.get('content') or ''), 160)}")
+            elif (kind == "hook_additional_context" and att.get("hookEvent") == "UserPromptSubmit"
+                  and row.get("parentUuid") not in system_uuids):
+                content = att.get("content")
+                text = " ".join(content) if isinstance(content, list) else str(content or "")
+                lines.append(f"HARNESS [+{minutes}] guard: {_collapse(text, 160)}")
+            elif kind == "silent_turn_reminder":
+                lines.append(f"HARNESS [+{minutes}] silent-turn reminder")
+            elif kind == "hook_success":
+                decision, reason = _hook_decision(att.get("stdout"))
+                if decision == "ask":
+                    lines.append(f"HARNESS [+{minutes}] hook ask {hook}: "
+                                 f"{_collapse(str(reason or ''), 160)}")
+            continue
         if row.get("type") != "assistant":
             continue
         for block in _blocks(row):
@@ -302,6 +819,10 @@ def compressed_transcript(rows, prompts, first):
                 text = _text(result[1].get("content")) if result else ""
                 status = "error" if result and result[1].get("is_error") else "ok"
                 suffix = " (no result)" if result is None else ""
+                if status == "error" and result is not None:
+                    suffix += ": " + _one_line(text, 160)
+                if result is not None and "Shell cwd was reset to" in text:
+                    suffix += "; cwd reset"
                 if block.get("name") == "AskUserQuestion":
                     _, chosen = _picker(block, result)
                     if chosen:
@@ -383,20 +904,31 @@ def _digest(record, prompts, usage, all_denied, cut, end_handoff):
                 else "(unchanged from the start copy)" if end == handoff else end),
             "## Commits in the session window\n" + commits]
     omitted = 0
+    shrink_new = False
 
     def parts():
         friction = "\n\n".join(w["text"] for w in windows)
         if omitted:
             friction += f"\n({omitted} more friction events: see the transcript file)"
-        return [numbers, "## Prompts\n" + "\n\n".join(
-            label + "\n" + text for label, text in zip(labels, texts)),
-            "## Pickers\n" + ("\n\n".join(pickers) or "(none)"), *tail,
-            "## Friction excerpts\n" + (friction or "(none)")]
+        return [
+            numbers,
+            _section_context(rows, prompts, first, shrink_new),
+            "## Prompts\n" + "\n\n".join(label + "\n" + text for label, text in zip(labels, texts)),
+            "## Pickers\n" + ("\n\n".join(pickers) or "(none)"),
+            *tail,
+            _section_harness(rows, prompts, first, shrink_new),
+            _section_errors(rows, prompts, first, shrink_new),
+            _section_cwd(rows, prompts, first, shrink_new),
+            "## Friction excerpts\n" + (friction or "(none)"),
+        ]
 
     def render():
         return "\n\n".join(parts()) + "\n"
 
     digest = render()
+    if len(digest) > rate.PACKET_LIMIT:
+        shrink_new = True
+        digest = render()
     while len(digest) > rate.PACKET_LIMIT and windows:
         drop = max(range(len(windows)), key=lambda i: (
             min(PRIORITY[e["kind"]] for e in windows[i]["events"]), windows[i]["hi"]))
@@ -407,14 +939,14 @@ def _digest(record, prompts, usage, all_denied, cut, end_handoff):
         texts[i] = rate._truncate(texts[i], max(0, len(texts[i]) - len(digest) + rate.PACKET_LIMIT))
         digest = render()
     if len(digest) > rate.PACKET_LIMIT:
-        # Reserve Numbers and Pickers even when prompt labels alone exceed the cap.
+        # Reserve Numbers, Context and Pickers; Prompts truncated next; the rest as one blob.
         sections = parts()
-        budget = rate.PACKET_LIMIT - len(sections[0]) - 5
-        sections[2] = rate._truncate(sections[2], max(0, budget - 100))
-        budget -= len(sections[2])
-        sections[1] = rate._truncate(sections[1], min(len(sections[1]), max(0, budget // 2)))
-        rest = rate._truncate("\n\n".join(sections[3:]), max(0, budget - len(sections[1]) - 4))
-        digest = "\n\n".join(sections[:3] + [rest]) + "\n"
+        budget = rate.PACKET_LIMIT - len(sections[0]) - len(sections[1]) - 5
+        sections[3] = rate._truncate(sections[3], max(0, budget - 100))
+        budget -= len(sections[3])
+        sections[2] = rate._truncate(sections[2], min(len(sections[2]), max(0, budget // 2)))
+        rest = rate._truncate("\n\n".join(sections[4:]), max(0, budget - len(sections[2]) - 4))
+        digest = "\n\n".join(sections[:4] + [rest]) + "\n"
         digest = rate._truncate(digest, rate.PACKET_LIMIT)
     return digest, {kind: sum(e["kind"] == kind for e in events) for kind in PRIORITY}
 
