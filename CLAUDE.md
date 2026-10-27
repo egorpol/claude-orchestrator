@@ -25,7 +25,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
   - `cost-analysis.md`: the frozen 2026-10-09 baseline and the eight levers;
   - `field-results.md`: append-only per-session measurements, the public evidence for the README's numbers;
   - `verified-behaviour.md`: dated facts tested live;
-  - `auto-field-reports.md`: the decided design for automatic field reports (2026-10-26, not built);
+  - `auto-field-reports.md`: the design for automatic field reports (2026-10-26) and its two failed trials; shelved 2026-10-27;
   - `related-projects.md`: survey of similar tools.
 - `feedback/`: field reports from real use (Markdown plus `token_usage.jsonl` and `runs.jsonl`). **Gitignored since 0.1.0**, so it exists only in this checkout (Nextcloud syncs it). Read it before changing the workflow. `HANDOFF.md` is gitignored too.
 

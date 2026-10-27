@@ -86,7 +86,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 - `delegate review --working-tree [--base REF]`: review uncommitted work in the main tree, with the diff and untracked files as a patch.
 - `--preflight` warnings for brief paths outside the worktree and for a checker that prints failures but exits 0.
 - A hook that flags a `cd` away from the project root: 7 of 26 field reports from 2026-10-13 to 10-26 broke the written rule.
-- Automatic field reports: Cursor Auto writes lessons for a ranked sample of the sessions that get no `/field-report` (about 89%), checked first against sessions that have one. The design is in [docs/auto-field-reports.md](docs/auto-field-reports.md).
+- Automatic field reports, shelved 2026-10-27: Cursor Auto was to write lessons for the sessions that get no `/field-report` (about 89%), but two trials against sessions that have one recalled about 40% of the hand reports' lessons, under the 50% bar. The design and results are in [docs/auto-field-reports.md](docs/auto-field-reports.md).
 - The open ideas in the [survey](docs/related-projects.md): loop cost scoring, pre-launch approval policies, `.worktreeinclude`, control-session preregistration and blocked assignment, quota refresh at dispatch.
 
 ## Docs
@@ -94,7 +94,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 - [CHANGELOG.md](CHANGELOG.md): versions.
 - [docs/cost-analysis.md](docs/cost-analysis.md): the 2026-10-09 baseline and the eight cost levers.
 - [docs/field-results.md](docs/field-results.md): per-session measurements since then.
-- [docs/auto-field-reports.md](docs/auto-field-reports.md): design for automatic field reports (not built yet).
+- [docs/auto-field-reports.md](docs/auto-field-reports.md): design and trial results for automatic field reports (shelved).
 - [docs/verified-behaviour.md](docs/verified-behaviour.md): dated facts about Codex, Cursor and Claude Code, tested live; for example, `cursor-agent --force` silently disables the sandbox.
 - [docs/related-projects.md](docs/related-projects.md): similar tools, and what is worth borrowing from them.
 
