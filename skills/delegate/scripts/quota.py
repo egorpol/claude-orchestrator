@@ -95,13 +95,13 @@ def pools(envelope, now=None):
     return result
 
 
-def spawn_snapshot(reason, session=None, run=None, log=None, delegate=None):
+def spawn_snapshot(reason, session=None, run=None, log=None, delegate=None, job=None):
     """Start a detached collector; measurements must never block a session/run."""
-    if reason == "launch" and os.environ.get("CLAUDE_DELEGATE_QUOTA_SNAPSHOT") == "0":
+    if reason in ("launch", "job-end") and os.environ.get("CLAUDE_DELEGATE_QUOTA_SNAPSHOT") == "0":
         return
     delegate = delegate or Path(__file__).resolve().parent / "delegate"
     cmd = [sys.executable, str(delegate), "quota", "--snapshot", "--reason", reason]
-    for flag, value in (("--session", session), ("--run", run), ("--log", log)):
+    for flag, value in (("--session", session), ("--run", run), ("--log", log), ("--job", job)):
         if value is not None:
             cmd.extend([flag, str(value)])
     try:
@@ -229,7 +229,7 @@ def log_path(log=None):
 
 
 def record(reason=None, session=None, run=None, if_active=False, log=None,
-           source="direct", timeout=90):
+           source="direct", timeout=90, job=None):
     """Append one durable quota reading; return (row, None), or (None, why) when gated off."""
     path = log_path(log)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -244,6 +244,8 @@ def record(reason=None, session=None, run=None, if_active=False, log=None,
         row = {"ts": ts.isoformat(), "source": source, "reason": reason,
                "session": session if isinstance(session, str)
                and re.fullmatch(r"[A-Za-z0-9_-]+", session) else None, "run": run}
+        if isinstance(job, str) and re.fullmatch(r"(round|review)-[0-9]+", job):
+            row["job"] = job
         if gate is not None:
             row["gate"] = gate
         try:
@@ -264,9 +266,9 @@ def record(reason=None, session=None, run=None, if_active=False, log=None,
 
 
 def snapshot(reason=None, session=None, run=None, if_active=False, log=None,
-             source="direct", timeout=90):
+             source="direct", timeout=90, job=None):
     """`delegate quota --snapshot`: record a reading, print it; exit status 1 on a fetch error."""
-    row, skip = record(reason, session, run, if_active, log, source, timeout)
+    row, skip = record(reason, session, run, if_active, log, source, timeout, job=job)
     if skip:
         print("skip: " + skip)
         return 0
@@ -454,7 +456,7 @@ def _format_codex_5h(entry, now):
     return f"Codex 5h {left:.0f}% left, resets {local.strftime('%H:%M')}"
 
 
-def render(result, now=None):
+def render(result, now=None, rounds_lines=None):
     now = now or datetime.now(timezone.utc)
     rows = [("POOL", "LEFT", "RESETS (local)", "", "PACE", "DATA AGE")]
     for pid, e in result.items():
@@ -474,4 +476,6 @@ def render(result, now=None):
     lines.append("")
     lines.append("PACE = share left / share of window left. >1: spare quota that resets "
                  "unused unless spent; <1: burning faster than the window refills.")
+    for line in rounds_lines or []:
+        lines.append(line)
     return "\n".join(lines)

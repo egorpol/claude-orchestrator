@@ -8,6 +8,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Added
 
+- `delegate quota --unused` (`monitor.py`): closed quota windows' peak use and unused share from `quota.jsonl` (no openusage call), plus median pool cost per (agent, model, effort, kind) from readings around delegate jobs; live `delegate quota` and `delegate route` show about-N-rounds-left / a ROUNDS column when n ≥ 3. Launch/followup/review tag their readings with `job`, finalize takes a detached `job-end` reading, and review records gain `started` and `effort`.
 - `delegate report --digest` evidence gains Context, Harness notes, Errors and Shell cwd sections (plus transcript markers for guards, silent-turn reminders, hook asks, error text and cwd resets), so auto field-report writers see context trajectory, harness reminders, ok-result failure lines and shell cwd moves that the 2026-10-27 trial missed.
 - `delegate report --select` picks reproducible, explained automatic field-report batches; `--digest IDS --out DIR` writes capped evidence and compressed transcripts, cut before `/field-report` with structural leak guards. Both are dry runs with no agent calls.
 - Secret guard at commit time: pre-commit hook and PreToolUse commit scans, a local private-name deny list with output masking, and added working-file checks. Per-repo opt-outs: `secretGuard.privateNames` and `secretGuard.workingFiles`; `install.sh --git-hook` installs both git hooks and `--check` reports the deny-list path/count and warns when it sits inside a git work tree.

@@ -136,7 +136,7 @@ def render(task_name, task, rows):
         return format(v, spec) if v is not None else "-"
     out = [f"task: {task_name} ({task['desc']}; {task['mode']})  weights: "
            + ", ".join(f"{k} {v}" for k, v in task["weights"].items() if v)]
-    hdr = ("DELEGATE", "SCORE", "QUAL", "INT", "COD", "TOK/S", "$/1M", "QUOTA", "PACE", "SRC")
+    hdr = ("DELEGATE", "SCORE", "QUAL", "INT", "COD", "TOK/S", "$/1M", "QUOTA", "PACE", "ROUNDS", "SRC")
     table = [hdr]
     for r in rows:
         m = r["metrics"]
@@ -145,6 +145,7 @@ def render(task_name, task, rows):
             tag += " (excluded)"
         elif r.get("preferred"):
             tag += " (pref)"
+        rounds = r.get("rounds_left")
         table.append((
             tag,
             f"{r['score']:.0f}", f"{r['quality']:.2f}",
@@ -152,6 +153,7 @@ def render(task_name, task, rows):
             fmt(m["speed"], ".0f"), fmt(m["price"], ".2f"),
             f"{r['left']:.0f}%" if r["left"] is not None else "?",
             f"{r['pace']:.1f}x" if r["pace"] is not None else "",
+            str(rounds) if rounds is not None else "-",
             r["source"],
         ))
     widths = [max(len(row[i]) for row in table) for i in range(len(hdr))]
@@ -161,6 +163,8 @@ def render(task_name, task, rows):
                "SCORE = QUAL x sqrt(quota left) x pace bonus (<=+15%), x0.8 for Claude subagents (shared pool). "
                "pref = catalog/CLI preference (outranks score when the pool clears min_quota). "
                "QUOTA ? = unknown pool (neither excluded nor treated as full).")
+    out.append("ROUNDS = rounds left in the delegate's tightest pool at its median per-round cost "
+               "from the logs (n >= 3).")
     out.append("SRC: aa = AA API, aa* = AA page (coding = proxy from Terminal-Bench 4.0 + SciCode), "
                "~ = rating of a stand-in model (aa_proxy), prior = hand-set guess in catalog.json.")
     top = next((r for r in rows if not r["excluded"]), None)
