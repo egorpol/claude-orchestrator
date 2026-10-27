@@ -12,6 +12,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "delegate" / "scripts
 sys.path.insert(0, str(SCRIPTS))
 
 import ask  # noqa: E402
+import frontier  # noqa: E402
 
 
 CURSOR_SH = r'''#!/bin/sh
@@ -52,6 +53,13 @@ class TestAsk(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": str(self.session_log)})
         env.start()
         self.addCleanup(env.stop)
+        # Both now checks quota. Never consult the machine's real openusage.
+        fetch = mock.patch("ask.quota.fetch", return_value={})
+        pools = mock.patch("ask.quota.pools", return_value={
+            "codex-5h": {"left_pct": 50}, "codex-7d": {"left_pct": 50}})
+        self.quota_fetch, self.quota_pools = fetch.start(), pools.start()
+        self.addCleanup(fetch.stop)
+        self.addCleanup(pools.stop)
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)  # set when the tests run inside Claude Code
         self.old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self.bindir}:{self.old_path}"
@@ -233,6 +241,148 @@ class TestAsk(unittest.TestCase):
         self.assertEqual(ask.extract_pick("- Pick: C"), "C")
         self.assertEqual(ask.extract_pick("### Pick: A"), "A")
         self.assertIsNone(ask.extract_pick("nope\nPick me\n"))
+
+    def _fallback_report(self, catalog, default_codex):
+        def rating(name, intelligence, cost, creator="OpenAI"):
+            return {"name": name, "intelligence": intelligence, "cost_per_task": cost,
+                    "price_blended": 1, "creator": creator}
+        models = {
+            "gpt-6-1-sol-medium": rating("GPT-6.1 Sol (Medium)", 47.8, 0.2135),
+            "gpt-6-1-sol-high": rating("GPT-6.1 Sol (High)", 50.2, 0.319),
+            "deepseek-v4-1-flash-1017": rating("DeepSeek V4.1 Flash 1017 (Max)", 45.1, 0.262, "DeepSeek"),
+            "better": rating("Better (High)", 49, 0.55),
+            "claude": rating("Claude (High)", 90, 0.1, "Anthropic"),
+            "grok": rating("Grok (High)", 91, 0.1, "xAI"),
+        }
+        return frontier.build_report(catalog, {"source": "fake", "fetched_at": 1, "models": models},
+                                     ["auto", "deepseek-v41-flash-1017-max", "better-high", "claude-high", "grok-high"],
+                                     {}, default_codex)
+
+    def _run_fallback_both(self, **kw):
+        from io import StringIO
+        out = StringIO()
+        result = ("Pick: A\nWhy: good", {"input": 1, "output": 2}, 0.1, "fake")
+        with mock.patch("frontier.load_report", side_effect=self._fallback_report) as load, \
+             mock.patch("ask.run_cursor", return_value=result) as cursor, \
+             mock.patch("ask.run_codex", return_value=result) as codex, \
+             mock.patch("sys.stdout", out):
+            ask.cmd_ask(self._both_ns(**kw))
+        return out.getvalue(), cursor, codex, load
+
+    def test_both_normal_only_reads_quota(self):
+        out, cursor, codex, load = self._run_fallback_both()
+        self.quota_fetch.assert_called_once_with("auto", timeout=15)
+        load.assert_not_called()
+        codex.assert_called_once()
+        self.assertEqual(cursor.call_args.args[1], "auto")
+        self.assertNotIn("fallback", out)
+
+    def test_both_empty_switches_and_labels_both_blocks_and_picks(self):
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 3}, "codex-7d": {"left_pct": 80}}
+        out, cursor, codex, load = self._run_fallback_both()
+        codex.assert_not_called()
+        self.assertEqual(sorted(c.args[1] for c in cursor.call_args_list), ["auto", "deepseek-v41-flash-1017-max"])
+        line = out.splitlines()[0]
+        for bit in ("codex-5h 3% left", "10% threshold", "deepseek-v41-flash-1017-max", "AA 45.1",
+                    "$0.262/task", "cap $0.427/task", "2x gpt-6.1-sol@medium", "$0.213/task", "bills cursor-premium?"):
+            self.assertIn(bit, line)
+        self.assertIn("## fallback (cursor deepseek-v41-flash-1017-max)", out)
+        self.assertIn("Pick (fallback): A", out)
+        self.assertIn("## cursor", out)
+        self.assertIn("Pick (cursor): A", out)
+        self.assertLess(out.index("ask:"), out.index("## fallback"))
+
+    def test_7d_alone_empty_and_effort_high_changes_the_cap(self):
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 80}, "codex-7d": {"left_pct": 9}}
+        out, cursor, codex, load = self._run_fallback_both(effort="high")
+        codex.assert_not_called()
+        self.assertIn("codex-7d 9% left", out)
+        self.assertIn("cap $0.638/task = 2x gpt-6.1-sol@high $0.319/task", out)
+        self.assertIn("## fallback (cursor better-high)", out)
+        self.assertEqual(load.call_args.kwargs["default_codex"], ("gpt-6.1-sol", "high"))
+
+    def test_empty_with_no_candidate_or_task_cost_keeps_codex(self):
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 0}, "codex-7d": {"left_pct": 50}}
+        original = self._fallback_report
+        for task in (0.001, None):
+            def no_fit(catalog, default_codex):
+                report = original(catalog, default_codex)
+                for row in report["runnable"]:
+                    if row["agent"] == "codex":
+                        row["cost_per_task"] = task
+                report["fallback"], report["fallback_reason"] = frontier.pick_fallback(report["runnable"], *default_codex)
+                return report
+            with mock.patch.object(self, "_fallback_report", side_effect=no_fit):
+                out, cursor, codex, load = self._run_fallback_both()
+            codex.assert_called_once()
+            self.assertEqual(cursor.call_count, 1)
+            self.assertIn("keeping Codex", out)
+            self.assertIn("no eligible" if task else "no AA $/task", out)
+            self.assertNotIn("## fallback", out)
+
+    def test_unknown_quota_failure_missing_or_error_keeps_codex(self):
+        for pools in ({}, {"codex-5h": {"error": "missing"}, "codex-7d": {"left_pct": 50}},
+                      {"codex-5h": {"error": "failed", "left_pct": 0}, "codex-7d": {"left_pct": 50}},
+                      {"codex-5h": {"left_pct": 50}}):
+            self.quota_pools.return_value = pools
+            out, cursor, codex, load = self._run_fallback_both()
+            self.assertIn("quota unknown", out)
+            codex.assert_called_once()
+            load.assert_not_called()
+        self.quota_fetch.side_effect = FileNotFoundError("openusage missing")
+        out, cursor, codex, load = self._run_fallback_both()
+        self.assertIn("quota unknown", out)
+        codex.assert_called_once()
+        load.assert_not_called()
+
+    def test_quota_threshold_is_strict_and_comes_from_catalog(self):
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 10}, "codex-7d": {"left_pct": 10}}
+        out, cursor, codex, load = self._run_fallback_both()
+        load.assert_not_called()
+        codex.assert_called_once()
+        Path(self.tmp.name, "catalog.json").write_text(json.dumps({"min_quota_pct": 15, "delegates": []}))
+        with mock.patch.object(ask, "SCRIPTS", Path(self.tmp.name)):
+            out, cursor, codex, load = self._run_fallback_both()
+        codex.assert_not_called()
+        self.assertIn("15% threshold", out)
+
+    def test_quota_fetch_timeout_keeps_codex_and_prints_one_unknown_line(self):
+        self.quota_fetch.side_effect = ask.subprocess.TimeoutExpired(["openusage", "export"], 15)
+        out, cursor, codex, load = self._run_fallback_both()
+        self.quota_fetch.assert_called_once_with("auto", timeout=15)
+        self.quota_pools.assert_not_called()
+        load.assert_not_called()
+        codex.assert_called_once()
+        self.assertEqual(cursor.call_count, 1)
+        notices = [line for line in out.splitlines() if line.startswith("ask:")]
+        self.assertEqual(len(notices), 1)
+        self.assertIn("quota unknown", notices[0])
+        self.assertIn("keeping Codex", notices[0])
+        self.assertIn("## codex", out)
+        self.assertNotIn("## fallback", out)
+
+    def test_no_fallback_skips_quota_even_when_empty(self):
+        self.quota_fetch.side_effect = AssertionError("quota read")
+        out, cursor, codex, load = self._run_fallback_both(no_fallback=True)
+        codex.assert_called_once()
+        load.assert_not_called()
+        self.quota_fetch.assert_not_called()
+        self.assertNotIn("ask:", out)
+
+    def test_fallback_discovery_failure_keeps_codex(self):
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 0}}
+        with mock.patch.object(self, "_fallback_report", side_effect=RuntimeError("AA unavailable")):
+            out, cursor, codex, load = self._run_fallback_both()
+        self.assertIn("fallback ratings unavailable (AA unavailable)", out)
+        codex.assert_called_once()
+
+    def test_single_agents_never_read_quota(self):
+        from io import StringIO
+        self.quota_fetch.side_effect = AssertionError("quota read")
+        for agent in ("cursor", "codex"):
+            with mock.patch("sys.stdout", StringIO()):
+                ask.cmd_ask(self._both_ns(agent=agent))
+        self.quota_fetch.assert_not_called()
 
     def test_never_passes_force(self):
         seen = []

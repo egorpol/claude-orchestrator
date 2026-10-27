@@ -62,13 +62,14 @@ def cmd_ratings(a):
     for key, slug in picks:
         m = models.get(slug) if slug else None
         if not m:
-            body.append((-1, (key, slug or "(no AA rating)", "-", "-", "-", "-", "-", "-")))
+            body.append((-1, (key, slug or "(no AA rating)", "-", "-", "-", "-", "-", "-", "-")))
             continue
         body.append((m["intelligence"] or 0,
                      (key, slug, f(m["intelligence"], ".1f"), f(m["coding"], ".1f"), f(m["tps"], ".0f"),
-                      f(m["price_in"], ".2f"), f(m["price_out"], ".2f"), f(m["price_blended"], ".2f"))))
+                      f(m["price_in"], ".2f"), f(m["price_out"], ".2f"), f(m["price_blended"], ".2f"),
+                      f(m.get("cost_per_task"), ".3f"))))
     body.sort(key=lambda t: -t[0])
-    rows = [("ID", "AA SLUG", "INT", "COD", "TOK/S", "$IN", "$OUT", "$BLEND")] + [r for _, r in body]
+    rows = [("ID", "AA SLUG", "INT", "COD", "TOK/S", "$IN", "$OUT", "$BLEND", "$/TASK")] + [r for _, r in body]
     w = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
         print("  ".join(c.ljust(x) for c, x in zip(r, w)).rstrip())
@@ -76,6 +77,11 @@ def cmd_ratings(a):
 
 def cmd_route(a):
     cat = load_catalog()
+    if a.frontier:
+        import frontier
+        report = frontier.load_report(cat, refresh=a.refresh)
+        print(json.dumps(report, indent=2) if a.json else frontier.render(report, cat))
+        return
     if a.task not in cat["tasks"]:
         sys.exit(f"unknown task {a.task!r}; known: {', '.join(cat['tasks'])}")
     pools = quota.pools(quota.fetch(a.source))
@@ -118,7 +124,8 @@ def main():
     s.set_defaults(fn=cmd_ratings)
 
     s = sub.add_parser("route", help="rank delegates for a task type")
-    s.add_argument("task", help="review | refactor | implement | research | bulk-label (see catalog.json)")
+    s.add_argument("task", nargs="?", help="review | refactor | implement | research | bulk-label (see catalog.json)")
+    s.add_argument("--frontier", action="store_true", help="report runnable models on AA cost/intelligence frontiers")
     s.add_argument("--agents", help="comma list to restrict: codex,cursor,claude-subagent")
     s.add_argument("--prefer", help="comma list of preferred delegate IDs")
     s.add_argument("--min-quota", type=float, help="exclude pools below this %% left (default from catalog)")
@@ -239,6 +246,11 @@ def main():
     sub.metavar = "{" + ",".join(k for k in sub.choices if not k.startswith("_")) + "}"
 
     a = p.parse_args()
+    if a.cmd == "route":
+        if a.frontier and a.task is not None:
+            p.error("route --frontier cannot be used with a task")
+        if not a.frontier and a.task is None:
+            p.error("route requires a task or --frontier")
     if a.cmd == "quota" and a.snapshot and not a.if_active and a.reason is None:
         p.error("quota --snapshot requires --reason unless --if-active is set")
     a.fn(a)

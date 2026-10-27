@@ -3,10 +3,12 @@
     "Edit freely. delegates[].aa is the Artificial Analysis slug (effort suffix included; the bare slug is the max-effort run).",
     "pools are ids from quota.py: claude-5h, claude-7d, codex-5h, codex-7d, cursor-auto, cursor-premium. cursor-auto is Cursor's whole Auto + 'Cursor Models' (Grok, Composer) pool: openusage plan_auto_percent_used = their spend / $450 (verified 2026-10-10).",
     "prior: hand-set stand-in numbers for models AA does not rate; aa_proxy: true means `aa` is a stand-in model's rating, not the delegate's own.",
+    "aa_aliases: explicit CLI-to-AA overrides; keys cursor:<id> or codex:<model>@<effort>, values AA slugs. Only add exact model/version/effort aliases.",
     "prefer: list (all tasks) or {task: [delegate ids...]}; preferred delegates that clear min_quota rank first in listed order.",
     "tasks[].weights apply to intelligence, coding, speed (output tok/s) and price (cheaper scores higher; inside a subscription it approximates how fast a model drains its pool).",
     "orchestrator_cost.list_prices: dated standard/global API list prices in USD per million tokens, used as a subscription accounting unit, not a bill; unsplit cache writes use the 5m rate."
   ],
+  "aa_aliases": {},
   "min_quota_pct": 10,
   "orchestrator_pool_penalty": 0.8,
   "orchestrator_cost": {

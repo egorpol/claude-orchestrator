@@ -16,6 +16,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import runs  # noqa: E402
+import quota  # noqa: E402
 
 DEFAULTS = {"cursor": ("auto", None), "codex": ("gpt-6.1-sol", "medium")}
 
@@ -256,6 +257,48 @@ def extract_pick(answer):
     return None
 
 
+def _fallback_for_both(a):
+    """Only the cheap quota read runs on a healthy both call."""
+    if getattr(a, "no_fallback", False):
+        return None
+    try:
+        pools = quota.pools(quota.fetch("auto", timeout=15))
+    except Exception as exc:
+        print(f"ask: Codex quota unknown ({exc}); keeping Codex.", flush=True)
+        return None
+    catalog = json.loads((SCRIPTS / "catalog.json").read_text(encoding="utf-8"))
+    threshold = catalog.get("min_quota_pct", 10)
+    empty, unknown = [], []
+    for pid in ("codex-5h", "codex-7d"):
+        entry = pools.get(pid) or {}
+        if "error" in entry or entry.get("left_pct") is None:
+            unknown.append(pid)
+        elif entry["left_pct"] < threshold:
+            empty.append((pid, entry["left_pct"]))
+    if not empty:
+        if unknown:
+            print(f"ask: Codex quota unknown ({', '.join(unknown)}); keeping Codex.", flush=True)
+        return None
+    trigger = ", ".join(f"{pid} {left:g}% left" for pid, left in empty)
+    prefix = f"ask: {trigger} below {threshold:g}% threshold; "
+    # The expensive discovery and ratings load are deliberately below the trigger.
+    import frontier
+    half = (DEFAULTS["codex"][0], a.effort or DEFAULTS["codex"][1])
+    try:
+        report = frontier.load_report(catalog, default_codex=half)
+    except Exception as exc:
+        print(prefix + f"keeping Codex: fallback ratings unavailable ({exc}).", flush=True)
+        return None
+    for warning in report["warnings"]:
+        print(f"ask: {warning}", file=sys.stderr)
+    selection = report["fallback"]
+    if not selection:
+        print(prefix + f"keeping Codex: {report['fallback_reason']}.", flush=True)
+        return None
+    print(prefix + "fallback " + frontier.fallback_description(selection), flush=True)
+    return selection["row"]
+
+
 def cmd_ask(a):
     question = a.question
     if question == "-":
@@ -282,27 +325,32 @@ def cmd_ask(a):
         return
     # Second opinions: same prompt to both vendors in parallel, one block each.
     # A failure in one still prints the other's answer.
+    fallback = _fallback_for_both(a)
     agents = ["codex", "cursor"]
     with ThreadPoolExecutor(len(agents)) as pool:
-        futures = {ag: pool.submit(_run_one, ag, prompt, a, directory) for ag in agents}
+        futures = {ag: (pool.submit(run_cursor, prompt, fallback["model"], directory, a.timeout)
+                        if ag == "codex" and fallback else
+                        pool.submit(_run_one, ag, prompt, a, directory)) for ag in agents}
     code = 0
     picks = []  # (agent, value_or_None | False for failed)
     any_pick = False
     for i, ag in enumerate(agents):
         if i:
             print()
-        print(f"## {ag}")
+        label = "fallback" if ag == "codex" and fallback else ag
+        title = f"fallback (cursor {fallback['model']})" if label == "fallback" else ag
+        print(f"## {title}")
         try:
             answer, usage, elapsed, model = futures[ag].result()
         except AskFailed as e:
             print(f"(failed, exit {e.code}) {e}")
             code = code or e.code
-            picks.append((ag, False))
+            picks.append((label, False))
             continue
         print(answer)
-        print(_footer(ag, model, elapsed, usage))
+        print(_footer("cursor" if label == "fallback" else ag, model, elapsed, usage))
         pick = extract_pick(answer)
-        picks.append((ag, pick))
+        picks.append((label, pick))
         if pick is not None:
             any_pick = True
     if any_pick:
@@ -324,6 +372,7 @@ def _add_args(p):
                    help="both: same question to codex and cursor in parallel (second opinions)")
     p.add_argument("--model", help="cursor default auto; codex default gpt-6.1-sol; not with --agent both")
     p.add_argument("--effort", help="codex reasoning effort (default medium)")
+    p.add_argument("--no-fallback", action="store_true", help="both: keep Codex even when its quota is empty")
     p.add_argument("--dir", help="workspace directory (default: cwd)")
     p.add_argument("--max-words", type=int, default=200)
     p.add_argument("--timeout", type=float, default=600, metavar="S")
