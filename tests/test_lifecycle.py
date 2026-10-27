@@ -367,8 +367,10 @@ class LifecycleTests(unittest.TestCase):
         (root / "exit_code").write_text("0\n")
         (root / "pid").write_text(f"{os.getpid()}\n")
         self.assertEqual(runs.state(root), "verifying")
-        threading.Timer(0.15, lambda: (root / "finished_at").write_text(
-            "2026-10-11T00:01:00+00:00\n")).start()
+        def finish():
+            (root / "finished_at").write_text("2026-10-11T00:01:00+00:00\n")
+            (root / "finalized_at").write_text("2026-10-11T00:01:01+00:00\n")
+        threading.Timer(0.15, finish).start()
         t0 = time.monotonic()
         out = self.cli("wait", "wait-verifying", "--interval", "0.05", "--timeout", "5")
         self.assertGreaterEqual(time.monotonic() - t0, 0.12)
@@ -403,11 +405,13 @@ class LifecycleTests(unittest.TestCase):
             (rv / "started_at").write_text("2026-10-11T00:02:00+00:00\n")
             (root / "exit_code").write_text("0\n")
             (root / "finished_at").write_text("2026-10-11T00:01:00+00:00\n")
+            (root / "finalized_at").write_text("2026-10-11T00:01:01+00:00\n")
 
         def finish_review():
             rv = root / "review-1"
             (rv / "exit_code").write_text("0\n")
             (rv / "finished_at").write_text("2026-10-11T00:03:00+00:00\n")
+            (rv / "finalized_at").write_text("2026-10-11T00:03:01+00:00\n")
 
         threading.Timer(0.1, start_review_then_finish_root).start()
         threading.Timer(0.35, finish_review).start()
@@ -432,6 +436,65 @@ class LifecycleTests(unittest.TestCase):
         self.launch("codex", "wait-e2e", "--detach")
         out = self.cli("wait", "wait-e2e", "--interval", "0.05", "--timeout", "30")
         self.assertIn("done", out.splitlines()[0])
+        root = self.root("wait-e2e")
+        self.assertTrue((root / "finalized_at").exists())
+        self.assertEqual([r["n"] for r in runs.load_meta(root)["history"]], [1])
+
+    def test_job_busy_waits_for_finalized_at(self):
+        job = self.tmp / "busy-finalize"
+        job.mkdir()
+        child = subprocess.Popen(["sleep", "30"])
+
+        def _stop_child():
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
+        self.addCleanup(_stop_child)
+        (job / "exit_code").write_text("0\n")
+        (job / "finished_at").write_text("2026-10-11T00:01:00+00:00\n")
+        (job / "pid").write_text(f"{child.pid}\n")
+        self.assertTrue(runs._job_busy(job))  # no marker, live PID, fresh finish
+        (job / "finalized_at").write_text("2026-10-11T00:01:01+00:00\n")
+        self.assertFalse(runs._job_busy(job))
+        (job / "finalized_at").unlink()
+        old = time.time() - 600
+        os.utime(job / "finished_at", (old, old))
+        self.assertFalse(runs._job_busy(job))  # stale finished_at: pre-marker runs
+        os.utime(job / "finished_at", None)
+        self.assertTrue(runs._job_busy(job))
+        child.kill()
+        child.wait()
+        self.assertFalse(runs._job_busy(job))  # dead PID
+
+    def test_guards_refuse_while_finalizing(self):
+        self.launch("codex", "finalizing")
+        root = self.root("finalizing")
+        child = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        (root / "finalized_at").unlink()
+        (root / "pid").write_text(f"{child.pid}\n")
+        os.utime(root / "finished_at", None)
+        for args in (("followup", "finalizing", "--brief", self.follow_brief),
+                     ("review", "finalizing"), ("apply", "finalizing"),
+                     ("cleanup", "finalizing", "--force")):
+            r = subprocess.run([sys.executable, str(CLI), *map(str, args)], cwd=self.repo,
+                               env=self.env, text=True, capture_output=True)
+            self.assertEqual(r.returncode, 1, args)
+            self.assertIn("still running", r.stderr)
+        (root / "finalized_at").write_text("2026-10-11T00:01:01+00:00\n")
+        self.cli("apply", "finalizing", "--check")
+
+    def test_guards_check_before_loading_meta(self):
+        # meta.json read before the guard could be saved back over finalize's new history
+        self.launch("codex", "order")
+        ns = argparse.Namespace(run="order")
+        with patch.object(runs, "_finalizing", return_value=True), \
+                patch.object(runs, "load_meta", side_effect=AssertionError("meta loaded before the guard")):
+            for fn in (runs.followup, runs.review, runs.apply, runs.cleanup):
+                with self.assertRaises(SystemExit) as cm:
+                    fn(ns)
+                self.assertIn("still running", str(cm.exception.code))
 
     def test_rejected_link_leaves_no_worktree_or_branch(self):
         (self.repo / ".delegate/x").mkdir(parents=True)
@@ -549,10 +612,12 @@ class LifecycleTests(unittest.TestCase):
         self.launch("codex", "linked", "--link", "data/cache")
         self.cli("followup", "linked", "--brief", self.follow_brief, "--link", "data/cache",
                  "--model", "another-model")
-        meta = runs.load_meta(self.root("linked"))
+        root = self.root("linked")
+        meta = runs.load_meta(root)
         self.assertEqual(meta["links"], ["data/cache"])
         self.assertEqual([(r["n"], r["model"], r["effort"]) for r in meta["history"]],
                          [(1, "gpt-6.1-sol", "xhigh"), (2, "another-model", None)])
+        self.assertTrue((root / "round-1/finalized_at").exists())
 
     def test_legacy_codex_status_read_only(self):
         root = self.root("legacy")

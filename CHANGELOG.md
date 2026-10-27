@@ -37,6 +37,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Fixed
 
+- `delegate wait` returned once `finished_at` existed, while `run.sh` was still in `_finalize` writing `meta.json` and running git for the packet, so a `review` or `apply` right after it could race the round record, and a test's tempdir cleanup once failed with "Directory not empty". `_finalize` now writes a `finalized_at` marker as its last step; `wait` stays busy, and `followup`, `review`, `apply` and `cleanup` refuse, until it exists (for 120 s after `finished_at` while `run.sh` is alive, so an old run's reused PID can't block). `meta.json` is written through an atomic replace.
 - `delegate ask --agent both` finds a Cursor `Pick:` glued to the end of its preamble sentence (`…already decided.**Pick: A**`). Cursor's result joins its messages without a newline, so on 2026-10-27 both Cursor picks printed as "(no Pick line found)".
 - The Artificial Analysis page scrape reads Terminal-Bench 4.0 and SciCode from the page's nested `scores` dict. AA had moved them there, so `route` showed no coding score for any of the 161 models and the coding weight (0.45–0.55 for review, refactor and implement) counted for nothing. A page with neither score now fails the refresh, which keeps the cache with a warning, instead of passing silently.
 - `delegate ask --agent codex` passes `--skip-git-repo-check`, so `--dir` may name a folder outside a trusted git repo; the sandbox stays read-only.
