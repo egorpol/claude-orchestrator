@@ -3,6 +3,7 @@ import io
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -394,8 +395,9 @@ class DigestTests(Fixtures):
             self.assertIn(value, text)
         self.assertNotIn("Quota stale", text)
         self.assertEqual(got["events"], {"denied": 0, "idle": 0, "error": 0})
-        headers = ["Numbers", "Prompts", "Pickers", "HANDOFF.md at session start",
-                   "HANDOFF.md at session end", "Commits in the session window", "Friction excerpts"]
+        headers = ["Numbers", "Context", "Prompts", "Pickers", "HANDOFF.md at session start",
+                   "HANDOFF.md at session end", "Commits in the session window",
+                   "Harness notes", "Errors", "Shell cwd", "Friction excerpts"]
         positions = [text.index("## " + h) for h in headers]
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn(PRIVATE, text)
@@ -487,9 +489,9 @@ class DigestTests(Fixtures):
         self.assertTrue(lines[1].startswith("CLAUDE [+1.0]: "))
         self.assertEqual(len(lines[1].split(": ", 1)[1]), 4000)
         self.assertTrue(lines[2].endswith("-> ok, 5 chars"))
-        self.assertTrue(lines[3].endswith("-> error, 12 chars"))
+        self.assertTrue(lines[3].startswith("TOOL [+1.0] Bash") and "-> error, 12 chars: later-result" in lines[3])
         self.assertLessEqual(len(lines[2].split("Bash ", 1)[1].split(" -> ", 1)[0]), 160)
-        for forbidden in ("REMINDER-SECRET", "THINKING-SECRET", "not typed", "later-result"):
+        for forbidden in ("REMINDER-SECRET", "THINKING-SECRET", "not typed"):
             self.assertNotIn(forbidden, got["transcript"])
         self.assertIn("RESULT error (12 chars): later-result", got["digest"])
 
@@ -545,6 +547,388 @@ class DigestTests(Fixtures):
             self.assertEqual(got["status"], "dropped")
             self.assertEqual(got["reason"], "unreadable transcript")
             self.assertIsNone(got["digest"])
+
+
+class DigestEvidenceTests(Fixtures):
+    def section(self, digest, name):
+        marks = list(re.finditer(r"^## (.+)$", digest, re.M))
+        for i, match in enumerate(marks):
+            if match.group(1) == name:
+                end = marks[i + 1].start() if i + 1 < len(marks) else len(digest)
+                return digest[match.start():end].rstrip("\n")
+        self.fail(f"missing section {name}")
+
+    def attachment(self, kind, minutes=0, uuid=None, parentUuid=None, **fields):
+        row = {"type": "attachment", "timestamp": stamp(minutes),
+               "attachment": {"type": kind, **fields}}
+        if uuid is not None:
+            row["uuid"] = uuid
+        if parentUuid is not None:
+            row["parentUuid"] = parentUuid
+        return row
+
+    def test_new_sections_zero_counts_on_plain_session(self):
+        got = self.digest(self.session(rows=[user(origin={"kind": "human"}), assistant()]))
+        harness = self.section(got["digest"], "Harness notes")
+        errors = self.section(got["digest"], "Errors")
+        cwd = self.section(got["digest"], "Shell cwd")
+        for line in ("Context-guard messages: 0", "Silent-turn reminders: 0",
+                     "Hook ask/deny decisions: 0", "File-changed notices: 0",
+                     "IDE diagnostics after edits: 0", "Reminders inside tool results: 0",
+                     "Other attachments: none"):
+            self.assertIn(line, harness)
+        self.assertIn("Error results: 0 (denied 0)", errors)
+        self.assertIn("Error lines in ok results: 0", errors)
+        self.assertIn("cwd moves: 0", cwd)
+        self.assertIn("Shell cwd resets: 0", cwd)
+        ctx = self.section(got["digest"], "Context")
+        self.assertIn("Calls:", ctx)
+        self.assertIn("Crossings:", ctx)
+        self.assertIn("Drops over 30%:", ctx)
+
+    def test_context_crossings_drops_dedupe_and_synthetic(self):
+        rows = [user("start", origin={"kind": "human"}),
+                assistant(minutes=1, mid="a", write=38_000),
+                assistant([{"type": "text", "text": "dup"}], minutes=2, mid="a", write=99_000),
+                assistant(minutes=3, mid="syn", write=200_000,
+                          message={"id": "syn", "model": "<synthetic>", "content": [],
+                                   "usage": {"input_tokens": 200_000, "cache_creation_input_tokens": 0,
+                                             "cache_read_input_tokens": 0, "output_tokens": 1}}),
+                assistant(minutes=40, mid="b", write=100_000),
+                assistant(minutes=52, mid="c", write=120_000),
+                assistant(minutes=80, mid="d", write=150_000),
+                assistant(minutes=95, mid="e", write=40_000)]
+        # Force exact context totals via usage overrides on later rows.
+        for row, total in ((rows[1], 38_000), (rows[4], 100_000), (rows[5], 120_000),
+                           (rows[6], 150_000), (rows[7], 40_000)):
+            row["message"]["usage"] = {"input_tokens": total, "cache_creation_input_tokens": 0,
+                                       "cache_read_input_tokens": 0, "output_tokens": 1}
+        rows[2]["message"]["usage"] = {"input_tokens": 99_000, "cache_creation_input_tokens": 0,
+                                       "cache_read_input_tokens": 0, "output_tokens": 1}
+        got = self.digest(self.session(rows=rows))
+        ctx = self.section(got["digest"], "Context")
+        self.assertIn("start 38k", ctx)
+        self.assertIn("max 150k", ctx)
+        self.assertIn("100k at +40.0 min (P0)", ctx)
+        self.assertIn("120k at +52.0 min (P0)", ctx)
+        self.assertIn("150k at +80.0 min (P0)", ctx)
+        self.assertIn("150k -> 40k at +95.0 min (P0)", ctx)
+        self.assertNotIn("99k", ctx)
+        self.assertNotIn("200k", ctx)
+
+    def test_context_largest_results_and_prompt_context(self):
+        big = "x" * 5000
+        rows = [user("p0", origin={"kind": "human"}),
+                assistant([tool("Read", {"file_path": "a.py"}, "r1")], minutes=1, mid="m1"),
+                result(big, tid="r1", minutes=2),
+                user("p1", 10, origin={"kind": "human"}),
+                assistant([tool("Bash", {"command": "echo"}, "b1")], minutes=12, mid="m2", write=50),
+                result("ok", tid="b1", minutes=13)]
+        for row, total in ((rows[1], 38_000), (rows[4], 52_000)):
+            row["message"]["usage"] = {"input_tokens": total, "cache_creation_input_tokens": 0,
+                                       "cache_read_input_tokens": 0, "output_tokens": 1}
+        got = self.digest(self.session(rows=rows))
+        ctx = self.section(got["digest"], "Context")
+        self.assertIn("At each typed prompt: P0 38k, P1 52k", ctx)
+        self.assertIn('Read {"file_path": "a.py"} -> 5,000 chars', ctx)
+        self.assertIn("Tool result chars by tool: Read 5,000; Bash 2", ctx)
+
+    def test_harness_guard_silent_hook_and_cut(self):
+        ask = json.dumps({"hookSpecificOutput": {
+            "permissionDecision": "ask", "permissionDecisionReason": "secret guard blocked"}})
+        rows = [
+            user("go"),
+            assistant([tool(args={"command": "sleep 1"}, tid="t0")], minutes=1),
+            result("ok", tid="t0", minutes=2),
+            self.attachment("hook_system_message", 52, uuid="sys-1",
+                            hookEvent="UserPromptSubmit", hookName="UserPromptSubmit",
+                            toolUseID="g1", content="context guard: ~133k tokens; hand off."),
+            # Paired long form: different toolUseID, parentUuid points at the system message.
+            self.attachment("hook_additional_context", 52, parentUuid="sys-1",
+                            hookEvent="UserPromptSubmit", hookName="UserPromptSubmit",
+                            toolUseID="hook-other",
+                            content=["Context guard: ~133k tokens long form paired."]),
+            # Orphan additional context: no matching system-message uuid.
+            self.attachment("hook_additional_context", 55, parentUuid="missing",
+                            hookEvent="UserPromptSubmit", hookName="UserPromptSubmit",
+                            toolUseID="orphan",
+                            content=["Context guard: orphan ~99k tokens."]),
+            self.attachment("silent_turn_reminder", 60,
+                            text="The user hasn't heard from you in a while"),
+            self.attachment("hook_success", 61, hookEvent="PreToolUse", hookName="PreToolUse:Bash",
+                            toolUseID="h1", stdout=ask),
+            self.attachment("edited_text_file", 62, filename="/tmp/HANDOFF.md"),
+            self.attachment("hook_additional_context", 63, hookEvent="PostToolUse",
+                            hookName="PostToolUse:Edit", toolUseID="d1",
+                            content=['<ide_diagnostics>[{"filePath": "/x/check.py"}]</ide_diagnostics>']),
+            self.attachment("hook_system_message", 0, hookEvent="SessionStart",
+                            hookName="SessionStart:startup", toolUseID="ss",
+                            content="session mode: x"),
+            command(minutes=100),
+            self.attachment("silent_turn_reminder", 101,
+                            text="after cut must not count"),
+            result("Expected a filename\nrc=1", False, "after", 102),
+        ]
+        got = self.digest(self.session(rows=rows))
+        harness = self.section(got["digest"], "Harness notes")
+        self.assertIn("Context-guard messages: 2", harness)
+        self.assertIn("guard +52.0 min (P0): context guard: ~133k tokens; hand off.", harness)
+        self.assertIn("guard +55.0 min (P0): Context guard: orphan ~99k tokens.", harness)
+        self.assertNotIn("long form paired", harness)
+        self.assertIn("Silent-turn reminders: 1", harness)
+        self.assertIn("silent-turn reminder +60.0 min (P0) after Bash", harness)
+        self.assertIn("Hook ask/deny decisions: 1", harness)
+        self.assertIn("hook ask +61.0 min (P0) PreToolUse:Bash: secret guard blocked", harness)
+        self.assertIn("File-changed notices: 1 (HANDOFF.md)", harness)
+        self.assertIn("IDE diagnostics after edits: 1 (check.py)", harness)
+        self.assertNotIn("after cut", harness)
+        self.assertNotIn("session mode", harness)
+        self.assertIn("HARNESS [+52.0] guard: context guard: ~133k tokens; hand off.", got["transcript"])
+        self.assertIn("HARNESS [+55.0] guard: Context guard: orphan ~99k tokens.", got["transcript"])
+        self.assertNotIn("long form paired", got["transcript"])
+        self.assertIn("HARNESS [+60.0] silent-turn reminder", got["transcript"])
+        self.assertIn("HARNESS [+61.0] hook ask PreToolUse:Bash: secret guard blocked", got["transcript"])
+
+    def test_errors_denied_ok_lines_merge_and_non_bash_ignored(self):
+        rows = [
+            user("go"),
+            assistant([tool(args={"command": "true"}, tid="e1")], minutes=4),
+            result("Exit code 1\nTraceback (most recent call last):\nKeyError: 'x'", True, "e1", 4),
+            assistant([tool(args={"command": "deny"}, tid="e2")], minutes=9, mid="m2"),
+            result("PreToolUse:Bash hook error: blocked", True, "e2", 9),
+            assistant([tool("Edit", {"file_path": "a"}, "e3")], minutes=9, mid="m3"),
+            result("<tool_use_error>File has not been read yet", True, "e3", 9),
+            assistant([tool("Edit", {"file_path": "a"}, "e4")], minutes=9, mid="m4"),
+            result("<tool_use_error>File has not been read yet", True, "e4", 10),
+            assistant([tool(args={"command": "juce -o ; echo rc=$?"}, tid="ok1")], minutes=20, mid="m5"),
+            result("Expected a filename after the -o|--output option\nrc=1", False, "ok1", 20),
+            assistant([tool(args={"command": "py"}, tid="ok2")], minutes=21, mid="m6"),
+            result("Traceback (most recent call last):\nValueError: boom", False, "ok2", 21),
+            assistant([tool("Read", {"file_path": "x"}, "ok3")], minutes=22, mid="m7"),
+            result("error: should be ignored in Read", False, "ok3", 22),
+            command(minutes=50),
+            assistant([tool(args={"command": "late"}, tid="late")], minutes=51, mid="m8"),
+            result("late error", True, "late", 52),
+        ]
+        got = self.digest(self.session(rows=rows))
+        errors = self.section(got["digest"], "Errors")
+        self.assertIn("Error results: 4 (denied 1)", errors)
+        self.assertIn("Error lines in ok results: 2", errors)
+        self.assertIn("-> error: Exit code 1 | Traceback (most recent call last): | KeyError: 'x'", errors)
+        self.assertIn("-> denied: PreToolUse:Bash hook error: blocked", errors)
+        self.assertIn("-> error: <tool_use_error>File has not been read yet (x2)", errors)
+        self.assertIn("-> ok with error lines: Expected a filename after the -o|--output option | rc=1", errors)
+        self.assertIn("-> ok with error lines: ValueError: boom", errors)
+        self.assertNotIn("should be ignored in Read", errors)
+        self.assertNotIn("late error", errors)
+        self.assertNotIn("Traceback (most recent call last): | ValueError", errors)
+
+    def test_shell_cwd_moves_resets_relative_paths(self):
+        root = str(self.root / "project")
+        sub = str(Path(root) / "revision" / "step-1.5")
+        rows = [
+            {**user("go"), "cwd": root},
+            {**assistant([tool(args={"command": "cd revision/step-1.5 && ls"}, tid="c1")], minutes=31),
+             "cwd": root},
+            {**result("ok\nShell cwd was reset to " + root, tid="c1", minutes=31), "cwd": root},
+            {**user("next", 33), "cwd": sub},
+            {**assistant([tool(args={"command": "cd .."}, tid="c2")], minutes=33, mid="m2"), "cwd": sub},
+            {**result("ok", tid="c2", minutes=34), "cwd": sub},
+            {**user("back", 35), "cwd": root},
+            command(minutes=50),
+            {**user([{"type": "tool_result", "tool_use_id": "late", "content":
+                      "Shell cwd was reset to " + root, "is_error": False}], 51), "cwd": "/tmp"},
+        ]
+        got = self.digest(self.session(rows=rows))
+        cwd = self.section(got["digest"], "Shell cwd")
+        self.assertIn("Start cwd: " + afr._start_path(root), cwd)
+        self.assertIn("cwd moves: 2", cwd)
+        self.assertIn(". -> revision/step-1.5 after Bash", cwd)
+        self.assertIn("revision/step-1.5 -> . after Bash", cwd)
+        self.assertIn("Shell cwd resets: 1", cwd)
+        self.assertIn("-> reset to " + afr._start_path(root), cwd)
+        self.assertIn("; cwd reset", got["transcript"])
+        self.assertNotIn("+51.0", cwd)
+
+    def test_sidechain_ignored_in_new_sections(self):
+        rows = [
+            user("go", origin={"kind": "human"}),
+            assistant([tool(tid="main")], minutes=1),
+            result("ok", tid="main"),
+            self.attachment("silent_turn_reminder", 2, text="side", isSidechain=True),
+            {**assistant([tool(tid="side")], minutes=3, mid="s", isSidechain=True),
+             "message": {"id": "s", "model": "claude-test", "content": [tool(tid="side")],
+                         "usage": {"input_tokens": 500_000, "cache_creation_input_tokens": 0,
+                                   "cache_read_input_tokens": 0, "output_tokens": 1}}},
+            result("error side", True, "side", isSidechain=True),
+            result("Shell cwd was reset to /tmp", tid="side2", isSidechain=True),
+        ]
+        # attachment helper doesn't pass isSidechain onto row - fix
+        rows[3] = {"type": "attachment", "timestamp": stamp(2), "isSidechain": True,
+                   "attachment": {"type": "silent_turn_reminder", "text": "side"}}
+        got = self.digest(self.session(rows=rows))
+        self.assertIn("Silent-turn reminders: 0", self.section(got["digest"], "Harness notes"))
+        self.assertIn("Error results: 0", self.section(got["digest"], "Errors"))
+        self.assertIn("Shell cwd resets: 0", self.section(got["digest"], "Shell cwd"))
+        self.assertNotIn("500k", self.section(got["digest"], "Context"))
+
+    def test_section_caps_keep_count_lines(self):
+        rows = [user("go")]
+        for n in range(40):
+            rows += [assistant([tool(args={"command": f"cd /tmp/out{n} && ls " + "z" * 200},
+                                     tid=f"t{n}")],
+                               minutes=n + 1, mid=f"m{n}"),
+                     result(f"Shell cwd was reset to /tmp/project\nerror: boom-{n}\n" + ("pad " * 100),
+                            True, f"t{n}", minutes=n + 1)]
+            rows.append(self.attachment(
+                "hook_system_message", n + 1, hookEvent="UserPromptSubmit",
+                hookName="UserPromptSubmit", toolUseID=f"g{n}",
+                content=("context guard: ~" + str(100 + n) + "k tokens; " + "x" * 180)))
+        for n, row in enumerate(r for r in rows if r.get("type") == "assistant"):
+            row["message"]["usage"] = {"input_tokens": 100_000 + n * 1000,
+                                       "cache_creation_input_tokens": 0,
+                                       "cache_read_input_tokens": 0, "output_tokens": 1}
+        root = "/tmp/project"
+        for i, row in enumerate(rows):
+            if row.get("type") in ("user", "assistant"):
+                row["cwd"] = root if i % 2 == 0 else root + "/sub" + str(i)
+        got = self.digest(self.session(rows=rows))
+        for name, cap in (("Context", afr.CONTEXT_CAP), ("Harness notes", afr.HARNESS_CAP),
+                          ("Errors", afr.ERRORS_CAP), ("Shell cwd", afr.CWD_CAP)):
+            self.assertLessEqual(len(self.section(got["digest"], name)), cap, name)
+        harness = self.section(got["digest"], "Harness notes")
+        errors = self.section(got["digest"], "Errors")
+        cwd = self.section(got["digest"], "Shell cwd")
+        self.assertIn("Context-guard messages: 40", harness)
+        self.assertIn("see transcript.txt", harness)
+        self.assertIn("Error results: 40", errors)
+        self.assertIn("see transcript.txt", errors)
+        self.assertIn("Shell cwd resets: 40", cwd)
+        self.assertIn("see transcript.txt", cwd)
+
+    def test_queued_typed_prompt_appears_in_transcript(self):
+        queue = {"type": "attachment", "timestamp": stamp(5), "attachment": {
+            "type": "queued_command", "commandMode": "prompt", "origin": {"kind": "human"},
+            "prompt": "queued while busy"}}
+        rows = [user("first", origin={"kind": "human"}),
+                assistant([tool()], minutes=1),
+                result("ok", minutes=2),
+                queue,
+                assistant([tool(tid="t2")], minutes=6, mid="m2"),
+                result("done", tid="t2", minutes=7)]
+        got = self.digest(self.session(rows=rows))
+        self.assertIn("USER [+0.0]: first", got["transcript"])
+        self.assertIn("USER [+5.0]: queued while busy", got["transcript"])
+        # USER line must precede any later TOOL from the same flow.
+        self.assertLess(got["transcript"].index("USER [+5.0]: queued while busy"),
+                        got["transcript"].index("TOOL [+6.0]"))
+
+    def test_context_cap_many_prompts_keeps_pickers(self):
+        rows = [user(f"prompt-{n} " + "x" * 20, n) for n in range(400)]
+        rows += [assistant([picker()], minutes=400),
+                 result('"What next?"="Continue"', tid="picker", minutes=401)]
+        # Zero context so Calls drops the row; the prompt list alone must respect the cap.
+        rows[-2]["message"]["usage"] = {"input_tokens": 0, "cache_creation_input_tokens": 0,
+                                        "cache_read_input_tokens": 0, "output_tokens": 1}
+        got = self.digest(self.session(rows=rows))
+        self.assertLessEqual(got["digest_chars"], 60000)
+        ctx = self.section(got["digest"], "Context")
+        self.assertLessEqual(len(ctx), afr.CONTEXT_CAP)
+        self.assertRegex(ctx, r"At each typed prompt: .* \(\d+ more\)")
+        self.assertNotIn(rate.TRUNCATED, ctx)
+        self.assertIn("## Pickers\n### Picker 1", got["digest"])
+        self.assertIn("Answer: Continue", got["digest"])
+
+    def test_hook_stdout_non_object_is_ignored(self):
+        rows = [user("go")]
+        for n, stdout in enumerate(("[]", "null", '"ordinary stdout"', "not-json-at-all",
+                                    json.dumps({"hookSpecificOutput": []})), 1):
+            rows.append(self.attachment(
+                "hook_success", n, hookEvent="PreToolUse", hookName="PreToolUse:Bash",
+                toolUseID=f"h{n}", stdout=stdout))
+        ask = json.dumps({"hookSpecificOutput": {
+            "permissionDecision": "ask", "permissionDecisionReason": "real ask"}})
+        rows.append(self.attachment(
+            "hook_success", 10, hookEvent="PreToolUse", hookName="PreToolUse:Bash",
+            toolUseID="ok", stdout=ask))
+        got = self.digest(self.session(rows=rows))
+        harness = self.section(got["digest"], "Harness notes")
+        self.assertIn("Hook ask/deny decisions: 1", harness)
+        self.assertIn("real ask", harness)
+        self.assertIn("HARNESS [+10.0] hook ask PreToolUse:Bash: real ask", got["transcript"])
+
+    def test_cwd_reset_path_with_spaces(self):
+        root = "/tmp/my project"
+        rows = [
+            {**user("go"), "cwd": root},
+            {**assistant([tool(args={"command": "cd /tmp/elsewhere"}, tid="c1")], minutes=1),
+             "cwd": root},
+            {**result("ok\nShell cwd was reset to /tmp/my project", tid="c1", minutes=2),
+             "cwd": root},
+        ]
+        got = self.digest(self.session(rows=rows))
+        cwd = self.section(got["digest"], "Shell cwd")
+        self.assertIn("Shell cwd resets: 1", cwd)
+        self.assertIn("-> reset to /tmp/my project", cwd)
+        self.assertNotIn("reset to /tmp/my\n", cwd + "\n")
+
+    def test_context_tool_results_without_usage(self):
+        rows = [
+            user("go"),
+            assistant([tool("Read", {"file_path": "big.py"}, "r1")], minutes=1, mid="m1"),
+            result("x" * 5000, tid="r1", minutes=2),
+        ]
+        rows[1]["message"]["usage"] = {"input_tokens": 0, "cache_creation_input_tokens": 0,
+                                       "cache_read_input_tokens": 0, "output_tokens": 1}
+        got = self.digest(self.session(rows=rows))
+        ctx = self.section(got["digest"], "Context")
+        self.assertIn("Calls: 0; start -; max -; last -.", ctx)
+        self.assertIn('Read {"file_path": "big.py"} -> 5,000 chars', ctx)
+        self.assertIn("Tool result chars by tool: Read 5,000", ctx)
+
+    def test_adversarial_cap_shrinks_new_sections_before_friction(self):
+        # Full new sections (within their caps) would push past 60k; shrinking them
+        # to count lines first keeps every friction window.
+        rows = [user(f"P{n} " + "p" * 1200, minutes=n) for n in range(15)]
+        rows += [assistant([picker()], minutes=15),
+                 result('"What next?"="Continue"', tid="picker", minutes=16)]
+        for n in range(12):
+            rows += [assistant([{"type": "text", "text": "body " + "x" * 1800},
+                                tool(args={"command": "echo x"}, tid=f"e{n}")],
+                               minutes=100 + n * 5, mid=f"m{n}"),
+                     result("ordinary error " + "e" * 700, True, f"e{n}", minutes=100 + n * 5 + 1)]
+        for n in range(40):
+            rows += [assistant([tool(args={"command": f"cmd {n}"}, tid=f"o{n}")],
+                               minutes=200 + n, mid=f"mo{n}"),
+                     result(f"error: fail-{n}\nrc=1\n" + "z" * 200, False, f"o{n}", minutes=200 + n)]
+        for n in range(8):
+            rows += [assistant([tool("Read", {"file_path": f"f{n}.py"}, f"r{n}")],
+                               minutes=300 + n, mid=f"mr{n}"),
+                     result("R" * 5000, False, f"r{n}", minutes=300 + n)]
+        root = "/tmp/project"
+        for n in range(15):
+            rows += [{**assistant([tool(args={"command": f"cd /tmp/x{n}"}, tid=f"c{n}")],
+                                  minutes=400 + n, mid=f"mc{n}"), "cwd": root},
+                     {**result(f"Shell cwd was reset to {root}", tid=f"c{n}", minutes=400 + n),
+                      "cwd": root}]
+        for row in rows:
+            if row.get("type") in ("user", "assistant") and "cwd" not in row:
+                row["cwd"] = root
+        for n in range(60):
+            rows.append(self.attachment(
+                "hook_system_message", n + 1, hookEvent="UserPromptSubmit",
+                hookName="UserPromptSubmit", toolUseID=f"g{n}",
+                content="context guard: ~120k tokens; " + ("y" * 350)))
+        got = self.digest(self.session(rows=rows))
+        self.assertLessEqual(got["digest_chars"], 60000)
+        friction = self.section(got["digest"], "Friction excerpts")
+        self.assertEqual(got["events"]["error"], 12)
+        self.assertEqual(friction.count("### E"), got["events"]["error"] + got["events"]["idle"])
+        self.assertNotIn("more friction events", friction)
+        harness = self.section(got["digest"], "Harness notes")
+        self.assertIn("Context-guard messages: 60", harness)
+        self.assertNotIn("yyy", harness)
+        self.assertFalse(any(line.startswith("guard ") for line in harness.splitlines()))
 
 
 class CLITests(Fixtures):
