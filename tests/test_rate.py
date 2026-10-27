@@ -498,8 +498,9 @@ class RateTests(unittest.TestCase):
     def test_one_invalid_reply_retried_in_fresh_empty_directory_and_cleaned_up(self):
         directories, prompts = [], []
 
-        def fake(prompt, model, directory, timeout):
+        def fake(prompt, model, directory, timeout, confine=False):
             self.assertEqual((model, timeout), ("auto", 600))
+            self.assertTrue(confine)
             self.assertEqual(list(directory.iterdir()), [])
             self.assertNotEqual(directory, self.root)
             self.assertIn(rate.RUBRIC_TEXT, prompt)
@@ -545,17 +546,42 @@ class RateTests(unittest.TestCase):
         self.assertIn("No such file", err)
         run.assert_not_called()
 
-    def test_codex_default_medium_and_model_override(self):
-        for model in (None, "custom-model"):
-            with mock.patch("ask.run_codex", return_value=(json.dumps({"items": [item()]}), None, 0, "x")) as run:
-                self.assertEqual(rate.rate_packet("packet", 1, "codex", model, 12), [item()])
-            args = run.call_args.args
-            self.assertEqual(args[1:3], (model or "gpt-6.1-sol", "medium"))
-            self.assertEqual(args[4], 12)
-            self.assertFalse(args[3].exists())
+    def test_codex_refused(self):
+        before = self.log.read_bytes()
+        with mock.patch("ask.run_codex") as codex, mock.patch("ask.run_cursor") as cursor:
+            code, _, _ = self.invoke("--session", SESSION, "--agent", "codex")
+            self.assertIn("Cursor", str(code))
+            with self.assertRaises(ValueError):
+                rate.rate_packet("packet", 1, "codex")
+        codex.assert_not_called()
+        cursor.assert_not_called()
+        self.assertEqual(self.log.read_bytes(), before)
+
+    def test_cursor_model_override(self):
         with mock.patch("ask.run_cursor", return_value=(json.dumps({"items": [item()]}), None, 0, "x")) as run:
             rate.rate_packet("packet", 1, model="custom-cursor")
         self.assertEqual(run.call_args.args[1], "custom-cursor")
+        self.assertEqual(run.call_args.kwargs, {"confine": True})
+
+    def test_cursor_rating_always_confined(self):
+        with mock.patch("ask.run_cursor", return_value=(json.dumps({"items": [item()]}), None, 0, "auto")) as run:
+            self.assertEqual(rate.rate_packet("packet", 1, timeout=12), [item()])
+        self.assertEqual(run.call_args.args[1], "auto")
+        self.assertEqual(run.call_args.args[3], 12)
+        self.assertEqual(run.call_args.kwargs, {"confine": True})
+
+    def test_outside_read_reports_session_without_retry_or_rating(self):
+        before = self.log.read_bytes()
+        error = ask.OutsideRead("cursor-agent: readToolCall outside workspace: /outside/a")
+        with mock.patch("ask.run_cursor", side_effect=error) as run:
+            code, out, err = self.invoke("--session", SESSION)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn(SESSION[:8], err)
+        self.assertIn(str(error), err)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs, {"confine": True})
+        self.assertEqual(self.log.read_bytes(), before)
 
     def test_rating_row_shape_append_only_hash_and_no_delegation_row(self):
         before = self.log.read_bytes()

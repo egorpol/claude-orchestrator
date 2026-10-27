@@ -1,6 +1,6 @@
 # Automatic field reports: design
 
-Decided 2026-10-26, with second opinions from Cursor Auto. A Codex review on 2026-10-27 changed the sampling (1), the pass bar (4) and the leak guards. Not built yet.
+Decided 2026-10-26, with second opinions from Cursor Auto. A Codex review on 2026-10-27 changed the sampling (1), the pass bar (4) and the leak guards. Build steps 1–3 are done; the report pipeline itself is not built yet.
 
 ## Goal
 
@@ -32,13 +32,13 @@ Transcripts are 1.7 MB at the median, 7.1 MB at most.
 ## Leak guards (validation)
 
 - All 29 transcripts contain the `/field-report` run and the Write of the report. Cut the digest and the transcript file before the first `/field-report` prompt, then assert that neither contains `/field-report` or a Write to `feedback/`. Cut the commits at the same prompt, and check that HANDOFF.md was not written after it, because the end-state copy is taken later. On 2026-10-27, none of the 29 sessions wrote HANDOFF.md after the prompt, and 1 committed after it. A session that fails a check is dropped from the trial.
-- Cursor `--mode ask` reads files outside its `--workspace` by absolute path (see `verified-behaviour.md`, 2026-10-26), so an empty working directory doesn't keep it away from `feedback/` or the transcripts. `--output-format stream-json` lists each read as a `tool_call` event with its path (`readToolCall` `args.path`, `globToolCall` `args.targetDirectory`; positive control on 2026-10-27). So the trial runs stream-json and fails any run with a tool call whose path lies outside its workspace, or whose tool kind the guard doesn't know.
+- Cursor `--mode ask` reads files outside its `--workspace` by absolute path (see `verified-behaviour.md`, 2026-10-26), so an empty working directory doesn't keep it away from `feedback/` or the transcripts. `--output-format stream-json` lists each read as a `tool_call` event with its path (`readToolCall` `args.path`, `globToolCall` `args.targetDirectory`; positive control on 2026-10-27). So the trial runs stream-json and fails any run with a tool call whose path lies outside its workspace, or whose tool kind the guard doesn't know. Ask mode also runs shell commands (`ls`) and starts subagents whose reads don't reach the stream (2026-10-27), so shell, subagent and unknown tool kinds fail too, and the whole process group is killed. Built 2026-10-27 as `ask.run_cursor(..., confine=True)`. The guard can't see context Cursor injects without a tool call: its user rules, a skills list and, in 64 of 89 past rating chats, the full field-report SKILL.md. That text names no session, but the stage prompts shouldn't rely on its absence.
 
 ## Build order
 
 1. Codex review of this document: done 2026-10-27.
 2. The stream-json probe from the leak guards: done 2026-10-27; the stream lists the reads.
-3. The outside-read guard: run Cursor with stream-json and fail on tool-call paths outside the workspace. `delegate rate` needs the same guard.
+3. The outside-read guard: run Cursor with stream-json and fail on tool-call paths outside the workspace. `delegate rate` needs the same guard. Done 2026-10-27; `rate` refuses Codex, whose reads show only as shell strings.
 4. Digest builder and session selection, with tests on fake transcripts (delegated).
 5. Stage 1 and stage 2 prompts, then the validation trial on 10 sessions. Hand off after the trial's numbers are in.
 6. The `--batch` command, plus a fold-in note in `CLAUDE.md`, only if the trial passes.
