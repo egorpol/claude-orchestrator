@@ -306,6 +306,13 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(len(rv_log), 81)
         self.assertEqual(rv_log[1], "verify-21")
 
+    def test_verify_command_runs_scrubbed(self):
+        cmd = ("test -z \"${VSCODE_FAKE+x}\" && test \"$PYTHONDONTWRITEBYTECODE\" = 1 "
+               "&& printf 'scrubbed\\n'")
+        self.launch("codex", "scrub", "--verify", cmd)
+        self.assertIn("scrubbed", self.cli("verify", "scrub"))
+        self.assertIn("scrubbed", self.cli("verify", "scrub", "--cmd", cmd))
+
     def test_failures_still_finalize(self):
         output = self.launch("codex", "failed", "--verify", "echo failing; exit 3",
                              code=7, extra_env={"FAKE_AGENT_EXIT": "7"})

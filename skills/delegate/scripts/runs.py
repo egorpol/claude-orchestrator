@@ -1220,20 +1220,19 @@ def verify(a):
     cmd = a.cmd or meta.get("verify")
     if not cmd:
         sys.exit("no verify command stored for this run; pass --cmd")
-    r = subprocess.run(["bash", "-c", cmd], cwd=meta["worktree"], capture_output=True, text=True)
-    out = f"{_echoed_verify(cmd)}\n{r.stdout}{r.stderr}"
+    rc, out, _ = run_verify_in_worktree(Path(meta["repo"]), meta["worktree"], cmd)
     if a.cmd is None:
         (root / "verify.log").write_text(out)
-        (root / "verify_code").write_text(f"{r.returncode}\n")
+        (root / "verify_code").write_text(f"{rc}\n")
     else:
         (root / "verify-adhoc.log").write_text(out)
     print("\n".join(out.rstrip().splitlines()[-30:]))
-    print(f"verify: {'pass' if r.returncode == 0 else f'FAIL rc={r.returncode}'}")
-    if r.returncode == 0:
+    print(f"verify: {'pass' if rc == 0 else f'FAIL rc={rc}'}")
+    if rc == 0:
         hit = checks.failure_line(out)
         if hit:
             print(f"WARNING: verify exited 0 but printed a failure line: {hit}")
-    sys.exit(r.returncode)
+    sys.exit(rc)
 
 
 BUSY = ("running", "verifying")

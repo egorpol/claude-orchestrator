@@ -28,7 +28,7 @@ One CLI: `~/.claude/skills/delegate/scripts/delegate` (stdlib Python; full path,
 | `delegate review NAME [--agent ...] [--focus TEXT]` | read-only review of a run; by default the *other* vendor |
 | `delegate review --working-tree --brief F [--base REF] [--agent …]` | read-only review of uncommitted main-checkout work (tracked + non-ignored untracked); both vendors in parallel by default (Codex gpt-6.1-sol @xhigh + Cursor auto). Snapshot via a temp index (real index/HEAD untouched). Refuses over 100 untracked files or 10 MiB unless `--all-untracked`. `--link` takes gitignored paths only (live symlinks, not in the digest). Gitignored paths are absent from the snapshot. `cleanup NAME` afterwards; each call is a new run |
 | `delegate followup NAME --brief F \| --from-review N [--fresh --model M] [--link PATH]` | next round in the same worktree, resuming the session; `--link` as on launch |
-| `delegate verify NAME [--cmd C]` | re-run the check in the worktree |
+| `delegate verify NAME [--cmd C]` | re-run the check in the worktree, in the same scrubbed environment as the run's own verify step (stdin closed, no `__pycache__`); `--cmd` writes `verify-adhoc.log` and leaves the stored result alone |
 | `delegate status [NAME] [--full]` | compact exit packet (default); `--full` for log tail and whole last message |
 | `delegate wait NAME… [--timeout S]` | blocks until the run's round and reviews have finished and recorded, verify included; prints their packets. Exit 0 done, 1 failed, 3 timeout |
 | `delegate diff NAME` / `apply NAME [--check]` / `cleanup NAME` | inspect, merge, tidy up. Each run is logged once to `runs.jsonl` in the runs root (what `cost` summarises): at `apply`, or at `cleanup` for read-only, hand-merged or discarded runs |
