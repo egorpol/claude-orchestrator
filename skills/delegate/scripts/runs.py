@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,9 @@ RUNS_ROOT = Path(os.environ.get("CLAUDE_DELEGATE_ROOT",
 DEFAULTS = {"codex": ("gpt-6.1-sol", "xhigh"), "cursor": ("auto", None)}
 ROUND_FILES = ("brief.md", "prompt.md", "run.sh", "log", "last-message.md", "exit_code", "pid",
                "started_at", "finished_at", "finalized_at", "verify.log", "verify_code", "verify-adhoc.log")
+# Snapshot refuses to hash a stray data dump into .git/objects (and the review patch).
+UNTRACKED_MAX_FILES = 100
+UNTRACKED_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB
 
 # Claude Code here runs inside Cursor's AppImage; these leak into children and
 # can break other binaries, or make a delegate think it is talking to an IDE.
@@ -117,6 +121,10 @@ verify: <command or supplied verify log> -> <result>
 conflicts: <one line each, or none>
 risks: <path:line - why, or none>
 """
+
+# Shared checks/output tail; derived so it cannot drift from REVIEW_PROMPT.
+_REVIEW_CHECKS_MARK = "## The brief(s) the other agent was given"
+REVIEW_PROMPT_CHECKS = REVIEW_PROMPT[REVIEW_PROMPT.index(_REVIEW_CHECKS_MARK):]
 
 
 def git(*args, cwd=None, check=True):
@@ -250,6 +258,30 @@ def start(job, detach, name):
         print("detached; check with: delegate status " + name)
         return
     os.execvp("bash", ["bash", str(job / "run.sh")])
+
+
+def start_jobs(jobs, detach, name):
+    """Start one or more jobs. Several without --detach: wait, then print each packet."""
+    if len(jobs) == 1:
+        start(jobs[0], detach, name)
+        return
+    sys.stdout.flush()
+    procs = []
+    for job in jobs:
+        procs.append(subprocess.Popen(
+            ["bash", str(job / "run.sh")], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True))
+    if detach:
+        print("detached; check with: delegate status " + name)
+        return
+    for p in procs:
+        p.wait()
+    failed = False
+    for job in jobs:
+        print("\n".join(packet(job)))
+        if state(job) != "done":
+            failed = True
+    sys.exit(1 if failed else 0)
 
 
 def find_run(ref):
@@ -556,6 +588,8 @@ def followup(a):
     if state(root) in BUSY or _finalizing(root):
         sys.exit("delegate is still running")
     meta = load_meta(root)  # after the guard, or finalize's history could be saved back stale
+    if meta.get("kind") == "working-tree":
+        sys.exit("a working-tree run has nothing to resume")
     wt = Path(meta["worktree"])
     if not wt.exists():
         sys.exit("worktree was removed; start a new run instead")
@@ -745,11 +779,291 @@ def _trim_review_patch(patch, max_kb):
     return "".join(out), omitted
 
 
+def list_untracked(repo):
+    """Non-ignored untracked paths with lstat sizes: [(path, size), ...]."""
+    raw = git("ls-files", "--others", "--exclude-standard", "-z", cwd=repo)
+    entries = []
+    for path in filter(None, raw.split("\0")):
+        try:
+            size = (repo / path).lstat().st_size
+        except OSError:
+            size = 0
+        entries.append((path, size))
+    return entries
+
+
+def print_untracked_summary(entries, limit=20):
+    total = sum(size for _, size in entries)
+    print(f"untracked: {len(entries)} file(s), {total} bytes total")
+    for path, size in entries[:limit]:
+        print(f"  {path} ({size} bytes)")
+    if len(entries) > limit:
+        print(f"  ... {len(entries) - limit} more")
+    return total
+
+
+def refuse_large_untracked(entries, all_untracked):
+    """Exit before writing objects when untracked volume is high, unless --all-untracked."""
+    if all_untracked:
+        return
+    total = sum(size for _, size in entries)
+    if len(entries) <= UNTRACKED_MAX_FILES and total <= UNTRACKED_MAX_BYTES:
+        return
+    largest = sorted(entries, key=lambda item: -item[1])[:10]
+    listing = ", ".join(f"{path} ({size} bytes)" for path, size in largest)
+    sys.exit(
+        f"refusing to snapshot: {len(entries)} untracked file(s), {total} bytes "
+        f"(limits: {UNTRACKED_MAX_FILES} files, {UNTRACKED_MAX_BYTES} bytes). "
+        f"Largest: {listing}. Add them to .gitignore, or pass --all-untracked.")
+
+
+def working_tree_has_changes(repo, base_sha, untracked=None):
+    """True when the snapshot-vs-base review would be non-empty.
+
+    Always asks for untracked files explicitly: `status.showUntrackedFiles=no` would
+    otherwise make an untracked-only tree look clean.
+    """
+    if untracked:
+        return True
+    porcelain = git("status", "--porcelain", "--untracked-files=all", cwd=repo)
+    if porcelain.strip():
+        return True
+    head = git("rev-parse", "HEAD", cwd=repo)
+    if base_sha == head:
+        return False
+    r = subprocess.run(["git", "diff", "--quiet", base_sha, head], cwd=repo,
+                       capture_output=True, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    return r.returncode != 0
+
+
+def validate_working_tree_links(repo, links):
+    """Same path checks as add_links, plus refuse non-gitignored paths (already in the snapshot)."""
+    for link in links:
+        p = Path(link)
+        if p.is_absolute() or ".." in p.parts or not p.parts or p.parts[0] in (".git", ".delegate"):
+            sys.exit(f"--link {link}: expected a repo-relative input path outside .git and .delegate")
+        src = repo / p
+        if not src.exists():
+            sys.exit(f"--link {link}: {src} does not exist")
+        # Index-aware check-ignore matches what `git add -A` skips: tracked paths count as not
+        # ignored, and a delegate-owned info/exclude line (another run's --link) counts as ignored.
+        r = subprocess.run(["git", "check-ignore", "-q", "--", link], cwd=repo, capture_output=True,
+                           env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        if r.returncode != 0:
+            sys.exit(f"--link {link}: not gitignored (or tracked), so the snapshot already holds it; "
+                     f"drop --link")
+
+
+def snapshot_working_tree(repo, message="delegate working-tree snapshot"):
+    """Dangling commit of the working tree; does not touch the real index, HEAD or any ref.
+
+    Copies the real index to a temp GIT_INDEX_FILE, `git add -A`, write-tree, commit-tree -p HEAD.
+    Reusable later for launch --base-dirty.
+    """
+    index_path = Path(git("rev-parse", "--git-path", "index", cwd=repo))
+    if not index_path.is_absolute():
+        index_path = Path(repo) / index_path
+    fd, tmp_name = tempfile.mkstemp(prefix="delegate-wt-index-")
+    os.close(fd)
+    tmp_index = Path(tmp_name)
+    try:
+        if index_path.exists():
+            shutil.copy2(index_path, tmp_index)
+        else:
+            tmp_index.write_bytes(b"")
+        env = {**os.environ, "GIT_INDEX_FILE": str(tmp_index), "GIT_OPTIONAL_LOCKS": "0"}
+        r = subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, env=env)
+        if r.returncode != 0:
+            sys.exit(f"git add -A (temp index) failed: {r.stderr.decode('utf-8', 'replace').strip()}")
+        tree = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, env=env)
+        if tree.returncode != 0:
+            sys.exit(f"git write-tree failed: {tree.stderr.strip()}")
+        head = git("rev-parse", "HEAD", cwd=repo)
+        commit = subprocess.run(
+            ["git", "commit-tree", tree.stdout.strip(), "-p", head, "-m", message],
+            cwd=repo, capture_output=True, text=True,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        if commit.returncode != 0:
+            sys.exit(f"git commit-tree failed: {commit.stderr.strip()}")
+        return commit.stdout.strip()
+    finally:
+        tmp_index.unlink(missing_ok=True)
+
+
+def _working_tree_review_prompt(wt, base, n, agent, brief, focus, omit_note):
+    """Review prompt for a main-checkout snapshot; drops the verify-log sentence (no verify)."""
+    shell_note = ("" if agent == "cursor" else
+                  " You may run read-only commands (tests, dry runs, `git diff`). The sandbox is read-only, so "
+                  "a command that fails only because it cannot write is not a finding; say so instead.")
+    opening = (
+        f"# Review request (read-only)\n\n"
+        f"The orchestrator (Claude) made these uncommitted changes in the main checkout; "
+        f"this worktree is a snapshot of them, relative to commit {base}. Review them. "
+        f"This is a read-only task: do not modify, create or delete any files.\n\n"
+        f"The full diff is in `.delegate/review-{n}.patch` (path relative to the worktree root; "
+        f"new files appear as additions). Read it, then read the surrounding code in the worktree "
+        f"where you need context.{shell_note}\n"
+        f"{omit_note}\n"
+    )
+    return opening + REVIEW_PROMPT_CHECKS.format(brief=brief, focus=focus)
+
+
+def _abandon_working_tree(repo, root, wt, excluded=()):
+    git("worktree", "remove", "--force", str(wt), cwd=repo, check=False)
+    shutil.rmtree(root, ignore_errors=True)
+    _remove_excluded(repo, excluded)
+
+
+def _default_working_tree_reviewers(a):
+    """Default both-vendor pair without consulting quota (used by --dry-run)."""
+    if a.model:
+        sys.exit("--model needs a single --agent (default is both reviewers)")
+    codex_effort = a.effort if a.effort is not None else DEFAULTS["codex"][1]
+    return [("codex", DEFAULTS["codex"][0], codex_effort),
+            ("cursor", DEFAULTS["cursor"][0], None)]
+
+
+def _reviewers_for_working_tree(a):
+    """[(agent, model, effort), ...] — both vendors by default; optional Codex→Cursor fallback."""
+    if a.agent:
+        agent = a.agent
+        model = a.model or DEFAULTS[agent][0]
+        effort = a.effort if a.effort is not None else (None if a.model else DEFAULTS[agent][1])
+        return [(agent, model, effort)]
+    reviewers = _default_working_tree_reviewers(a)
+    # Lazy: ask imports runs.
+    import ask as ask_mod
+    fallback = ask_mod._fallback_for_both(a)
+    if fallback:
+        return [("cursor", fallback["model"], None), ("cursor", reviewers[1][1], None)]
+    return reviewers
+
+
+def review_working_tree(a):
+    """Read-only cross-vendor review of uncommitted work in the main checkout."""
+    if not a.brief:
+        sys.exit("--working-tree requires --brief (the change's intent or spec)")
+    if a.run:
+        sys.exit("give a run name or --working-tree, not both")
+    repo = Path(git("rev-parse", "--show-toplevel", cwd=getattr(a, "repo", None) or os.getcwd()))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    name = a.name or f"wt-{stamp}"
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        sys.exit(f"bad run name {name!r}: use letters, digits, . _ -")
+    root = Path(a.root).expanduser().resolve() if getattr(a, "root", None) else RUNS_ROOT / repo.name / name
+    if root.exists() and any(root.iterdir()):
+        sys.exit(f"{root} already exists and is not empty")
+    base_sha = git("rev-parse", a.base or "HEAD", cwd=repo)
+    brief = Path(a.brief).expanduser().read_text()
+    links = [p.strip("/") for p in (a.link or [])]
+    validate_working_tree_links(repo, links)
+    entries = list_untracked(repo)
+    print_untracked_summary(entries)
+    refuse_large_untracked(entries, getattr(a, "all_untracked", False))
+    if not working_tree_has_changes(repo, base_sha, untracked=entries):
+        sys.exit("no changes to review")
+    focus = f"\n## Extra focus from the orchestrator\n{a.focus}\n" if a.focus else ""
+
+    if a.dry_run:
+        # No quota/ratings: dry-run must not write the ratings cache.
+        if a.agent:
+            reviewers = _reviewers_for_working_tree(a)
+        else:
+            reviewers = _default_working_tree_reviewers(a)
+            if not getattr(a, "no_fallback", False):
+                print("note: at launch, the Codex half is swapped for a Cursor model if "
+                      "codex-5h or codex-7d is under min_quota_pct")
+        print(f"[dry run] would snapshot {repo} (base {base_sha[:9]}) into {root}; "
+              f"reviewers: " + ", ".join(
+                  f"{ag} {mo}" + (f" @{ef}" if ef else "") for ag, mo, ef in reviewers))
+        for i, (agent, model, effort) in enumerate(reviewers, 1):
+            prompt = _working_tree_review_prompt(root / "wt", base_sha[:9], i, agent, brief.rstrip(),
+                                                 focus, "")
+            cmd = build_cmd(agent, model, effort, root / "wt", root / f"review-{i}", read_only=True)
+            print(f"\n[dry run] review {i} by {agent} {model}: {cmd}\n---- prompt.md ----\n{prompt}")
+        return
+
+    reviewers = _reviewers_for_working_tree(a)
+    snapshot = snapshot_working_tree(repo)
+    root.mkdir(parents=True, exist_ok=True)
+    wt = root / "wt"
+    excluded = []
+    try:
+        git("worktree", "add", "--detach", str(wt), snapshot, cwd=repo)
+        excluded = add_links(repo, wt, links)
+    except BaseException:
+        _abandon_working_tree(repo, root, wt, excluded)
+        raise
+    meta = {"name": name, "kind": "working-tree", "agent": "claude", "model": None, "effort": None,
+            "session": os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
+            "read_only": True, "verify": None, "repo": str(repo), "worktree": str(wt),
+            "base": base_sha, "snapshot": snapshot, "links": links, "excluded": excluded,
+            "rounds": 0, "created": datetime.now().isoformat(timespec="seconds"),
+            "brief_source": str(Path(a.brief).expanduser().resolve())}
+    (root / "brief.md").write_text(brief)
+    save_meta(root, meta)
+
+    _, patch = make_patch(root, meta)
+    if not patch.strip():
+        _abandon_working_tree(repo, root, wt, excluded)
+        sys.exit("no changes to review")
+    max_kb = getattr(a, "patch_max_kb", 200)
+    review_patch, omitted = _trim_review_patch(patch, max_kb)
+    omit_line = ""
+    if omitted:
+        bits = ", ".join(f"{p} ({s} KB)" for p, s in omitted)
+        omit_line = f"review patch: omitted {len(omitted)} large file diff(s): {bits}"
+        print(omit_line)
+    omit_note = ""
+    if omitted:
+        files = ", ".join(f"{p} ({s} KB)" for p, s in omitted)
+        omit_note = (f"\nLarge file diffs omitted from the review patch (read them in the worktree instead): "
+                     f"{files}.\n")
+
+    (wt / ".delegate").mkdir(exist_ok=True)
+    for old in (wt / ".delegate").glob("review-*.patch"):
+        old.unlink()
+    jobs = []
+    for n, (agent, model, effort) in enumerate(reviewers, 1):
+        job = root / f"review-{n}"
+        job.mkdir()
+        write_patch(wt / ".delegate" / f"review-{n}.patch", review_patch)
+        # Stub only: working-tree runs have no verify; the prompt omits the verify-log sentence.
+        (wt / ".delegate" / f"review-{n}.verify.log").write_text(
+            "$ (no verify command stored)\n(no verify output recorded)\n")
+        prompt = _working_tree_review_prompt(wt, base_sha[:9], n, agent, brief.rstrip(), focus, omit_note)
+        cmd = build_cmd(agent, model, effort, wt, job, read_only=True)
+        (job / "prompt.md").write_text(prompt)
+        (job / "run.sh").write_text(job_script(job, f"review {name} #{n}", repo, wt, cmd, agent,
+                                               digest_base=base_sha))
+        save_meta(job, {"agent": agent, "model": model, "effort": effort, "n": n, "round": 0})
+        print(f"review {n} of {name} (working-tree) by {agent} {model}"
+              + (f" @{effort}" if effort else ""))
+        print(f"result:   {job / 'last-message.md'}")
+        quota.spawn_snapshot("launch", run=name, session=os.environ.get("CLAUDE_CODE_SESSION_ID"),
+                             job=f"review-{n}")
+        jobs.append(job)
+    log_agent = "both" if len(reviewers) > 1 else reviewers[0][0]
+    log_delegation("review", run=name, agent=log_agent)
+    print(f"run:      {root}")
+    print(f"worktree: {wt}  (snapshot {snapshot[:9]}, base {base_sha[:9]})")
+    start_jobs(jobs, a.detach, name)
+
+
 def review(a):
+    if getattr(a, "brief", None) and not getattr(a, "working_tree", False):
+        sys.exit("--brief is only valid with --working-tree (a run's review uses the run's own briefs)")
+    if getattr(a, "working_tree", False):
+        return review_working_tree(a)
+    if not a.run:
+        sys.exit("give a run name, or --working-tree")
     root = find_run(a.run)
     if state(root) in BUSY or _finalizing(root):
         sys.exit("delegate is still running")
     meta = load_meta(root)  # after the guard, or finalize's history could be saved back stale
+    if meta.get("kind") == "working-tree":
+        sys.exit(f"{meta['name']} is a working-tree review run; start a new "
+                 f"`delegate review --working-tree` after fixes")
     wt = Path(meta["worktree"])
     if not wt.exists():
         sys.exit("worktree was removed")
@@ -877,6 +1191,13 @@ def state(job):
         return "done" if rc == "0" else f"failed rc={rc}"
     pid_f = job / "pid"
     if not pid_f.exists():
+        # working-tree run roots have no build round; not busy / not failed
+        if (job / "meta.json").exists():
+            try:
+                if load_meta(job).get("kind") == "working-tree":
+                    return "ready"
+            except (OSError, ValueError, KeyError):
+                pass
         return "not started"
     try:
         os.kill(int(pid_f.read_text().strip()), 0)
@@ -1117,10 +1438,16 @@ def packet(job):
     """Rebuild a bounded notification packet entirely from existing artifacts."""
     root, meta, review_meta = _context(job)
     jm = review_meta or meta
-    label = f"review {job.name.split('-')[-1]}" if review_meta is not None else f"round {meta.get('rounds', 1)}"
+    if review_meta is not None:
+        label = f"review {job.name.split('-')[-1]}"
+    elif meta.get("kind") == "working-tree":
+        label = "working-tree"
+    else:
+        label = f"round {meta.get('rounds', 1)}"
     rc = _code(job, "exit_code")
     verify_state = _verify_state(job) or "verify none"
-    lines = [f"== {_one_line(meta['name'])} | {_one_line(jm['agent'])} {_one_line(jm['model'])} | {label} | "
+    model_s = jm.get("model") if jm.get("model") is not None else "-"
+    lines = [f"== {_one_line(meta['name'])} | {_one_line(jm['agent'])} {_one_line(model_s)} | {label} | "
              f"{state(job)} | {_elapsed(job)} | exit {rc if rc is not None else '?'} | {verify_state}",
              _usage_line(_job_usage(job, meta, review_meta))]
     if review_meta is not None:
@@ -1225,8 +1552,17 @@ def log_tail(job, agent, n):
 
 
 def _run_jobs(root):
-    """A run's jobs: the root plus every review-* directory that has meta.json."""
-    jobs = [root]
+    """A run's jobs: the root plus every review-* directory that has meta.json.
+
+    Working-tree runs have no build round at the root; wait only on their reviews.
+    """
+    jobs = []
+    try:
+        kind = load_meta(root).get("kind") if (root / "meta.json").exists() else None
+    except (OSError, ValueError):
+        kind = None
+    if kind != "working-tree":
+        jobs.append(root)
     for meta_path in sorted(root.glob("review-*/meta.json"),
                             key=lambda p: int(p.parent.name.split("-")[1])):
         jobs.append(meta_path.parent)
@@ -1287,10 +1623,23 @@ def wait(a):
             sys.exit(3)
         time.sleep(min(interval, remaining))
 
-    if ever_busy:
-        to_print = ever_busy
-    else:
-        to_print = [max(_run_jobs(root), key=_started_sort_key) for root in roots]
+    # Working-tree runs have several peer reviews; printing only the busy or the
+    # latest ones would hide a review that failed before wait attached. Normal
+    # runs print the jobs that were busy, else the single latest job.
+    busy_keys = {str(job.resolve()) for job in ever_busy}
+    to_print = []
+    for root in roots:
+        jobs = _run_jobs(root)
+        try:
+            kind = load_meta(root).get("kind")
+        except (OSError, ValueError):
+            kind = None
+        if kind == "working-tree":
+            to_print.extend(jobs)
+        elif ever_busy:
+            to_print.extend(job for job in jobs if str(job.resolve()) in busy_keys)
+        elif jobs:
+            to_print.append(max(jobs, key=_started_sort_key))
 
     failed = False
     for job in to_print:
@@ -1330,7 +1679,8 @@ def status(a):
             if wt.exists() and time.time() - (root / "applied").stat().st_mtime > 86400:
                 # Field incident: a day-old applied worktree with edits looked like unmerged work.
                 bits.append(f"STALE worktree: applied over a day ago; `delegate cleanup {meta['name']}`")
-        print(f"== {meta['name']}  {meta['agent']} {meta['model']}  [{state(root)} {_elapsed(root)}]  "
+        model_s = meta["model"] if meta.get("model") is not None else "-"
+        print(f"== {meta['name']}  {meta['agent']} {model_s}  [{state(root)} {_elapsed(root)}]  "
               + ", ".join(bits))
         if not a.runs:
             continue
@@ -1400,7 +1750,8 @@ def make_patch(root, meta):
     else:
         git("add", "-A", "-N", cwd=wt)
     head = git("rev-parse", "HEAD", cwd=wt)
-    if head != meta["base"]:
+    # working-tree reviews check out meta["snapshot"]; base is only the diff base
+    if head != meta["base"] and head != meta.get("snapshot"):
         print(f"WARNING: worktree HEAD {head[:9]} != base {meta['base'][:9]}: the delegate made commits "
               f"(contract breach). The patch below covers them too.", file=sys.stderr)
     # Bytes, not text=True: universal newlines would turn \r\n into \n and break CRLF files.
@@ -1444,6 +1795,8 @@ def apply(a):
     if state(root) in BUSY or _finalizing(root):
         sys.exit("delegate is still running")
     meta = load_meta(root)  # after the guard, or finalize's history could be saved back stale
+    if meta.get("kind") == "working-tree":
+        sys.exit("a working-tree run has nothing to apply")
     _, patch = make_patch(root, meta)
     if not patch.strip():
         sys.exit("nothing to apply")
@@ -1548,7 +1901,8 @@ def cleanup(a):
         sys.exit("delegate or a review is still running")
     meta = load_meta(root)  # after the guard, or finalize's history could be saved back stale
     wt = Path(meta["worktree"])
-    if wt.exists():
+    working_tree = meta.get("kind") == "working-tree"
+    if wt.exists() and not working_tree:
         dirty = _dirty_without_links(wt, meta)
         applied = root / "applied"
         if dirty and not a.force:
@@ -1557,17 +1911,21 @@ def cleanup(a):
                          f"apply them or pass --force:\n{dirty}")
     if not (root / "logged").exists() and not (root / "applied").exists():  # apply already logged it
         # Read-only runs, reviews and runs merged by hand never pass through apply.
-        changed = wt.exists() and bool(_dirty_without_links(wt, meta))
-        log_run(root, meta, "discarded" if changed else "read-only" if meta.get("read_only") else "no-changes")
+        if working_tree:
+            outcome = "reviewed"
+        else:
+            changed = wt.exists() and bool(_dirty_without_links(wt, meta))
+            outcome = ("discarded" if changed else "read-only" if meta.get("read_only") else "no-changes")
+        log_run(root, meta, outcome)
     if wt.exists():
         for l in meta.get("links", []):
             if (wt / l).is_symlink():
                 (wt / l).unlink()
-        # safe by now: changes were applied, absent, or explicitly discarded
+        # safe by now: changes were applied, absent, explicitly discarded, or a working-tree snapshot
         git("worktree", "remove", "--force", str(wt), cwd=meta["repo"])
     # Transfer or remove owned exclude lines, then clear meta before any --purge.
     _release_excluded(Path(meta["repo"]), root, meta)
-    if not a.keep_branch:
+    if meta.get("branch") and not a.keep_branch:
         git("branch", "-D", meta["branch"], cwd=meta["repo"], check=False)
     if a.purge:
         shutil.rmtree(root)
