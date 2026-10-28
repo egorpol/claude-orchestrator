@@ -8,6 +8,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Added
 
+- `delegate review --working-tree --brief F [--base REF]`: read-only cross-vendor review of uncommitted main-checkout work (temp-index snapshot, both vendors by default; refuses >100 untracked files or 10 MiB unless `--all-untracked`), replacing the hand-written `ask --agent both` + patch step.
 - `hooks/secret-guard.py` PreToolUse cwd check: denies a top-level `cd`/`pushd` that would leave the shell in a project subdirectory (Claude Code keeps that directory for later Bash calls), and notices when the input `cwd` has already drifted from `CLAUDE_PROJECT_DIR`; `CWD_GUARD_DISABLE=1` turns only this check off.
 - `delegate quota --unused` (`monitor.py`): closed quota windows' peak use and unused share from `quota.jsonl` (no openusage call), plus median pool cost per (agent, model, effort, kind) from readings around delegate jobs; live `delegate quota` and `delegate route` show about-N-rounds-left / a ROUNDS column when n ≥ 3. Launch/followup/review tag their readings with `job`, finalize takes a detached `job-end` reading, and review records gain `started` and `effort`.
 - `delegate report --digest` evidence gains Context, Harness notes, Errors and Shell cwd sections (plus transcript markers for guards, silent-turn reminders, hook asks, error text and cwd resets), so auto field-report writers see context trajectory, harness reminders, ok-result failure lines and shell cwd moves that the 2026-10-27 trial missed.

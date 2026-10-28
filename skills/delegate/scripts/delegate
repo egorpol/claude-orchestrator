@@ -5,7 +5,7 @@
   delegate ratings [--refresh]        AA ratings for catalog models
   delegate route <task>               rank delegates for a task type
   delegate launch codex|cursor ...    worktree + brief + background run (--preflight: verify only)
-  delegate review RUN [--agent ...]   read-only review of a run's changes (other vendor by default)
+  delegate review RUN | --working-tree --brief F   read-only review (run: other vendor; working-tree: both)
   delegate followup RUN --brief F     next round in the same worktree, resuming the agent session
   delegate verify RUN [--cmd C]       re-run the run's check command in its worktree
   delegate status [RUN]               runs overview / one run in detail
@@ -229,9 +229,23 @@ def main():
     s.add_argument("--dry-run", action="store_true", help="show what would run; archive nothing")
     s.set_defaults(fn=runs.followup)
 
-    s = sub.add_parser("review", help="read-only review of a run's changes, by default by the other vendor")
-    s.add_argument("run")
-    s.add_argument("--agent", choices=["codex", "cursor"], help="default: the vendor that did NOT write the code")
+    s = sub.add_parser("review", help="read-only review of a run's changes, or of uncommitted main-tree work")
+    s.add_argument("run", nargs="?", help="run name (omit with --working-tree)")
+    s.add_argument("--working-tree", action="store_true",
+                   help="review uncommitted work in the main checkout (tracked + untracked); "
+                        "both vendors by default")
+    s.add_argument("--brief", help="with --working-tree: intent/spec file (required); stored as the run's brief")
+    s.add_argument("--base", help="with --working-tree: diff base commit-ish (default HEAD)")
+    s.add_argument("--name", help="with --working-tree: run name (default wt-<timestamp>)")
+    s.add_argument("--link", action="append", default=[],
+                   help="with --working-tree: repo-relative gitignored path to symlink into the "
+                        "snapshot worktree (repeatable)")
+    s.add_argument("--all-untracked", action="store_true",
+                   help="with --working-tree: allow more than 100 untracked files or 10 MiB total")
+    s.add_argument("--no-fallback", action="store_true",
+                   help="with --working-tree both-reviewers: keep Codex even when its quota is empty")
+    s.add_argument("--agent", choices=["codex", "cursor"],
+                   help="run review: other vendor by default; working-tree: both vendors by default")
     s.add_argument("--model", help="codex default gpt-6.1-sol (@xhigh); cursor default auto")
     s.add_argument("--effort")
     s.add_argument("--focus", help="extra review focus, e.g. 'race conditions in the cache'")
