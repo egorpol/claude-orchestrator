@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import checks
 import quota
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -25,7 +26,8 @@ RUNS_ROOT = Path(os.environ.get("CLAUDE_DELEGATE_ROOT",
                                 / "claude-delegate" / "runs"))
 DEFAULTS = {"codex": ("gpt-6.1-sol", "xhigh"), "cursor": ("auto", None)}
 ROUND_FILES = ("brief.md", "prompt.md", "run.sh", "log", "last-message.md", "exit_code", "pid",
-               "started_at", "finished_at", "finalized_at", "verify.log", "verify_code", "verify-adhoc.log")
+               "started_at", "finished_at", "finalized_at", "verify.log", "verify_code", "verify-adhoc.log",
+               "warnings")
 # Snapshot refuses to hash a stray data dump into .git/objects (and the review patch).
 UNTRACKED_MAX_FILES = 100
 UNTRACKED_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB
@@ -198,10 +200,16 @@ def build_cmd(agent, model, effort, wt, job, read_only, unsandboxed=False, resum
     sys.exit(f"unknown agent {agent!r}")
 
 
+def _echoed_verify(cmd):
+    """Prefix every physical line with `$ ` so failure_line skips the whole echo."""
+    lines = cmd.splitlines() or [cmd]
+    return "\n".join("$ " + line for line in lines)
+
+
 def verify_bash_fragment(verify):
     """Inner `{ echo; bash -c }` used by run.sh's verify step and by --preflight."""
     q = shlex.quote
-    return f"{{ echo {q('$ ' + verify)}; bash -c {q(verify)}; }}"
+    return f"{{ echo {q(_echoed_verify(verify))}; bash -c {q(verify)}; }}"
 
 
 def run_verify_in_worktree(repo, wt, verify):
@@ -338,6 +346,61 @@ def _needs_link_warning(repo, path):
             return False  # some other exclude pattern
         return False  # .gitignore or other source
     return True
+
+
+def static_warnings(repo, brief_text, verify):
+    """One `warning: …` line per static issue; never changes any exit code."""
+    out = []
+    for stage in checks.masked_pipes(verify or ""):
+        name = checks.stage_name(stage) or stage.split()[0]
+        out.append(
+            f"warning: --verify pipes into `{stage}` without pipefail, so a failing check can "
+            f"exit 0 (the status is {name}'s). Prefix `set -o pipefail; ` or end with an "
+            f"asserting stage such as `| grep -q '^OK$'`.")
+    path_warns = []
+    for path, kind, rel in checks.find_brief_paths(brief_text or "", repo):
+        if kind == "scratchpad":
+            path_warns.append(
+                f"warning: the brief names {path}, in a Claude session scratchpad: the "
+                f"delegate's sandbox may not read it, and it is deleted with the session. "
+                f"Copy it into the repo (git-ignored) and pass --link, or describe it in the brief.")
+        elif kind == "checkout" and rel == ".":
+            path_warns.append(
+                f"warning: the brief names the main checkout {path}; the delegate works in "
+                f"its own worktree, so write repo-relative paths.")
+        elif kind == "checkout" and _needs_link_warning(repo, rel):
+            path_warns.append(
+                f"warning: the brief names {path}, inside the main checkout; in the worktree "
+                f"it is `{rel}`. Write repo-relative paths: the absolute one reads the main "
+                f"checkout's copy, and writes there leave the worktree.")
+    if len(path_warns) > 5:
+        more = len(path_warns) - 5
+        path_warns = path_warns[:5] + [
+            f"warning: … and {more} more absolute path(s) in the brief"]
+    out.extend(path_warns)
+    return out
+
+
+def _write_warnings(job, warnings):
+    if warnings:
+        (job / "warnings").write_text("\n".join(warnings) + "\n")
+
+
+def _print_warnings(warnings):
+    for line in warnings:
+        print(line, file=sys.stderr)
+
+
+def _verify_log_tail(path, limit=1024 * 1024):
+    """Last `limit` bytes of a verify.log, decoded lossily."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - limit))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 
 def _exclude(repo, patterns):
@@ -496,6 +559,8 @@ def launch(a):
     if git("status", "--porcelain", cwd=repo):
         print(f"note: {repo} has uncommitted changes; the delegate starts from {base_sha[:9]} and will not see them",
               file=sys.stderr)
+    warnings = static_warnings(repo, brief, a.verify)
+    _print_warnings(warnings)
 
     links = [p.strip("/") for p in a.link]
     scope = ("This is a read-only task: do not modify, create or delete any files."
@@ -537,6 +602,10 @@ def launch(a):
         print("\n".join(output.rstrip().splitlines()[-30:]))
         status = ("pass" if rc == 0 else f"FAIL rc={rc}")
         print(f"preflight: verify {status} in {elapsed:.1f} s at base {base_sha[:9]}")
+        if rc == 0:
+            hit = checks.failure_line(output)
+            if hit:
+                print(f"WARNING: verify exited 0 but printed a failure line: {hit}")
         if rc != 0:
             print("hint: a check of the not-yet-built work is expected to fail at base, while an error "
                   "before any check runs (path, import, missing input or link) means the checker or a "
@@ -546,6 +615,7 @@ def launch(a):
     (root / "brief.md").write_text(brief)
     (root / "prompt.md").write_text(prompt)
     (root / "run.sh").write_text(run_sh)
+    _write_warnings(root, warnings)
     save_meta(root, meta)
 
     print(f"run:      {root}")
@@ -593,7 +663,8 @@ def followup(a):
     wt = Path(meta["worktree"])
     if not wt.exists():
         sys.exit("worktree was removed; start a new run instead")
-    text = Path(a.brief).expanduser().read_text().rstrip() if a.brief else ""
+    brief_text = Path(a.brief).expanduser().read_text().rstrip() if a.brief else ""
+    text = brief_text
     if a.from_review:
         rv = root / f"review-{a.from_review}" / "last-message.md"
         if not rv.exists():
@@ -608,6 +679,8 @@ def followup(a):
     model = a.model or meta["model"]
     effort = a.effort if a.effort is not None else (None if a.model else meta.get("effort"))
     verify = a.verify if a.verify is not None else meta.get("verify")
+    warnings = static_warnings(Path(meta["repo"]), brief_text, verify)
+    _print_warnings(warnings)
 
     archive = root / f"round-{k}"
     if a.dry_run:
@@ -625,6 +698,7 @@ def followup(a):
     for f in ROUND_FILES:
         if (root / f).exists():
             shutil.move(str(root / f), str(archive / f))
+    _write_warnings(root, warnings)
     if a.fresh:
         scope = ("This is a read-only task: do not modify, create or delete any files."
                  if meta.get("read_only") else "Work only inside this worktree; do not modify files outside it.")
@@ -955,6 +1029,8 @@ def review_working_tree(a):
         sys.exit(f"{root} already exists and is not empty")
     base_sha = git("rev-parse", a.base or "HEAD", cwd=repo)
     brief = Path(a.brief).expanduser().read_text()
+    warnings = static_warnings(repo, brief, None)
+    _print_warnings(warnings)
     links = [p.strip("/") for p in (a.link or [])]
     validate_working_tree_links(repo, links)
     entries = list_untracked(repo)
@@ -1036,6 +1112,7 @@ def review_working_tree(a):
         (job / "prompt.md").write_text(prompt)
         (job / "run.sh").write_text(job_script(job, f"review {name} #{n}", repo, wt, cmd, agent,
                                                digest_base=base_sha))
+        _write_warnings(job, warnings)
         save_meta(job, {"agent": agent, "model": model, "effort": effort, "n": n, "round": 0})
         print(f"review {n} of {name} (working-tree) by {agent} {model}"
               + (f" @{effort}" if effort else ""))
@@ -1144,7 +1221,7 @@ def verify(a):
     if not cmd:
         sys.exit("no verify command stored for this run; pass --cmd")
     r = subprocess.run(["bash", "-c", cmd], cwd=meta["worktree"], capture_output=True, text=True)
-    out = f"$ {cmd}\n{r.stdout}{r.stderr}"
+    out = f"{_echoed_verify(cmd)}\n{r.stdout}{r.stderr}"
     if a.cmd is None:
         (root / "verify.log").write_text(out)
         (root / "verify_code").write_text(f"{r.returncode}\n")
@@ -1152,6 +1229,10 @@ def verify(a):
         (root / "verify-adhoc.log").write_text(out)
     print("\n".join(out.rstrip().splitlines()[-30:]))
     print(f"verify: {'pass' if r.returncode == 0 else f'FAIL rc={r.returncode}'}")
+    if r.returncode == 0:
+        hit = checks.failure_line(out)
+        if hit:
+            print(f"WARNING: verify exited 0 but printed a failure line: {hit}")
     sys.exit(r.returncode)
 
 
@@ -1434,8 +1515,28 @@ def _job_usage(job, meta, review_meta):
     return usage(job, (review_meta or meta)["agent"])
 
 
+PACKET_MAX_LINES = 20
+
+
+def _fit_file_rows(row_lines, budget, cap=8):
+    """As many per-file rows as fit in budget (≤ cap); `... N more` counts in the budget."""
+    if budget <= 0 or not row_lines:
+        return []
+    if len(row_lines) <= min(cap, budget):
+        return row_lines
+    n_show = min(cap, budget - 1)
+    if n_show <= 0:
+        return [f"  ... {len(row_lines)} more file(s)"]
+    return row_lines[:n_show] + [f"  ... {len(row_lines) - n_show} more file(s)"]
+
+
 def packet(job):
-    """Rebuild a bounded notification packet entirely from existing artifacts."""
+    """Rebuild a bounded notification packet entirely from existing artifacts.
+
+    Never returns more than PACKET_MAX_LINES lines: fixed lines (header, usage,
+    summary, review, warnings, failure line, concerns, artifacts) are reserved
+    first; per-file rows fill whatever budget remains.
+    """
     root, meta, review_meta = _context(job)
     jm = review_meta or meta
     if review_meta is not None:
@@ -1447,42 +1548,58 @@ def packet(job):
     rc = _code(job, "exit_code")
     verify_state = _verify_state(job) or "verify none"
     model_s = jm.get("model") if jm.get("model") is not None else "-"
-    lines = [f"== {_one_line(meta['name'])} | {_one_line(jm['agent'])} {_one_line(model_s)} | {label} | "
-             f"{state(job)} | {_elapsed(job)} | exit {rc if rc is not None else '?'} | {verify_state}",
-             _usage_line(_job_usage(job, meta, review_meta))]
+    prefix = [f"== {_one_line(meta['name'])} | {_one_line(jm['agent'])} {_one_line(model_s)} | {label} | "
+              f"{state(job)} | {_elapsed(job)} | exit {rc if rc is not None else '?'} | {verify_state}",
+              _usage_line(_job_usage(job, meta, review_meta))]
+    file_row_lines = []
+    mid = []
     if review_meta is not None:
         text = _read(job, "last-message.md") or ""
         counts = {s: len(re.findall(r"^\s*[-*]\s*\[" + s + r"\]", text, re.M | re.I))
                   for s in ("high", "medium", "low")}
-        lines.append(f"verdict: {_verdict(job) or 'unclear'} | findings: "
-                     + ", ".join(f"{s} {count}" for s, count in counts.items()))
+        prefix.append(f"verdict: {_verdict(job) or 'unclear'} | findings: "
+                      + ", ".join(f"{s} {count}" for s, count in counts.items()))
         pre, post = _read(job, "pre_digest"), _read(job, "post_digest")
         if pre is not None and post is not None and pre != post:
-            lines.append("WARNING: reviewer changed the worktree")
+            prefix.append("WARNING: reviewer changed the worktree")
     else:
         rows = change_stats(root, meta)
         totals = (sum(r["insertions"] for r in rows), sum(r["deletions"] for r in rows))
-        suffix = " (worktree removed; saved patch)" if not Path(meta["worktree"]).is_dir() else ""
+        suffix_note = " (worktree removed; saved patch)" if not Path(meta["worktree"]).is_dir() else ""
         if not Path(meta["worktree"]).is_dir() and not (root / "changes.patch").exists():
-            suffix = " (worktree removed; no saved patch)"
-        lines.append(f"files: {len(rows)} | +{totals[0]}/-{totals[1]} total{suffix}"
-                     + (" | applied" if (root / "applied").exists() else ""))
-        for r in sorted(rows, key=lambda r: (-(r["insertions"] + r["deletions"]), r["path"]))[:8]:
-            lines.append(f"  {_one_line(r['path'])}: " + ("binary" if r["binary"] else
-                         f"+{r['insertions']}/-{r['deletions']}"))
-        if len(rows) > 8:
-            lines.append(f"  ... {len(rows) - 8} more file(s)")
+            suffix_note = " (worktree removed; no saved patch)"
+        prefix.append(f"files: {len(rows)} | +{totals[0]}/-{totals[1]} total{suffix_note}"
+                      + (" | applied" if (root / "applied").exists() else ""))
+        for r in sorted(rows, key=lambda r: (-(r["insertions"] + r["deletions"]), r["path"])):
+            file_row_lines.append(
+                f"  {_one_line(r['path'])}: " + ("binary" if r["binary"] else
+                f"+{r['insertions']}/-{r['deletions']}"))
         reviews = sorted(root.glob("review-*/meta.json"), key=lambda p: int(p.parent.name.split("-")[1]))
         if reviews:
-            lines.append("latest " + _review_summary(reviews[-1].parent))
-    lines.extend(_concerns(job))
+            mid.append("latest " + _review_summary(reviews[-1].parent))
+    tail = []
+    warn_file = job / "warnings"
+    if warn_file.exists():
+        wlines = [l for l in warn_file.read_text(errors="replace").splitlines() if l.strip()]
+        for i, line in enumerate(wlines):
+            if i >= 3:
+                tail.append(f"WARNING: {len(wlines) - 3} more in {job}/warnings")
+                break
+            rest = line[len("warning: "):] if line.startswith("warning: ") else line
+            tail.append("WARNING: " + rest)
+    if review_meta is None and _code(job, "verify_code") == 0 and (job / "verify.log").exists():
+        hit = checks.failure_line(_verify_log_tail(job / "verify.log"))
+        if hit:
+            tail.append(f"WARNING: verify exited 0 but printed a failure line: {hit}")
+    tail.extend(_concerns(job))
     paths = f"artifacts: {job / 'last-message.md'} | {job / 'log'} | {job / 'verify.log'}"
     if review_meta is not None:
         paths += f" | {Path(meta['worktree']) / '.delegate' / (job.name + '.verify.log')}"
     else:
         paths += f" | {root / 'changes.patch'}"
-    lines.append(paths)
-    return lines
+    tail.append(paths)
+    budget = PACKET_MAX_LINES - len(prefix) - len(mid) - len(tail)
+    return prefix + _fit_file_rows(file_row_lines, budget) + mid + tail
 
 
 def _verify_state(job):
@@ -1674,6 +1791,14 @@ def status(a):
             bits.append(f"round {meta['rounds']}")
         if _verify_state(root):
             bits.append(_verify_state(root))
+        if (_code(root, "verify_code") == 0 and (root / "verify.log").exists()
+                and checks.failure_line(_verify_log_tail(root / "verify.log"))):
+            bits.append("WARNING: verify printed a failure line")
+        warn_file = root / "warnings"
+        if warn_file.exists():
+            nwarn = sum(1 for l in warn_file.read_text(errors="replace").splitlines() if l.strip())
+            if nwarn:
+                bits.append(f"{nwarn} warning(s)")
         if (root / "applied").exists():
             bits.append("applied")
             if wt.exists() and time.time() - (root / "applied").stat().st_mtime > 86400:
