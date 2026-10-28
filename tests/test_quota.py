@@ -54,6 +54,63 @@ def fixture(now):
     ]}
 
 
+class DispatchCheckTests(unittest.TestCase):
+    def entries(self, **five):
+        return {"codex-5h": {"left_pct": 10, "age_min": 15, **five},
+                "codex-7d": {"left_pct": 50, "age_min": 0},
+                "cursor-auto": {"left_pct": 0, "age_min": None}}
+
+    def test_only_dispatch_pools_and_strict_freshness_boundary(self):
+        with mock.patch.object(quota, "fetch", return_value={}) as fetch, \
+             mock.patch.object(quota, "pools", return_value=self.entries()):
+            result = quota.check_dispatch()
+        fetch.assert_called_once_with("auto", timeout=15)
+        self.assertEqual(set(result["pools"]), {"codex-5h", "codex-7d"})
+        self.assertTrue(all(entry["state"] == "ok" for entry in result["pools"].values()))
+
+    def test_missing_timestamp_refreshes_once(self):
+        with mock.patch.object(quota, "fetch", return_value={}) as fetch, \
+             mock.patch.object(quota, "pools", side_effect=[self.entries(age_min=None, left_pct=1),
+                                                          self.entries(age_min=0)]):
+            result = quota.check_dispatch()
+        self.assertEqual(fetch.call_args_list, [mock.call("auto", timeout=15), mock.call("direct", timeout=30)])
+        self.assertEqual(result["pools"]["codex-5h"]["state"], "ok")
+
+    def test_failed_direct_refresh_is_unknown_even_when_cached_pool_was_low(self):
+        timeout = subprocess.TimeoutExpired("openusage", 30)
+        with mock.patch.object(quota, "fetch", side_effect=[{}, timeout]) as fetch, \
+             mock.patch.object(quota, "pools", return_value=self.entries(age_min=16, left_pct=1)):
+            result = quota.check_dispatch()
+        self.assertEqual(fetch.call_args_list, [mock.call("auto", timeout=15), mock.call("direct", timeout=30)])
+        self.assertEqual(result["pools"]["codex-5h"]["state"], "unknown")
+        self.assertIn("refresh failed: openusage timed out", result["pools"]["codex-5h"]["reason"])
+        self.assertEqual(result["pools"]["codex-7d"]["state"], "ok")
+
+    def test_missing_timestamp_after_refresh_stays_unknown(self):
+        with mock.patch.object(quota, "fetch", return_value={}) as fetch, \
+             mock.patch.object(quota, "pools", return_value=self.entries(age_min=None, left_pct=1)):
+            result = quota.check_dispatch()
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(result["pools"]["codex-5h"]["state"], "unknown")
+        self.assertEqual(result["pools"]["codex-5h"]["reason"], "snapshot timestamp missing")
+
+    def test_auto_timeout_does_not_retry_and_makes_all_pools_unknown(self):
+        with mock.patch.object(quota, "fetch", side_effect=subprocess.TimeoutExpired("openusage", 15)) as fetch:
+            result = quota.check_dispatch()
+        fetch.assert_called_once_with("auto", timeout=15)
+        self.assertTrue(all(entry["state"] == "unknown" for entry in result["pools"].values()))
+
+    def test_read_errors_fit_on_one_notice_line(self):
+        error = subprocess.CalledProcessError(1, "openusage", stderr="first line\nsecond line\n")
+        for reads, entries in (([error], self.entries()), ([{}, error], self.entries(age_min=16))):
+            with self.subTest(reads=len(reads)), \
+                 mock.patch.object(quota, "fetch", side_effect=reads), \
+                 mock.patch.object(quota, "pools", return_value=entries):
+                reason = quota.check_dispatch()["pools"]["codex-5h"]["reason"]
+            self.assertIn("first line second line", reason)
+            self.assertNotIn("\n", reason)
+
+
 class QuotaTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix="quota-test-")

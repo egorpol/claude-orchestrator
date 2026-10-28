@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 
@@ -43,6 +44,9 @@ class LifecycleTests(unittest.TestCase):
                     "VSCODE_FAKE": "fixture", "GIT_CONFIG_GLOBAL": os.devnull,
                     "GIT_CONFIG_NOSYSTEM": "1"}
         self.env.pop("FAKE_AGENT_EXIT", None)
+        for key in list(self.env):
+            if key.startswith("FAKE_OPENUSAGE_"):
+                self.env.pop(key)
         self.git("init", "-q")
         self.git("config", "user.name", "Lifecycle Test")
         self.git("config", "user.email", "test@example.invalid")
@@ -69,11 +73,14 @@ class LifecycleTests(unittest.TestCase):
         return r.stdout.strip()
 
     def cli(self, *args, code=0, extra_env=None):
+        return self.cli_raw(*args, code=code, extra_env=extra_env).stdout
+
+    def cli_raw(self, *args, code=0, extra_env=None):
         r = subprocess.run([sys.executable, str(CLI), *map(str, args)], cwd=self.repo,
                            env={**self.env, **(extra_env or {})}, text=True, capture_output=True)
         self.assertEqual(r.returncode, code, f"{args}\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}")
         self.assertNotIn("Traceback", r.stdout + r.stderr)
-        return r.stdout
+        return r
 
     def root(self, name):
         return self.storage / self.repo.name / name
@@ -92,6 +99,216 @@ class LifecycleTests(unittest.TestCase):
     def snapshot(self, root):
         return {str(p.relative_to(root)): (p.read_bytes(), p.stat().st_mtime_ns)
                 for p in root.rglob("*") if p.is_file() and not p.is_symlink()}
+
+    def quota_envelope(self, five=80, seven=70, age=0):
+        now = datetime.now(timezone.utc)
+        return {"snapshots": [{
+            "provider_id": "codex", "timestamp": (now - timedelta(minutes=age)).isoformat(),
+            "metrics": {"rate_limit_primary": {"remaining": five, "limit": 100},
+                        "rate_limit_secondary": {"remaining": seven, "limit": 100}},
+            "resets": {"rate_limit_primary": (now + timedelta(hours=2)).isoformat(),
+                       "rate_limit_secondary": (now + timedelta(days=2)).isoformat()},
+        }]}
+
+    def quota_env(self, envelope):
+        path = self.tmp / "openusage.json"
+        path.write_text(json.dumps(envelope))
+        return {"FAKE_OPENUSAGE_FILE": str(path), "FAKE_OPENUSAGE_LOG": str(self.tmp / "quota-calls")}
+
+    def quota_calls(self):
+        path = self.tmp / "quota-calls"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def review_with_report(self, name, report, extra_env, **overrides):
+        """Exercise real dispatch and fake agents, replacing only ratings discovery."""
+        args = argparse.Namespace(**{**dict(run=name, agent=None, model=None, effort=None, focus=None,
+                                            dry_run=False, detach=False, brief=None, working_tree=False),
+                                     **overrides})
+        out, err = io.StringIO(), io.StringIO()
+
+        def run_job(job, detach, run):
+            result = subprocess.run(["bash", str(job / "run.sh")], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            print(result.stdout, end="")
+            print(result.stderr, end="", file=sys.stderr)
+
+        def load_report(*args, **kwargs):
+            self.assertFalse((self.root(name) / "review-1").exists())
+            if isinstance(report, Exception):
+                raise report
+            return report
+
+        with patch.dict(os.environ, {**self.env, **extra_env}, clear=True), \
+             patch("frontier.load_report", side_effect=load_report) as load, \
+             patch.object(runs, "start", side_effect=run_job), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            runs.review(args)
+        return out.getvalue(), err.getvalue(), load
+
+    def test_default_review_low_codex_pool_never_starts_codex(self):
+        selection = {
+            "row": {"agent": "cursor", "model": "frontier-selected-model", "intelligence": 45.1,
+                    "cost_per_task": 0.262, "pool": "cursor-premium?"},
+            "cap": 0.427,
+            "replaces": {"model": "gpt-6.1-sol", "effort": "xhigh", "cost_per_task": 0.2135},
+        }
+        for pid in ("codex-5h", "codex-7d"):
+            with self.subTest(pool=pid):
+                name = "low-" + pid
+                self.launch("cursor", name)
+                env = self.quota_env(self.quota_envelope(**({"five": 1} if pid == "codex-5h" else {"seven": 1})))
+                out, err, load = self.review_with_report(name, {"fallback": selection, "warnings": []}, env)
+                job = self.root(name) / "review-1"
+                meta = runs.load_meta(job)
+                self.assertEqual((meta["agent"], meta["model"], meta["effort"]),
+                                 ("cursor", selection["row"]["model"], None))
+                load.assert_called_once_with(unittest.mock.ANY, default_codex=("gpt-6.1-sol", "xhigh"))
+                self.assertIn(f"review: {pid} 1% left below 10% threshold; fallback cursor frontier-selected-model", out)
+                self.assertEqual(err, "")
+                self.assertIn("fake-cursor-session", (job / "log").read_text())
+                self.assertNotIn("fake-codex-thread", (job / "log").read_text())
+                self.assertNotIn("--force", (job / "run.sh").read_text())
+                self.assertFalse((job / "warnings").exists())
+
+    def test_default_review_without_fallback_warns_and_keeps_codex(self):
+        for i, report in enumerate(({"fallback": None, "fallback_reason": "no eligible model", "warnings": []},
+                                    RuntimeError("ratings unavailable"))):
+            with self.subTest(report=report):
+                name = f"no-fallback-{i}"
+                self.launch("cursor", name)
+                out, err, load = self.review_with_report(name, report, self.quota_env(self.quota_envelope(five=1)))
+                self.assertIn("warning: codex-5h 1% left (below 10%), resets ", err)
+                job = self.root(name) / "review-1"
+                self.assertEqual(runs.load_meta(job)["agent"], "codex")
+                self.assertIn("consider cursor", (job / "warnings").read_text())
+                self.assertIn("codex-5h 1% left", self.last_packet(out))
+
+    def test_launch_codex_low_warns_in_stderr_file_and_packet(self):
+        env = self.quota_env(self.quota_envelope(five=3))
+        r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "quota-low", extra_env=env)
+        warnings = (self.root("quota-low") / "warnings").read_text().strip()
+        self.assertRegex(warnings, r"^warning: codex-5h 3% left \(below 10%\), resets .+ in 1h\d\dm; consider cursor$")
+        self.assertEqual(r.stderr.strip(), warnings)
+        packet_warning = warnings.replace("warning:", "WARNING:", 1)
+        self.assertIn(packet_warning, self.last_packet(r.stdout))
+        self.assertIn(packet_warning, self.cli("status", "quota-low"))
+        self.assertEqual(self.quota_calls(), ["auto"])
+
+    def test_followup_codex_low_keeps_agent_and_persists_warning(self):
+        self.launch("codex", "follow-low")
+        r = self.cli_raw("followup", "follow-low", "--brief", self.follow_brief,
+                         extra_env=self.quota_env(self.quota_envelope(seven=3)))
+        root = self.root("follow-low")
+        self.assertIn("warning: codex-7d 3% left", r.stderr)
+        self.assertIn("codex-7d 3% left", self.last_packet(r.stdout))
+        self.assertIn("consider cursor", (root / "warnings").read_text())
+        self.assertFalse((root / "round-1/warnings").exists())
+        self.assertEqual(runs.load_meta(root)["agent"], "codex")
+
+    def test_explicit_review_codex_low_never_selects_fallback(self):
+        self.launch("cursor", "explicit-low")
+        r = self.cli_raw("review", "explicit-low", "--agent", "codex",
+                         extra_env=self.quota_env(self.quota_envelope(five=1)))
+        job = self.root("explicit-low") / "review-1"
+        self.assertEqual(runs.load_meta(job)["agent"], "codex")
+        self.assertIn("warning: codex-5h 1% left", r.stderr)
+        self.assertIn("codex-5h 1% left", self.last_packet(r.stdout))
+        self.assertTrue((job / "warnings").exists())
+        self.assertNotIn("fallback", r.stdout)
+
+    def test_review_with_explicit_model_keeps_codex_and_warns(self):
+        self.launch("cursor", "model-low")
+        selection = {"row": {"agent": "cursor", "model": "frontier-selected-model", "intelligence": 45.1,
+                             "cost_per_task": 0.262, "pool": "cursor-premium?"},
+                     "cap": 0.427, "replaces": {"model": "gpt-6.1-sol", "effort": "xhigh", "cost_per_task": 0.2135}}
+        report = {"fallback": selection, "warnings": []}
+        out, err, load = self.review_with_report("model-low", report, self.quota_env(self.quota_envelope(five=1)),
+                                                 model="gpt-6.1-sol")
+        meta = runs.load_meta(self.root("model-low") / "review-1")
+        self.assertEqual((meta["agent"], meta["model"]), ("codex", "gpt-6.1-sol"))
+        load.assert_not_called()
+        self.assertIn("warning: codex-5h 1% left", err)
+        self.assertNotIn("fallback", out)
+
+    def test_review_without_changes_reads_no_quota(self):
+        self.launch("cursor", "no-change")
+        wt = runs.load_meta(self.root("no-change"))["worktree"]
+        self.git("-C", wt, "reset", "-q")  # drops finalize's intent-to-add entries
+        self.git("-C", wt, "checkout", "--", ".")
+        self.git("-C", wt, "clean", "-fdq")
+        r = self.cli_raw("review", "no-change", code=1, extra_env=self.quota_env(self.quota_envelope(five=1)))
+        self.assertIn("no changes to review", r.stderr)
+        self.assertEqual(self.quota_calls(), [])
+
+    def test_working_tree_review_explicit_codex_low_warns(self):
+        (self.repo / "dirty.txt").write_text("uncommitted\n")
+        r = self.cli_raw("review", "--working-tree", "--brief", self.brief, "--agent", "codex",
+                         "--name", "wt-low", extra_env=self.quota_env(self.quota_envelope(five=1)))
+        self.assertIn("warning: codex-5h 1% left", r.stderr)
+        self.assertIn("consider cursor", (self.root("wt-low") / "review-1" / "warnings").read_text())
+        self.assertEqual(self.quota_calls(), ["auto"])
+
+    def test_healthy_quota_prints_nothing(self):
+        env = self.quota_env(self.quota_envelope(five=10, seven=10))
+        for args in (("launch", "codex", "--brief", self.brief, "--name", "healthy"),
+                     ("followup", "healthy", "--brief", self.follow_brief),
+                     ("review", "healthy", "--agent", "codex")):
+            r = self.cli_raw(*args, extra_env=env)
+            self.assertEqual(r.stderr, "")
+            self.assertNotIn("quota:", r.stdout)
+            self.assertNotIn("warning:", r.stdout)
+        self.assertEqual(self.quota_calls(), ["auto"] * 3)
+
+    def test_failed_auto_quota_keeps_codex_with_one_unknown_line(self):
+        self.launch("cursor", "unknown")
+        env = {**self.quota_env({}), "FAKE_OPENUSAGE_EXIT": "7"}
+        for args in (("launch", "codex", "--brief", self.brief, "--name", "unknown-launch"),
+                     ("followup", "unknown-launch", "--brief", self.follow_brief),
+                     ("review", "unknown")):
+            r = self.cli_raw(*args, extra_env=env)
+            self.assertEqual(len(r.stderr.splitlines()), 1)
+            self.assertIn("quota: codex-5h unknown (openusage exited with status 7)", r.stderr)
+            self.assertTrue(r.stderr.rstrip().endswith("; keeping codex"))
+            self.assertNotIn("quota:", r.stdout)
+        for root in (self.root("unknown-launch"), self.root("unknown") / "review-1"):
+            self.assertEqual(runs.load_meta(root)["agent"], "codex")
+            self.assertFalse((root / "warnings").exists())
+        self.assertEqual(self.quota_calls(), ["auto"] * 3)  # auto failure never retries
+
+    def test_stale_auto_refreshes_from_direct_before_dispatch(self):
+        env = self.quota_env({"auto": self.quota_envelope(age=16), "direct": self.quota_envelope(five=3)})
+        r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "refreshed", extra_env=env)
+        self.assertEqual(self.quota_calls(), ["auto", "direct"])
+        self.assertIn("warning: codex-5h 3% left", r.stderr)
+        self.assertNotIn("unknown", r.stderr)
+
+    def test_stale_after_direct_is_unknown_and_keeps_codex(self):
+        env = self.quota_env({source: self.quota_envelope(five=1, age=16) for source in ("auto", "direct")})
+        r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "stale", extra_env=env)
+        self.assertEqual(self.quota_calls(), ["auto", "direct"])
+        self.assertEqual(len(r.stderr.splitlines()), 1)
+        self.assertIn("codex-5h unknown (snapshot 16 min old", r.stderr)
+        self.assertIn("keeping codex", r.stderr)
+        self.assertFalse((self.root("stale") / "warnings").exists())
+
+    def test_cursor_dispatches_never_read_quota(self):
+        env = {**self.quota_env({}), "FAKE_OPENUSAGE_EXIT": "7"}
+        for args in (("launch", "cursor", "--brief", self.brief, "--name", "no-quota"),
+                     ("followup", "no-quota", "--brief", self.follow_brief),
+                     ("review", "no-quota", "--agent", "cursor")):
+            self.cli(*args, extra_env=env)
+        self.assertEqual(self.quota_calls(), [])
+
+    def test_dry_run_and_preflight_never_read_quota(self):
+        self.launch("codex", "dry-existing")
+        env = {**self.quota_env({}), "FAKE_OPENUSAGE_EXIT": "7"}
+        for args in (("launch", "codex", "--brief", self.brief, "--name", "dry", "--dry-run"),
+                     ("followup", "dry-existing", "--brief", self.follow_brief, "--dry-run"),
+                     ("review", "dry-existing", "--agent", "codex", "--dry-run"),
+                     ("launch", "codex", "--brief", self.brief, "--name", "preflight",
+                      "--verify", "true", "--preflight")):
+            self.cli(*args, extra_env=env)
+        self.assertEqual(self.quota_calls(), [])
 
     def lifecycle(self, agent):
         name = agent + "-life"
