@@ -391,6 +391,44 @@ def _print_warnings(warnings):
         print(line, file=sys.stderr)
 
 
+def _dispatch_quota(agent, model, effort, fallback=False):
+    """Keep explicit choices; only a default Codex reviewer may switch vendor."""
+    if agent != "codex":
+        return agent, model, effort, []
+    check = quota.check_dispatch()
+    low = [(pid, entry) for pid, entry in check["pools"].items() if entry["state"] == "low"]
+    if low and fallback:
+        import frontier
+        try:
+            report = frontier.load_report(check["catalog"], default_codex=(model, effort))
+            for warning in report["warnings"]:
+                print(f"review: {warning}", file=sys.stderr)
+            selection = report["fallback"]
+        except Exception:
+            selection = None
+        if selection:
+            trigger = ", ".join(f"{pid} {entry['left_pct']:g}% left" for pid, entry in low)
+            print(f"review: {trigger} below {check['threshold']:g}% threshold; fallback "
+                  + frontier.fallback_description(selection), flush=True)
+            return "cursor", selection["row"]["model"], None, []
+    unknown = [f"{pid} unknown ({entry['reason']})" for pid, entry in check["pools"].items()
+               if entry["state"] == "unknown"]
+    if unknown:
+        print(f"quota: {', '.join(unknown)}; keeping codex", file=sys.stderr)
+    warnings = []
+    if low:
+        now = datetime.now(timezone.utc)
+        parts = []
+        for pid, entry in low:
+            reset = quota._safe_ts(entry.get("resets_at"))
+            when = (f"{reset.astimezone():%Y-%m-%d %H:%M %Z} {quota.human_delta(reset, now)}"
+                    if reset else "unknown")
+            parts.append(f"{pid} {entry['left_pct']:g}% left (below {check['threshold']:g}%), "
+                         f"resets {when}")
+        warnings.append(f"warning: {'; '.join(parts)}; consider cursor")
+    return agent, model, effort, warnings
+
+
 def _verify_log_tail(path, limit=1024 * 1024):
     """Last `limit` bytes of a verify.log, decoded lossily."""
     try:
@@ -560,6 +598,9 @@ def launch(a):
         print(f"note: {repo} has uncommitted changes; the delegate starts from {base_sha[:9]} and will not see them",
               file=sys.stderr)
     warnings = static_warnings(repo, brief, a.verify)
+    if not a.dry_run and not preflight:
+        _, _, _, quota_warnings = _dispatch_quota(a.agent, model, effort)
+        warnings.extend(quota_warnings)
     _print_warnings(warnings)
 
     links = [p.strip("/") for p in a.link]
@@ -680,6 +721,9 @@ def followup(a):
     effort = a.effort if a.effort is not None else (None if a.model else meta.get("effort"))
     verify = a.verify if a.verify is not None else meta.get("verify")
     warnings = static_warnings(Path(meta["repo"]), brief_text, verify)
+    if not a.dry_run:
+        _, _, _, quota_warnings = _dispatch_quota(meta["agent"], model, effort)
+        warnings.extend(quota_warnings)
     _print_warnings(warnings)
 
     archive = root / f"round-{k}"
@@ -1060,6 +1104,10 @@ def review_working_tree(a):
         return
 
     reviewers = _reviewers_for_working_tree(a)
+    if a.agent:
+        _, _, _, quota_warnings = _dispatch_quota(*reviewers[0])
+        _print_warnings(quota_warnings)
+        warnings = warnings + quota_warnings
     snapshot = snapshot_working_tree(repo)
     root.mkdir(parents=True, exist_ok=True)
     wt = root / "wt"
@@ -1150,6 +1198,12 @@ def review(a):
     _, patch = make_patch(root, meta)
     if not patch.strip():
         sys.exit("no changes to review")
+    warnings = []
+    if not a.dry_run:
+        # An explicit --model is a choice too: only a fully default reviewer swaps vendor.
+        agent, model, effort, warnings = _dispatch_quota(agent, model, effort,
+                                                         fallback=not (a.agent or a.model))
+        _print_warnings(warnings)
     max_kb = getattr(a, "patch_max_kb", 200)
     review_patch, omitted = _trim_review_patch(patch, max_kb)
     omit_line = ""
@@ -1184,6 +1238,7 @@ def review(a):
         print(f"[dry run] review {n} by {agent} {model}: {cmd}\n---- prompt.md ----\n{prompt}")
         return
     job.mkdir()
+    _write_warnings(job, warnings)
     (wt / ".delegate").mkdir(exist_ok=True)
     for old in (wt / ".delegate").glob("review-*.patch"):
         old.unlink()  # a stale diff would only confuse the reviewer

@@ -30,6 +30,61 @@ POOLS = {
     # models bill plan_api. route._quota treats a pool missing here as unknown.
 }
 
+# Dispatch checks only these pools; Cursor dispatches do not need a quota read.
+DISPATCH_POOLS = ("codex-5h", "codex-7d")
+DISPATCH_MAX_AGE_MIN = 15
+
+
+def check_dispatch(catalog_path=None):
+    """Classify dispatch pools as ok/low/unknown, refreshing stale data once.
+
+    A failed auto read never retries. A failed direct read invalidates only the
+    pools that needed refreshing. Neither failure prevents an agent dispatch.
+    """
+    catalog, threshold = {}, 10
+    try:
+        entries = pools(fetch("auto", timeout=15))
+        catalog = json.loads(Path(catalog_path or Path(__file__).with_name("catalog.json"))
+                             .read_text(encoding="utf-8"))
+        threshold = catalog.get("min_quota_pct", 10)
+    except Exception as exc:
+        return {"catalog": catalog, "threshold": threshold, "error": str(exc),
+                "pools": {pid: {"state": "unknown", "reason": " ".join(_fetch_error(exc).split())}
+                          for pid in DISPATCH_POOLS}}
+
+    def stale(entry):
+        age = entry.get("age_min")
+        return age is None or age > DISPATCH_MAX_AGE_MIN
+
+    refresh = [pid for pid in DISPATCH_POOLS if stale(entries.get(pid) or {})]
+    refresh_error = None
+    if refresh:
+        try:
+            direct = pools(fetch("direct", timeout=30))
+            entries = {**entries, **{pid: direct.get(pid) or {} for pid in refresh}}
+        except Exception as exc:
+            refresh_error = _fetch_error(exc)
+    checked = {}
+    for pid in DISPATCH_POOLS:
+        entry = dict(entries.get(pid) or {})
+        reason = None
+        if pid in refresh and refresh_error:
+            reason = f"refresh failed: {refresh_error}"
+        elif entry.get("error"):
+            reason = entry["error"]
+        elif entry.get("age_min") is None:
+            reason = "snapshot timestamp missing"
+        elif stale(entry):
+            reason = f"snapshot {entry['age_min']:g} min old (over {DISPATCH_MAX_AGE_MIN} min)"
+        elif entry.get("left_pct") is None:
+            reason = "remaining quota missing"
+        entry["state"] = ("unknown" if reason else
+                          "low" if entry["left_pct"] < threshold else "ok")
+        if reason:
+            entry["reason"] = " ".join(reason.split())
+        checked[pid] = entry
+    return {"catalog": catalog, "threshold": threshold, "error": None, "pools": checked}
+
 
 def parse_ts(s):
     if not s:

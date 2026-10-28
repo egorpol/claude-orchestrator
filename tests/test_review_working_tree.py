@@ -274,8 +274,8 @@ class WorkingTreeReviewTests(unittest.TestCase):
         """Real ask._fallback_for_both with quota/frontier patched; no network."""
         self.dirty_main()
         pools = {
-            "codex-5h": {"left_pct": 5},
-            "codex-7d": {"left_pct": 50},
+            "codex-5h": {"left_pct": 5, "age_min": 0},
+            "codex-7d": {"left_pct": 50, "age_min": 0},
         }
         selection = {
             "row": {"model": "deepseek-fallback-test", "agent": "cursor",

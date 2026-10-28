@@ -58,7 +58,7 @@ class TestAsk(unittest.TestCase):
         # Both now checks quota. Never consult the machine's real openusage.
         fetch = mock.patch("ask.quota.fetch", return_value={})
         pools = mock.patch("ask.quota.pools", return_value={
-            "codex-5h": {"left_pct": 50}, "codex-7d": {"left_pct": 50}})
+            "codex-5h": {"left_pct": 50, "age_min": 0}, "codex-7d": {"left_pct": 50, "age_min": 0}})
         self.quota_fetch, self.quota_pools = fetch.start(), pools.start()
         self.addCleanup(fetch.stop)
         self.addCleanup(pools.stop)
@@ -283,8 +283,23 @@ class TestAsk(unittest.TestCase):
         self.assertEqual(cursor.call_args.args[1], "auto")
         self.assertNotIn("fallback", out)
 
+    def test_both_stale_quota_refreshes_before_selecting_fallback(self):
+        self.quota_pools.side_effect = [
+            {"codex-5h": {"left_pct": 80, "age_min": 16},
+             "codex-7d": {"left_pct": 80, "age_min": 16}},
+            {"codex-5h": {"left_pct": 1, "age_min": 0},
+             "codex-7d": {"left_pct": 80, "age_min": 0}},
+        ]
+        out, cursor, codex, load = self._run_fallback_both()
+        self.assertEqual(self.quota_fetch.call_args_list,
+                         [mock.call("auto", timeout=15), mock.call("direct", timeout=30)])
+        codex.assert_not_called()
+        load.assert_called_once()
+        self.assertIn("codex-5h 1% left", out)
+        self.assertEqual(cursor.call_count, 2)
+
     def test_both_empty_switches_and_labels_both_blocks_and_picks(self):
-        self.quota_pools.return_value = {"codex-5h": {"left_pct": 3}, "codex-7d": {"left_pct": 80}}
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 3, "age_min": 0}, "codex-7d": {"left_pct": 80, "age_min": 0}}
         out, cursor, codex, load = self._run_fallback_both()
         codex.assert_not_called()
         self.assertEqual(sorted(c.args[1] for c in cursor.call_args_list), ["auto", "deepseek-v41-flash-1017-max"])
@@ -299,7 +314,7 @@ class TestAsk(unittest.TestCase):
         self.assertLess(out.index("ask:"), out.index("## fallback"))
 
     def test_7d_alone_empty_and_effort_high_changes_the_cap(self):
-        self.quota_pools.return_value = {"codex-5h": {"left_pct": 80}, "codex-7d": {"left_pct": 9}}
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 80, "age_min": 0}, "codex-7d": {"left_pct": 9, "age_min": 0}}
         out, cursor, codex, load = self._run_fallback_both(effort="high")
         codex.assert_not_called()
         self.assertIn("codex-7d 9% left", out)
@@ -308,7 +323,7 @@ class TestAsk(unittest.TestCase):
         self.assertEqual(load.call_args.kwargs["default_codex"], ("gpt-6.1-sol", "high"))
 
     def test_empty_with_no_candidate_or_task_cost_keeps_codex(self):
-        self.quota_pools.return_value = {"codex-5h": {"left_pct": 0}, "codex-7d": {"left_pct": 50}}
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 0, "age_min": 0}, "codex-7d": {"left_pct": 50, "age_min": 0}}
         original = self._fallback_report
         for task in (0.001, None):
             def no_fit(catalog, default_codex):
@@ -327,9 +342,9 @@ class TestAsk(unittest.TestCase):
             self.assertNotIn("## fallback", out)
 
     def test_unknown_quota_failure_missing_or_error_keeps_codex(self):
-        for pools in ({}, {"codex-5h": {"error": "missing"}, "codex-7d": {"left_pct": 50}},
-                      {"codex-5h": {"error": "failed", "left_pct": 0}, "codex-7d": {"left_pct": 50}},
-                      {"codex-5h": {"left_pct": 50}}):
+        for pools in ({}, {"codex-5h": {"error": "missing", "age_min": 0}, "codex-7d": {"left_pct": 50, "age_min": 0}},
+                      {"codex-5h": {"error": "failed", "left_pct": 0, "age_min": 0}, "codex-7d": {"left_pct": 50, "age_min": 0}},
+                      {"codex-5h": {"left_pct": 50, "age_min": 0}}):
             self.quota_pools.return_value = pools
             out, cursor, codex, load = self._run_fallback_both()
             self.assertIn("quota unknown", out)
@@ -342,7 +357,7 @@ class TestAsk(unittest.TestCase):
         load.assert_not_called()
 
     def test_quota_threshold_is_strict_and_comes_from_catalog(self):
-        self.quota_pools.return_value = {"codex-5h": {"left_pct": 10}, "codex-7d": {"left_pct": 10}}
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 10, "age_min": 0}, "codex-7d": {"left_pct": 10, "age_min": 0}}
         out, cursor, codex, load = self._run_fallback_both()
         load.assert_not_called()
         codex.assert_called_once()
@@ -376,7 +391,7 @@ class TestAsk(unittest.TestCase):
         self.assertNotIn("ask:", out)
 
     def test_fallback_discovery_failure_keeps_codex(self):
-        self.quota_pools.return_value = {"codex-5h": {"left_pct": 0}}
+        self.quota_pools.return_value = {"codex-5h": {"left_pct": 0, "age_min": 0}}
         with mock.patch.object(self, "_fallback_report", side_effect=RuntimeError("AA unavailable")):
             out, cursor, codex, load = self._run_fallback_both()
         self.assertIn("fallback ratings unavailable (AA unavailable)", out)

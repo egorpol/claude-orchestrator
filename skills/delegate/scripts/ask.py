@@ -437,19 +437,16 @@ def _fallback_for_both(a):
     """Only the cheap quota read runs on a healthy both call."""
     if getattr(a, "no_fallback", False):
         return None
-    try:
-        pools = quota.pools(quota.fetch("auto", timeout=15))
-    except Exception as exc:
-        print(f"ask: Codex quota unknown ({exc}); keeping Codex.", flush=True)
+    check = quota.check_dispatch(SCRIPTS / "catalog.json")
+    if check["error"] is not None:
+        print(f"ask: Codex quota unknown ({check['error']}); keeping Codex.", flush=True)
         return None
-    catalog = json.loads((SCRIPTS / "catalog.json").read_text(encoding="utf-8"))
-    threshold = catalog.get("min_quota_pct", 10)
+    catalog, threshold = check["catalog"], check["threshold"]
     empty, unknown = [], []
-    for pid in ("codex-5h", "codex-7d"):
-        entry = pools.get(pid) or {}
-        if "error" in entry or entry.get("left_pct") is None:
+    for pid, entry in check["pools"].items():
+        if entry["state"] == "unknown":
             unknown.append(pid)
-        elif entry["left_pct"] < threshold:
+        elif entry["state"] == "low":
             empty.append((pid, entry["left_pct"]))
     if not empty:
         if unknown:
