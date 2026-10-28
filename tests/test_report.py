@@ -85,7 +85,8 @@ class TestReport(unittest.TestCase):
         self.log = self.root / "delegate-runs.jsonl"
         self.session_log = self.root / "sessions.jsonl"
         env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.cfg), "TZ": "Europe/Berlin",
-                                           "CLAUDE_SESSION_LOG": str(self.session_log)})
+                                           "CLAUDE_SESSION_LOG": str(self.session_log),
+                                           "DELEGATE_CATALOG_LOCAL": ""})
         env.start()
         self.addCleanup(time.tzset)
         self.addCleanup(env.stop)
@@ -781,6 +782,7 @@ class TestReport(unittest.TestCase):
         env = os.environ.copy()
         env["CLAUDE_DELEGATE_ROOT"] = str(self.root / "run-root")
         env["CLAUDE_CODE_SESSION_ID"] = SESSION
+        env["DELEGATE_CATALOG_LOCAL"] = ""
         run_root = Path(env["CLAUDE_DELEGATE_ROOT"])
         run_root.mkdir()
         (run_root / "runs.jsonl").write_text(json.dumps({

@@ -35,7 +35,7 @@ The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysi
 | [`hooks/secret-guard.py`](hooks/secret-guard.py) | PreToolUse (Bash) and optional git pre-commit/pre-push: catches API tokens, private keys, home paths, key/env files, private names and added working files (`HANDOFF.md`, direct `feedback/*.md` or `*.jsonl`); also denies a sticking `cd`/`pushd` into a project subdirectory and notices a drifted shell `cwd`. Private literals go in `${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/private-names.txt`, one per line (blanks and `#` comments ignored); output masks names. Per-repo opt-outs: `git config secretGuard.homePaths false`, `git config secretGuard.privateNames false`, `git config secretGuard.workingFiles false`. |
 | [`rules/orchestrator.md`](rules/orchestrator.md) | Short rules for every session, including sessions that never load a skill. It imports [`hygiene.md`](rules/hygiene.md) (handoffs, pickers, data checks, shell) and [`delegation.md`](rules/delegation.md) (when to delegate, second opinions). Narrow tips by topic are in [`reference.md`](rules/reference.md), read on demand, so the injected text stays inline. |
 
-The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands `quota`, `ratings`, `route`, `launch`, `review`, `followup`, `verify`, `status`, `wait`, `diff`, `apply`, `cleanup`, `ask`, `cost`, `rate` and `report`. It is stdlib-only Python 3.9+. Tunables (models, pools, task weights, `prefer`) are in [`catalog.json`](skills/delegate/scripts/catalog.json), and brief templates are in [`templates/`](skills/delegate/templates/).
+The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands `quota`, `ratings`, `route`, `catalog`, `launch`, `review`, `followup`, `verify`, `status`, `wait`, `diff`, `apply`, `cleanup`, `ask`, `cost`, `rate` and `report`. It is stdlib-only Python 3.9+. Tunables (models, pools, task weights, `prefer`) ship in [`catalog.json`](skills/delegate/scripts/catalog.json); personal overrides go in `catalog.local.json` (see SKILL.md Tuning; `delegate catalog` shows the merge). Brief templates are in [`templates/`](skills/delegate/templates/).
 
 **How this differs.** The [full orchestrators in the survey](docs/related-projects.md#full-orchestrators-alternatives-heavier) are supervisors a person watches: tmux panes, boards or a desktop app over many agents. Here, Claude Code stays the orchestrator inside one session. The official Codex plugin also delegates from Claude Code, but it works in the current checkout and only with Codex.
 
@@ -81,10 +81,9 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 
 ## Roadmap
 
-- Personal tuning in an optional `catalog.local.json`, merged key by key over `catalog.json`.
 - Machine-readable reviews through `codex exec --output-schema`.
 - Automatic field reports, shelved 2026-10-27: Cursor Auto was to write lessons for the sessions that get no `/field-report` (about 89%), but two trials against sessions that have one recalled about 40% of the hand reports' lessons, under the 50% bar. The design and results are in [docs/auto-field-reports.md](docs/auto-field-reports.md).
-- The open ideas in the [survey](docs/related-projects.md): loop cost scoring, pre-launch approval policies, `.worktreeinclude`, control-session preregistration and blocked assignment.
+- The open ideas in the [survey](docs/related-projects.md): loop cost scoring, pre-launch approval policies, control-session preregistration and blocked assignment.
 
 ## Docs
 

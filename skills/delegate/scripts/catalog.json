@@ -1,6 +1,6 @@
 {
   "_doc": [
-    "Edit freely. delegates[].aa is the Artificial Analysis slug (effort suffix included; the bare slug is the max-effort run).",
+    "Shipped defaults: personal tuning (min_quota_pct, prefer, effort, weights, extra delegates) goes in catalog.local.json outside this checkout (SKILL.md, Tuning), and `delegate catalog` shows the merge. delegates[].aa is the Artificial Analysis slug (effort suffix included; the bare slug is the max-effort run).",
     "pools are ids from quota.py: claude-5h, claude-7d, codex-5h, codex-7d, cursor-auto, cursor-premium. cursor-auto is Cursor's whole Auto + 'Cursor Models' (Grok, Composer) pool: openusage plan_auto_percent_used = their spend / $450 (verified 2026-10-10).",
     "prior: hand-set stand-in numbers for models AA does not rate; aa_proxy: true means `aa` is a stand-in model's rating, not the delegate's own.",
     "aa_aliases: explicit CLI-to-AA overrides; keys cursor:<id> or codex:<model>@<effort>, values AA slugs. Only add exact model/version/effort aliases.",

@@ -455,7 +455,8 @@ class CliPlumbingTests(unittest.TestCase):
              "--session-log", str(self.session_log),
              "--now", "2026-10-27T18:40:37+00:00"],
             capture_output=True, text=True,
-            env={**os.environ, "CLAUDE_DELEGATE_QUOTA_SNAPSHOT": "0"},
+            env={**os.environ, "CLAUDE_DELEGATE_QUOTA_SNAPSHOT": "0",
+                 "DELEGATE_CATALOG_LOCAL": ""},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
@@ -497,7 +498,7 @@ class CliPlumbingTests(unittest.TestCase):
              "--job", "round-1", "--log", str(out_log)],
             capture_output=True, text=True,
             env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
-                 "HOME": str(self.tmp)},
+                 "HOME": str(self.tmp), "DELEGATE_CATALOG_LOCAL": ""},
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         row = json.loads(out_log.read_text().splitlines()[0])

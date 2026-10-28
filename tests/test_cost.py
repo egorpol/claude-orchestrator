@@ -13,6 +13,7 @@ from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "delegate" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+os.environ["DELEGATE_CATALOG_LOCAL"] = ""
 
 import cost  # noqa: E402
 
@@ -729,6 +730,9 @@ class TestListPrice(unittest.TestCase):
         self.path = Path(tmp.name) / "session.jsonl"
         self.agents = self.path.with_suffix("") / "subagents"
         self.agents.mkdir(parents=True)
+        env = mock.patch.dict(os.environ, {"DELEGATE_CATALOG_LOCAL": ""})
+        env.start()
+        self.addCleanup(env.stop)
         self.weights, self.prices = cost.load_catalog_cost()
 
     def assistant(self, mid, model="claude-opus-5-5", inp=10, read=1000,

@@ -1,11 +1,13 @@
 """Tests for route.rank preferences and unknown pools."""
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "delegate" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+os.environ["DELEGATE_CATALOG_LOCAL"] = ""
 
 import route  # noqa: E402
 

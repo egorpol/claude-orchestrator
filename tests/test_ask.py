@@ -52,7 +52,8 @@ class TestAsk(unittest.TestCase):
         self._write_exe("cursor-agent", CURSOR_SH)
         self._write_exe("codex", CODEX_SH)
         self.session_log = Path(self.tmp.name) / "sessions.jsonl"
-        env = mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": str(self.session_log)})
+        env = mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": str(self.session_log),
+                                           "DELEGATE_CATALOG_LOCAL": ""})
         env.start()
         self.addCleanup(env.stop)
         # Both now checks quota. Never consult the machine's real openusage.

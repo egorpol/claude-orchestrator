@@ -96,7 +96,7 @@ Entries below were not linked in the 2026-10-09 doc (refresh through `claude-del
 
 - Session manager across worktrees/repos; copies Claude session data; `.worktreeinclude` for gitignored files.
 - **Overlap:** worktree parallelism; interactive multiplexing, not brief/review/apply.
-- **Worth borrowing:** `.worktreeinclude` beside `delegate launch --link`.
+- **Worth borrowing:** nothing now; `.worktreeinclude` was dropped on 2026-10-28 because `delegate launch --link` already brings gitignored paths into the worktree.
 
 ### [jarrodwatts/claude-delegator](https://github.com/jarrodwatts/claude-delegator)
 1.0k★ · MIT · last push 2026-10-12 · archived
@@ -220,5 +220,5 @@ Still open:
 - Machine-readable reviews via `codex exec --output-schema` (the plugin ships `review-output.schema.json`).
 - Loop cost / readiness scoring for repeated delegate cycles (`cobusgreyling/loop-engineering`, `loop-cost` / `loop-audit`).
 - Optional pre-launch spend or approval policies before destructive delegate actions (`omnigent-ai/omnigent`).
-- Carry gitignored env files into new worktrees via a `.worktreeinclude` convention (`kbwo/ccmanager`).
+- Carry gitignored env files into new worktrees via a `.worktreeinclude` convention (`kbwo/ccmanager`). Dropped 2026-10-28: `delegate launch --link` covers it.
 - Control-session design is decided (per-session 50/25/25 orchestrator / claude-only / vanilla, intent-to-treat, metric = USD per finished item; no project/task-class blocking; nothing preregistered publicly). Recommendation 3 remains open apart from the randomisation: preregister the pilot, block assignment by project/task class, and report cost, success, regressions and elapsed time with uncertainty.

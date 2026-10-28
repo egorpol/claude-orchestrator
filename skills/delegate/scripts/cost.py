@@ -18,6 +18,7 @@ import runs  # noqa: E402
 DEFAULT_LOG = runs.RUNS_ROOT / "runs.jsonl"
 CATALOG = SCRIPTS / "catalog.json"
 DEFAULT_WEIGHTS = {"input": 1, "cache_read": 0.1, "cache_write": 2.0, "output": 5.0}
+_catalog_cost_local_warned = False
 TOKEN_CLASSES = ("input", "cache_read", "cache_write_5m", "cache_write_1h",
                  "cache_write_unsplit", "output")
 MODES = ("orchestrator", "claude-only", "vanilla")
@@ -78,11 +79,26 @@ def resolve_session(spec):
 
 
 def load_catalog_cost():
-    """Return historical cost-unit weights and the dated list-price table (or None)."""
+    """Return historical cost-unit weights and the dated list-price table (or None).
+
+    Merges catalog.local.json when present. A broken local file prints one stderr
+    line and falls back to the base catalog alone (report --auto must not die).
+    A missing or invalid base catalog keeps the DEFAULT_WEIGHTS, None fallback.
+    """
     try:
-        cat = json.loads(CATALOG.read_text())
-    except (OSError, json.JSONDecodeError):
+        base = json.loads(CATALOG.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeError):
         return DEFAULT_WEIGHTS, None
+    try:
+        import catalog as catalog_mod
+        cat = catalog_mod.load(CATALOG)
+    except Exception as exc:
+        # Broken local overlay: keep accounting alive; one stderr line per process.
+        global _catalog_cost_local_warned
+        if not _catalog_cost_local_warned:
+            _catalog_cost_local_warned = True
+            print(str(exc), file=sys.stderr)
+        cat = base
     oc = cat.get("orchestrator_cost") or {}
     weights = {**DEFAULT_WEIGHTS, **(oc.get("weights") or {})}
     return weights, oc.get("list_prices")

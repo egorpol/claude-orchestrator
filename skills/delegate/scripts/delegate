@@ -4,6 +4,7 @@
   delegate quota                      remaining quota + reset per pool
   delegate ratings [--refresh]        AA ratings for catalog models
   delegate route <task>               rank delegates for a task type
+  delegate catalog [--json]           show personal overlay path, overrides, or merged JSON
   delegate launch codex|cursor ...    worktree + brief + background run (--preflight: verify only)
   delegate review RUN | --working-tree --brief F   read-only review (run: other vendor; working-tree: both)
   delegate followup RUN --brief F     next round in the same worktree, resuming the agent session
@@ -20,6 +21,7 @@ import json
 import sys
 from pathlib import Path
 
+import catalog
 import quota
 import ratings
 import route
@@ -29,13 +31,40 @@ CATALOG = Path(__file__).resolve().parent / "catalog.json"
 
 
 def load_catalog():
-    return json.loads(CATALOG.read_text())
+    return catalog.load(CATALOG)
+
+
+def cmd_catalog(a):
+    merged, info = catalog.load_details(CATALOG)
+    if info["status"] == "off":
+        local_line = "local: off (DELEGATE_CATALOG_LOCAL is empty)"
+    elif info["status"] == "missing":
+        local_line = f"local: none (would read {info['would_read']})"
+    else:
+        local_line = f"local: {info['local']}"
+    if a.json:
+        print(local_line, file=sys.stderr)
+        if info["overrides"]:
+            for path in info["overrides"]:
+                print(path, file=sys.stderr)
+        else:
+            print("no overrides", file=sys.stderr)
+        print(json.dumps(merged, indent=2))
+        return
+    print(local_line)
+    if info["overrides"]:
+        for path in info["overrides"]:
+            print(path)
+    else:
+        print("no overrides")
 
 
 def cmd_quota(a):
     if getattr(a, "unused", False):
         if a.snapshot:
             sys.exit("quota --unused cannot be combined with --snapshot")
+        # Catalog before any log/network work so a broken local file is reported first.
+        cat = load_catalog()
         import monitor
         pools = None
         if a.pool:
@@ -50,7 +79,7 @@ def cmd_quota(a):
                 sys.exit(f"invalid --now timestamp: {a.now!r}")
         out = monitor.unused(
             log=a.log, run_log=a.run_log, session_log=a.session_log,
-            since=a.since, pools=pools, now=now, catalog=load_catalog(), as_json=a.json,
+            since=a.since, pools=pools, now=now, catalog=cat, as_json=a.json,
         )
         print(json.dumps(out, indent=2) if a.json else out)
         return
@@ -74,9 +103,10 @@ def cmd_quota(a):
 
 
 def cmd_ratings(a):
+    # Catalog before the AA fetch so a broken local file is not masked by network errors.
+    cat = load_catalog()
     env = ratings.load(refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))
     models = env["models"]
-    cat = load_catalog()
     if a.grep:
         import re
         pat = re.compile(a.grep, re.I)
@@ -184,6 +214,11 @@ def main():
     s.add_argument("--source", default="auto", choices=["auto", "direct", "daemon"])
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_route)
+
+    s = sub.add_parser("catalog", help="show personal catalog.local.json path and overrides")
+    s.add_argument("--json", action="store_true",
+                   help="print the merged catalog on stdout; path and overrides on stderr")
+    s.set_defaults(fn=cmd_catalog)
 
     s = sub.add_parser("launch", help="start a delegate in its own worktree")
     s.add_argument("agent", choices=["codex", "cursor"])
@@ -327,7 +362,10 @@ def main():
         p.error("quota --unused cannot be combined with --snapshot")
     if a.cmd == "quota" and a.snapshot and not a.if_active and a.reason is None:
         p.error("quota --snapshot requires --reason unless --if-active is set")
-    a.fn(a)
+    try:
+        a.fn(a)
+    except catalog.CatalogError as exc:
+        sys.exit(str(exc))
 
 
 if __name__ == "__main__":
