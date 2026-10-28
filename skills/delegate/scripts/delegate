@@ -196,6 +196,12 @@ def main():
     s.add_argument("--root", help=f"run directory (default {runs.RUNS_ROOT}/<repo>/<name>)")
     s.add_argument("--link", action="append", default=[],
                    help="repo-relative gitignored path to symlink into the worktree (repeatable), e.g. data/cache")
+    s.add_argument("--include-uncommitted", action="store_true",
+                   help="snapshot the main checkout's dirty tree (tracked + non-ignored untracked) as "
+                        "the run's base; incompatible with --base; refuses >100 untracked files or "
+                        "10 MiB unless --all-untracked")
+    s.add_argument("--all-untracked", action="store_true",
+                   help="with --include-uncommitted: allow more than 100 untracked files or 10 MiB total")
     s.add_argument("--read-only", action="store_true", help="codex -s read-only / cursor --mode ask")
     s.add_argument("--unsandboxed", action="store_true",
                    help="cursor only: --sandbox disabled --force (needed for network, e.g. installs); ask the user first")
@@ -281,7 +287,8 @@ def main():
     s = sub.add_parser("apply", help="apply a run's patch to the main checkout (after review)")
     s.add_argument("run")
     s.add_argument("--check", action="store_true", help="only test whether it applies")
-    s.add_argument("--3way", dest="three_way", action="store_true", help="fall back to 3-way merge (stages files)")
+    s.add_argument("--3way", dest="three_way", action="store_true",
+                   help="fall back to 3-way merge via a temp index (working files updated, nothing staged)")
     s.set_defaults(fn=runs.apply)
 
     s = sub.add_parser("cleanup", help="remove a run's worktree and branch")

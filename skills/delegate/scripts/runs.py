@@ -71,7 +71,7 @@ CONTRACT = """
 ## Delegation contract (appended by the launcher; it overrides anything above that conflicts)
 - You are working in a git worktree at {wt} on branch `{branch}`, created from {base} for this task. {scope}
 - Do NOT run `git commit`, `git push`, `git merge`, `git rebase`, `git stash`, `git reset`, `git checkout <branch>` or create branches or tags. Leave every change uncommitted; the orchestrator reviews the diff and merges it.
-{links}- If a constraint in the brief would make you drop existing behaviour, data or a fallback, or real data contradicts an assumption in the brief, do not comply silently: keep the existing behaviour where you can and flag the conflict in your final message.
+{links}{snapshot}- If a constraint in the brief would make you drop existing behaviour, data or a fallback, or real data contradicts an assumption in the brief, do not comply silently: keep the existing behaviour where you can and flag the conflict in your final message.
 - Verify against real data or tests where the brief says how (dry runs, test commands) and report the actual output, not what you expect it to be.
 - End with a final message containing: (1) what you changed, file by file; (2) the commands you ran to verify and their real results; (3) open questions, conflicts, and anything you skipped or were unsure about.
 - Keep those prose sections and append this short machine-readable block at the very end:
@@ -81,6 +81,12 @@ verify: <command> -> <result>
 conflicts: <one line each, or none>
 risks: <path:line - why, or none>
 """
+
+SNAPSHOT_BULLET = (
+    "- The base `{base}` is a snapshot commit of the orchestrator's uncommitted work on top of "
+    "`{snapshot_of}` (`git show --stat HEAD` lists it). Treat that work as the starting point: "
+    "don't redo or revert it. Your own changes are what `git diff HEAD` shows.\n"
+)
 
 FOLLOWUP_NOTE = """
 
@@ -566,6 +572,23 @@ def _abandon_launch(repo, root, wt, branch, excluded=()):
     _remove_excluded(repo, excluded)
 
 
+def _uncommitted_counts(repo):
+    """(tracked_paths, untracked_paths) from `git status --porcelain --untracked-files=all`."""
+    tracked = untracked = 0
+    for line in git("status", "--porcelain", "--untracked-files=all", cwd=repo).splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("??"):
+            untracked += 1
+        else:
+            tracked += 1
+    return tracked, untracked
+
+
+def _snapshot_contract_bullet(base9, snapshot_of9):
+    return SNAPSHOT_BULLET.format(base=base9, snapshot_of=snapshot_of9)
+
+
 def launch(a):
     repo = Path(git("rev-parse", "--show-toplevel", cwd=a.repo or os.getcwd()))
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -582,6 +605,11 @@ def launch(a):
         sys.exit("--unsandboxed applies to cursor only (codex: pick -s yourself in run.sh)")
     if getattr(a, "web_search", False) and a.agent != "codex":
         sys.exit("--web-search applies to codex only")
+    include_uncommitted = getattr(a, "include_uncommitted", False)
+    all_untracked = getattr(a, "all_untracked", False)
+    if include_uncommitted and a.base:
+        sys.exit("--include-uncommitted cannot be combined with --base; "
+                 "the snapshot's parent is always HEAD")
     preflight = getattr(a, "preflight", False)
     if preflight:
         if not a.verify:
@@ -589,30 +617,73 @@ def launch(a):
         if a.dry_run or a.detach:
             sys.exit("--preflight cannot be combined with --dry-run or --detach; "
                      "a preflight is always a foreground check")
+    head_sha = git("rev-parse", "HEAD", cwd=repo)
     base_sha = git("rev-parse", a.base or "HEAD", cwd=repo)
     brief = Path(a.brief).expanduser().read_text()
     model = a.model or DEFAULTS[a.agent][0]
     effort = a.effort if a.effort is not None else (None if a.model else DEFAULTS[a.agent][1])
     wt = root / "wt"
-    if git("status", "--porcelain", cwd=repo):
-        print(f"note: {repo} has uncommitted changes; the delegate starts from {base_sha[:9]} and will not see them",
-              file=sys.stderr)
+    links = [p.strip("/") for p in a.link]
+    tracked_n, untracked_n = _uncommitted_counts(repo)
+    entries = list_untracked(repo)
+    will_snapshot = False
+    snapshot_of = None
+    if include_uncommitted:
+        if working_tree_has_changes(repo, head_sha, untracked=entries):
+            will_snapshot = True
+        else:
+            print("note: no uncommitted changes; launching from HEAD", file=sys.stderr)
+    elif tracked_n or untracked_n:
+        print(f"note: {repo} has uncommitted changes ({tracked_n} tracked, {untracked_n} untracked "
+              f"path(s)); the delegate starts from {base_sha[:9]} and will not see them; "
+              f"--include-uncommitted snapshots them", file=sys.stderr)
+    if will_snapshot:
+        print_untracked_summary(entries)
+        refuse_large_untracked(entries, all_untracked)
+        validate_working_tree_links(repo, links)
     warnings = static_warnings(repo, brief, a.verify)
     if not a.dry_run and not preflight:
         _, _, _, quota_warnings = _dispatch_quota(a.agent, model, effort)
         warnings.extend(quota_warnings)
     _print_warnings(warnings)
 
-    links = [p.strip("/") for p in a.link]
     scope = ("This is a read-only task: do not modify, create or delete any files."
              if a.read_only else "Work only inside this worktree; do not modify files outside it.")
     links_txt = "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
                         for l in links)
-    prompt = brief.rstrip() + CONTRACT.format(wt=wt, branch=branch, base=base_sha[:9], scope=scope,
-                                              links=links_txt)
+
+    def build_prompt(base9, snapshot_txt):
+        return brief.rstrip() + CONTRACT.format(
+            wt=wt, branch=branch, base=base9, scope=scope, links=links_txt, snapshot=snapshot_txt)
+
     cmd = build_cmd(a.agent, model, effort, wt, root, a.read_only, a.unsandboxed,
                     web_search=getattr(a, "web_search", False))
     run_sh = job_script(root, f"run {name}", repo, wt, cmd, a.agent, verify=a.verify)
+
+    if a.dry_run:
+        if will_snapshot:
+            print(f"[dry run] would snapshot uncommitted work on top of {head_sha[:9]}")
+            snapshot_txt = _snapshot_contract_bullet("SNAPSHOT", head_sha[:9])
+            prompt = build_prompt("SNAPSHOT", snapshot_txt)
+            print(f"[dry run] would create {root} and worktree {wt} on {branch} from SNAPSHOT "
+                  f"(snapshot of {head_sha[:9]} + uncommitted)\n")
+        else:
+            prompt = build_prompt(base_sha[:9], "")
+            print(f"[dry run] would create {root} and worktree {wt} on {branch} from {base_sha[:9]}\n")
+        print(run_sh)
+        print("---- prompt.md ----")
+        print(prompt)
+        return
+
+    if will_snapshot:
+        base_sha = snapshot_working_tree(
+            repo, message=f"delegate launch snapshot: uncommitted work on top of {head_sha[:9]}")
+        snapshot_of = head_sha
+        print(f"snapshot: {base_sha[:9]} = HEAD {head_sha[:9]} + {tracked_n} tracked change(s), "
+              f"{untracked_n} untracked file(s)")
+
+    snapshot_txt = (_snapshot_contract_bullet(base_sha[:9], snapshot_of[:9]) if snapshot_of else "")
+    prompt = build_prompt(base_sha[:9], snapshot_txt)
     meta = {"name": name, "agent": a.agent, "model": model, "effort": effort,
             "session": os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
             "read_only": a.read_only, "unsandboxed": a.unsandboxed,
@@ -620,21 +691,24 @@ def launch(a):
             "repo": str(repo), "worktree": str(wt), "branch": branch, "base": base_sha,
             "links": links, "rounds": 1, "created": datetime.now().isoformat(timespec="seconds"),
             "brief_source": str(Path(a.brief).expanduser().resolve())}
-
-    if a.dry_run:
-        print(f"[dry run] would create {root} and worktree {wt} on {branch} from {base_sha[:9]}\n")
-        print(run_sh)
-        print("---- prompt.md ----")
-        print(prompt)
-        return
+    if snapshot_of:
+        meta["snapshot_of"] = snapshot_of
 
     root.mkdir(parents=True, exist_ok=True)
-    git("worktree", "add", "-b", branch, str(wt), base_sha, cwd=repo)
     excluded = []
     try:
+        # Guard from worktree creation through meta.json: without meta, cleanup cannot find orphans.
+        git("worktree", "add", "-b", branch, str(wt), base_sha, cwd=repo)
         excluded = add_links(repo, wt, links)
         if preflight:
             rc, output, elapsed = run_verify_in_worktree(repo, wt, a.verify)
+        else:
+            meta["excluded"] = excluded
+            (root / "brief.md").write_text(brief)
+            (root / "prompt.md").write_text(prompt)
+            (root / "run.sh").write_text(run_sh)
+            _write_warnings(root, warnings)
+            save_meta(root, meta)
     except BaseException:  # leave no orphan worktree/branch behind: there is no meta.json for cleanup to find
         _abandon_launch(repo, root, wt, branch, excluded)
         raise
@@ -652,15 +726,13 @@ def launch(a):
                   "before any check runs (path, import, missing input or link) means the checker or a "
                   "--link is broken.")
         sys.exit(rc)
-    meta["excluded"] = excluded
-    (root / "brief.md").write_text(brief)
-    (root / "prompt.md").write_text(prompt)
-    (root / "run.sh").write_text(run_sh)
-    _write_warnings(root, warnings)
-    save_meta(root, meta)
 
     print(f"run:      {root}")
-    print(f"worktree: {wt}  (branch {branch}, base {base_sha[:9]})")
+    if snapshot_of:
+        print(f"worktree: {wt}  (branch {branch}, base {base_sha[:9]} "
+              f"(snapshot of {snapshot_of[:9]} + uncommitted))")
+    else:
+        print(f"worktree: {wt}  (branch {branch}, base {base_sha[:9]})")
     print(f"agent:    {a.agent} {model}" + (f" @{effort}" if effort else "") + (" read-only" if a.read_only else ""))
     print(f"log:      {root / 'log'}")
     print(f"last msg: {root / 'last-message.md'}")
@@ -748,10 +820,13 @@ def followup(a):
                  if meta.get("read_only") else "Work only inside this worktree; do not modify files outside it.")
         links_txt = "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
                             for l in meta.get("links", []))
+        snapshot_txt = ""
+        if meta.get("snapshot_of"):
+            snapshot_txt = _snapshot_contract_bullet(meta["base"][:9], meta["snapshot_of"][:9])
         prompt = (text + "\n\nAn earlier attempt's changes are already in this worktree (see `git diff "
                   f"{meta['base'][:9]}`); build on them rather than starting over."
                   + CONTRACT.format(wt=wt, branch=meta["branch"], base=meta["base"][:9], scope=scope,
-                                    links=links_txt))
+                                    links=links_txt, snapshot=snapshot_txt))
     else:
         prompt = text + FOLLOWUP_NOTE.format(round=k + 1)
         prompt += "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
@@ -972,23 +1047,29 @@ def validate_working_tree_links(repo, links):
                      f"drop --link")
 
 
+def copy_temp_index(repo):
+    """Copy the real index to a temp file (caller must unlink). Does not touch the real index."""
+    index_path = Path(git("rev-parse", "--git-path", "index", cwd=repo))
+    if not index_path.is_absolute():
+        index_path = Path(repo) / index_path
+    fd, tmp_name = tempfile.mkstemp(prefix="delegate-index-")
+    os.close(fd)
+    tmp_index = Path(tmp_name)
+    if index_path.exists():
+        shutil.copy2(index_path, tmp_index)
+    else:
+        tmp_index.write_bytes(b"")
+    return tmp_index
+
+
 def snapshot_working_tree(repo, message="delegate working-tree snapshot"):
     """Dangling commit of the working tree; does not touch the real index, HEAD or any ref.
 
     Copies the real index to a temp GIT_INDEX_FILE, `git add -A`, write-tree, commit-tree -p HEAD.
-    Reusable later for launch --base-dirty.
+    Used by `review --working-tree` and `launch --include-uncommitted`.
     """
-    index_path = Path(git("rev-parse", "--git-path", "index", cwd=repo))
-    if not index_path.is_absolute():
-        index_path = Path(repo) / index_path
-    fd, tmp_name = tempfile.mkstemp(prefix="delegate-wt-index-")
-    os.close(fd)
-    tmp_index = Path(tmp_name)
+    tmp_index = copy_temp_index(repo)
     try:
-        if index_path.exists():
-            shutil.copy2(index_path, tmp_index)
-        else:
-            tmp_index.write_bytes(b"")
         env = {**os.environ, "GIT_INDEX_FILE": str(tmp_index), "GIT_OPTIONAL_LOCKS": "0"}
         r = subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, env=env)
         if r.returncode != 0:
@@ -1976,6 +2057,138 @@ def diff(a):
         print(patch)
 
 
+def patch_paths(patch_path, repo):
+    """Pre- and post-image paths a patch touches (rename/copy sources included).
+
+    Runs `git apply --numstat` with cwd=repo: without that, git drops paths outside the
+    caller's cwd, so a subdirectory apply would omit root-level files from the temp index.
+    """
+    r = subprocess.run(["git", "apply", "--numstat", "-z", str(patch_path)],
+                       cwd=repo, capture_output=True)
+    if r.returncode != 0:
+        err = r.stderr.decode("utf-8", "replace").strip()
+        sys.exit(f"git apply --numstat failed: {err}")
+    paths = set()
+    data, i = r.stdout, 0
+    while i < len(data):
+        z = data.find(b"\0", i)
+        if z < 0:
+            break
+        record = data[i:z].decode("utf-8", "surrogateescape")
+        i = z + 1
+        parts = record.split("\t", 2)
+        if len(parts) == 3 and parts[2]:
+            paths.add(parts[2])
+    # numstat lists only the destination of a rename; pick up sources from the patch body
+    text = Path(patch_path).read_bytes().decode("utf-8", "surrogateescape")
+    for line in text.splitlines():
+        for prefix in ("rename from ", "rename to ", "copy from ", "copy to "):
+            if line.startswith(prefix):
+                paths.add(_unquote_git_path(line[len(prefix):]))
+                break
+    return sorted(paths)
+
+
+def _paths_in_index_or_worktree(repo, paths):
+    """Filter to paths that exist on disk or are already tracked (so `git add` won't fail).
+
+    Uses GIT_LITERAL_PATHSPECS so a patch path with `[`, `*` or `?` cannot match other files.
+    """
+    if not paths:
+        return []
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_LITERAL_PATHSPECS": "1"}
+    r = subprocess.run(["git", "ls-files", "-z", "--", *paths], cwd=repo,
+                       capture_output=True, env=env)
+    tracked = set(filter(None, r.stdout.decode("utf-8", "surrogateescape").split("\0")))
+    kept = []
+    for path in paths:
+        if path in tracked or (Path(repo) / path).exists() or (Path(repo) / path).is_symlink():
+            kept.append(path)
+    return kept
+
+
+def _unmerged_paths(repo, env):
+    """Unique paths from `git ls-files -u -z` under the given index env."""
+    raw = subprocess.run(["git", "ls-files", "-u", "-z"], cwd=repo, capture_output=True, env=env).stdout
+    paths, seen, i = [], set(), 0
+    while i < len(raw):
+        z = raw.find(b"\0", i)
+        if z < 0:
+            break
+        rec = raw[i:z].decode("utf-8", "surrogateescape")
+        i = z + 1
+        tab = rec.find("\t")
+        if tab < 0:
+            continue
+        path = rec[tab + 1:]
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def _conflict_file_note(repo, path):
+    """What git left in the working file for a conflicted path."""
+    p = Path(repo) / path
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return "working file missing after conflict"
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "no conflict markers (binary); working file still holds the pre-apply (ours) content"
+    if "<<<<<<<" in text:
+        return "conflict markers are in the working file"
+    return "no conflict markers; working file still holds the pre-apply (ours) content"
+
+
+def _apply_three_way(repo, patch_path, check=False):
+    """`git apply --3way` via a temp index so unstaged main-tree edits don't fail the index match.
+
+    The real index is never written. On conflicts, markers (if any) are left in the working files
+    and the caller must not mark the run applied. LC_ALL=C keeps conflict detection on English
+    git messages (`--check --3way` exits 0 on conflicts and only the text distinguishes them).
+    """
+    paths = patch_paths(patch_path, repo)
+    tmp_index = copy_temp_index(repo)
+    try:
+        env = {**os.environ, "GIT_INDEX_FILE": str(tmp_index), "GIT_OPTIONAL_LOCKS": "0",
+               "GIT_LITERAL_PATHSPECS": "1"}
+        to_add = _paths_in_index_or_worktree(repo, paths)
+        if to_add:
+            r = subprocess.run(["git", "add", "--", *to_add], cwd=repo, capture_output=True, env=env)
+            if r.returncode != 0:
+                sys.exit(f"git add (temp index) failed: {r.stderr.decode('utf-8', 'replace').strip()}")
+        # LC_ALL=C: conflict phrases are English even when the user's locale translates git.
+        apply_env = {**env, "LC_ALL": "C"}
+        args = ["git", "apply"] + (["--check"] if check else []) + ["--3way", str(patch_path)]
+        r = subprocess.run(args, cwd=repo, capture_output=True, text=True, env=apply_env)
+        sys.stdout.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        combined = (r.stdout or "") + (r.stderr or "")
+        conflicts = [] if check else _unmerged_paths(repo, env)
+        would_conflict = "with conflicts" in combined
+        if check:
+            if r.returncode or would_conflict:
+                sys.exit("git apply --check --3way failed; merge by hand from the patch, or fix conflicts first")
+            return True
+        if conflicts or r.returncode or would_conflict:
+            shown = conflicts or sorted({
+                m.group(1) for m in re.finditer(r"Applied patch to '([^']+)' with conflicts", combined)})
+            if shown:
+                print("conflicted paths:")
+                for path in shown:
+                    print(f"  {path}: {_conflict_file_note(repo, path)}")
+            else:
+                print("3-way apply failed without conflicted paths; see git's message above")
+            print("the patch is not marked applied; resolve the working files, then apply by hand or retry")
+            sys.exit(f"git apply --3way failed (rc={r.returncode or 1})")
+        return True
+    finally:
+        tmp_index.unlink(missing_ok=True)
+
+
 def apply(a):
     root = find_run(a.run)
     if state(root) in BUSY or _finalizing(root):
@@ -1986,12 +2199,16 @@ def apply(a):
     _, patch = make_patch(root, meta)
     if not patch.strip():
         sys.exit("nothing to apply")
-    args = ["git", "apply"] + (["--check"] if a.check else []) + (["--3way"] if a.three_way else [])
-    r = subprocess.run(args + [str(root / "changes.patch")], cwd=meta["repo"], capture_output=True, text=True)
-    sys.stdout.write(r.stdout)
-    sys.stderr.write(r.stderr)
-    if r.returncode:
-        sys.exit(f"git apply failed (rc={r.returncode}); try --3way, or merge by hand from {root / 'changes.patch'}")
+    patch_file = root / "changes.patch"
+    if a.three_way:
+        _apply_three_way(meta["repo"], patch_file, check=a.check)
+    else:
+        args = ["git", "apply"] + (["--check"] if a.check else [])
+        r = subprocess.run(args + [str(patch_file)], cwd=meta["repo"], capture_output=True, text=True)
+        sys.stdout.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        if r.returncode:
+            sys.exit(f"git apply failed (rc={r.returncode}); try --3way, or merge by hand from {patch_file}")
     if not a.check:
         (root / "applied").write_text(_digest(patch) + "\n")
     print(("patch applies cleanly to " if a.check else "applied to working tree of ") + meta["repo"])
@@ -2036,6 +2253,8 @@ def log_run(root, meta, outcome):
               "mode": mode, "links": meta.get("links", []), "base": meta["base"], "outcome": outcome,
               "files": len(rows), "insertions": sum(r["insertions"] for r in rows),
               "deletions": sum(r["deletions"] for r in rows), "rounds": rounds, "reviews": reviews}
+    if meta.get("snapshot_of"):
+        record["snapshot_of"] = meta["snapshot_of"]
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     with (RUNS_ROOT / "runs.jsonl").open("a") as stream:
         stream.write(json.dumps(record) + "\n")
