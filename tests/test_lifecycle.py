@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "delegate" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+import checks
 import runs
 
 CLI = SCRIPTS / "delegate"
@@ -522,6 +523,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("ok", out)
         self.assertRegex(out, rf"preflight: verify pass in \d+\.\d s at base {re.escape(base)}")
         self.assertNotIn("hint:", out)
+        self.assertNotIn("WARNING", out)
         self._assert_preflight_clean("pf-ok")
         self.launch("codex", "pf-ok")  # same name launches normally after preflight
         self.assertTrue((self.root("pf-ok") / "log").exists())
@@ -605,6 +607,153 @@ class LifecycleTests(unittest.TestCase):
         self._assert_preflight_clean("pf-noagent")
         # no run root means no log / fake-agent marker; also confirm help exposes the flag
         self.assertIn("--preflight", self.cli("launch", "--help"))
+
+    def test_preflight_warns_on_masked_pipe_and_failure_line(self):
+        verify = "printf 'x\\nFAILED (failures=1)\\n' | tail -1"
+        r = subprocess.run(
+            [sys.executable, str(CLI), "launch", "codex", "--brief", str(self.brief),
+             "--name", "pf-warn", "--verify", verify, "--preflight"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}")
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+        self.assertIn("warning: --verify pipes into `tail -1`", r.stderr)
+        self.assertIn("WARNING: verify exited 0 but printed a failure line: FAILED (failures=1)",
+                      r.stdout)
+        self._assert_preflight_clean("pf-warn")
+
+    def test_launch_warns_on_brief_absolute_paths(self):
+        brief = self.tmp / "paths-brief.md"
+        brief.write_text(
+            f"# Task\nUse `{self.repo}/tracked.txt` and /tmp/claude-1000/sess/shot.png "
+            f"and `{self.repo}/data/cache/x`.\nMake a deterministic change.\n")
+        r = subprocess.run(
+            [sys.executable, str(CLI), "launch", "codex", "--brief", str(brief),
+             "--name", "path-warn", "--verify", "true"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}")
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+        self.assertIn(f"the brief names {self.repo}/tracked.txt", r.stderr)
+        self.assertIn("/tmp/claude-1000/sess/shot.png", r.stderr)
+        self.assertNotIn("data/cache/x", r.stderr)
+        root = self.root("path-warn")
+        warns = [l for l in (root / "warnings").read_text().splitlines() if l.strip()]
+        self.assertEqual(len(warns), 2)
+        packet = self.last_packet(r.stdout)
+        self.assertIn(f"WARNING: the brief names {self.repo}/tracked.txt", packet)
+        self.assertIn("WARNING: the brief names /tmp/claude-1000/sess/shot.png", packet)
+
+    def test_verify_exit_0_failure_line_in_packet_and_status(self):
+        out = self.launch("codex", "fail-line", "--verify", "printf 'FAILED (failures=1)\\n'")
+        packet = self.last_packet(out)
+        self.assertIn("WARNING: verify exited 0 but printed a failure line: FAILED (failures=1)",
+                      packet)
+        status = self.cli("status", "fail-line")
+        self.assertIn("WARNING: verify exited 0 but printed a failure line", status)
+        full = self.cli("status", "fail-line", "--full")
+        self.assertIn("WARNING: verify printed a failure line", full)
+        control = self.last_packet(self.launch("codex", "ok-verify", "--verify", "true"))
+        self.assertNotIn("WARNING", control)
+
+    def test_followup_archives_round_warnings(self):
+        b1 = self.tmp / "round1-brief.md"
+        b1.write_text("# R1\nSee /tmp/claude-1000/sess/a.png\nMake a deterministic change.\n")
+        b2 = self.tmp / "round2-brief.md"
+        b2.write_text("# R2\nContinue the change.\n")
+        r1 = subprocess.run(
+            [sys.executable, str(CLI), "launch", "codex", "--brief", str(b1), "--name", "fu-warn"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        root = self.root("fu-warn")
+        self.assertTrue((root / "warnings").exists())
+        r2 = subprocess.run(
+            [sys.executable, str(CLI), "followup", "fu-warn", "--brief", str(b2)],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r2.returncode, 0, f"stdout:\n{r2.stdout}\nstderr:\n{r2.stderr}")
+        self.assertTrue((root / "round-1/warnings").exists())
+        self.assertIn("scratchpad", (root / "round-1/warnings").read_text())
+        self.assertFalse((root / "warnings").exists())
+        packet = self.last_packet(r2.stdout)
+        self.assertNotIn("scratchpad", packet)
+        self.assertNotIn("/tmp/claude-1000", packet)
+
+    def test_dry_run_prints_path_warning_without_run_folder(self):
+        brief = self.tmp / "dry-brief.md"
+        brief.write_text("# Task\nSee /tmp/claude-1000/sess/shot.png\n")
+        r = subprocess.run(
+            [sys.executable, str(CLI), "launch", "codex", "--brief", str(brief),
+             "--name", "dry-warn", "--dry-run"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("/tmp/claude-1000/sess/shot.png", r.stderr)
+        self.assertIn("warning:", r.stderr)
+        self.assertFalse(self.root("dry-warn").exists())
+        self.assertFalse(self.storage.exists() and any(self.storage.rglob("meta.json")))
+
+    def test_clean_brief_writes_no_warnings_file(self):
+        self.launch("codex", "clean-warn")
+        self.assertFalse((self.root("clean-warn") / "warnings").exists())
+
+    def test_packet_never_exceeds_20_lines_under_load(self):
+        """Fixed lines are reserved first; file rows fill the remaining budget (≤20)."""
+        self.launch("codex", "pkt-bound", "--verify", "printf 'FAILED (failures=1)\\n'")
+        root = self.root("pkt-bound")
+        (root / "warnings").write_text("\n".join([
+            "warning: --verify pipes into `tail -1` without pipefail",
+            "warning: the brief names /tmp/claude-1000/sess/a.png, in a Claude session scratchpad",
+            "warning: the brief names /repo/tracked.txt, inside the main checkout",
+            "warning: the brief names /repo/other.txt, inside the main checkout",
+        ]) + "\n")
+        rev = root / "review-1"
+        rev.mkdir()
+        (rev / "meta.json").write_text(json.dumps(
+            {"agent": "cursor", "model": "auto", "n": 1, "round": 1}))
+        (rev / "exit_code").write_text("0\n")
+        (rev / "finished_at").write_text("2026-01-01T00:00:00+00:00\n")
+        (rev / "last-message.md").write_text("## Verdict\nVerdict: APPROVE\n")
+        rows = [{"path": f"f{i}.txt", "insertions": 9 - i, "deletions": 0, "binary": False}
+                for i in range(9)]
+        concerns = ["conflicts: alpha", "risks: beta", "conflicts/risks: gamma"]
+        with patch.object(runs, "change_stats", return_value=rows), \
+             patch.object(runs, "_concerns", return_value=concerns):
+            lines = runs.packet(root)
+        self.assertLessEqual(len(lines), 20, lines)
+        self.assertEqual(lines[-1][:10], "artifacts:")
+        text = "\n".join(lines)
+        self.assertIn("WARNING: --verify pipes into `tail -1`", text)
+        self.assertIn("scratchpad", text)
+        self.assertIn("1 more in", text)
+        self.assertIn("WARNING: verify exited 0 but printed a failure line", text)
+        self.assertIn("latest review-1", text)
+        self.assertIn("more file(s)", text)
+        self.assertIn("conflicts: alpha", text)
+        self.assertIn("risks: beta", text)
+        self.assertIn("conflicts/risks: gamma", text)
+
+    def test_multiline_verify_echo_prefixes_each_line(self):
+        """Every physical echoed command line gets `$ `, so comment patterns stay quiet."""
+        verify = "printf 'ok\\n'\n# 3 failure(s)"
+        self.assertEqual(runs._echoed_verify("true"), "$ true")
+        self.assertEqual(runs._echoed_verify(verify), "$ printf 'ok\\n'\n$ # 3 failure(s)")
+        out = self.launch("codex", "multi-echo", "--verify", verify)
+        packet = self.last_packet(out)
+        self.assertNotIn("WARNING: verify exited 0 but printed a failure line", packet)
+        log = (self.root("multi-echo") / "verify.log").read_text()
+        self.assertIn("$ printf 'ok\\n'", log)
+        self.assertIn("$ # 3 failure(s)", log)
+        self.assertIsNone(checks.failure_line(log))
+        # Same invariant via delegate verify and --preflight.
+        r = subprocess.run(
+            [sys.executable, str(CLI), "verify", "multi-echo"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("WARNING: verify exited 0 but printed a failure line", r.stdout)
+        pf = subprocess.run(
+            [sys.executable, str(CLI), "launch", "codex", "--brief", str(self.brief),
+             "--name", "pf-multi", "--verify", verify, "--preflight"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(pf.returncode, 0, pf.stderr)
+        self.assertNotIn("WARNING: verify exited 0 but printed a failure line", pf.stdout)
+        self._assert_preflight_clean("pf-multi")
 
     def test_followup_preserves_model_accounting_and_existing_links(self):
         (self.repo / "data/cache").mkdir(parents=True)

@@ -12,6 +12,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
   - `ratings.py`: Artificial Analysis via API key or leaderboard scrape, cached 24h
   - `route.py`: per-task score = ratings × weights × quota
   - `runs.py`: worktree/launch/followup/review/verify/status/wait/diff/apply/cleanup, `meta.json`, environment scrubbing
+  - `checks.py`: launch warnings (a `--verify` pipe that masks the exit code, brief paths outside the worktree) and the failure-line check on verify logs that exited 0
   - `cost.py`, `ask.py`, `report.py`: session and run-log cost, read-only questions, field-report skeletons and JSONL rows
   - `rate.py`: `delegate rate`, the blinded item rater (rubric v2), and the item columns of `cost --by-mode`
   - `calibrate.py`: `cost --calibrate`, pool points per USD and per token class from pairs of quota readings; `--save` writes the dated rates that `cost --by-mode` estimates Claude pool points with
