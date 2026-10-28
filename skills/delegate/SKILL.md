@@ -94,7 +94,7 @@ Delegates' summaries can be wrong when their code is right (Composer misquoted a
 `~/.cache/claude-delegate/runs/<repo>/<name>/` (`--root` or `$CLAUDE_DELEGATE_ROOT`):
 - current round: `brief.md` · `prompt.md` · `run.sh` · `log` · `last-message.md` · `exit_code` · `verify.log` / `verify_code`
 - `round-<k>/`, `review-<n>/` (plus `pre_digest` / `post_digest`)
-- `meta.json`, `wt/`, `changes.patch` (after `diff`), `applied` (after `apply`)
+- `meta.json`, `wt/`, `changes.patch` (rewritten at the end of each round and by `diff`, `review`, `apply`), `applied` (after `apply`)
 
 ## Agents
 

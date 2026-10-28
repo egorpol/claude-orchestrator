@@ -1,7 +1,9 @@
 """End-to-end delegate lifecycle; no installed agents or agent quota required."""
 import argparse
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -100,7 +102,7 @@ class LifecycleTests(unittest.TestCase):
         packet = self.last_packet(output)
         self.assertIn("round 1 | done", packet)
         self.assertIn("exit 0 | verify pass", packet)
-        self.assertIn(f"new-{agent}.txt: +1/-0", packet)  # untracked file, before diff stages it
+        self.assertIn(f"new-{agent}.txt: +1/-0", packet)  # new file, intent-to-add since finalize
         self.assertIn("files: 2 | +2/-0 total", packet)
         self.assertIn("conflicts: none", packet)
         self.assertIn("risks: none", packet)
@@ -123,7 +125,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn((root / "last-message.md").read_text().strip(), full)
         self.assertEqual(self.snapshot(root), before)
         self.assertEqual((index.read_bytes(), index.stat().st_mtime_ns), index_before)
-        self.assertFalse((root / "changes.patch").exists())
+        self.assertIn(f"+++ b/new-{agent}.txt", (root / "changes.patch").read_text())  # finalize wrote it
         if agent == "codex":
             self.assertIn("command: git diff --check | exit 0", full)
             self.assertIn("files: tracked.txt; new-codex.txt", full)
@@ -334,6 +336,34 @@ class LifecycleTests(unittest.TestCase):
         runs.save_meta(root, meta)
         self.cli("followup", "legacy", "--brief", self.follow_brief)
         self.assertEqual([r["n"] for r in runs.load_meta(root)["history"]], [1, 2])
+
+    def test_followup_packet_points_at_current_patch(self):
+        # review writes changes.patch for round 1; round 2's finalize must rewrite it
+        self.launch("codex", "fresh-patch")
+        root = self.root("fresh-patch")
+        self.cli("review", "fresh-patch")
+        packet = self.last_packet(self.cli("followup", "fresh-patch", "--brief", self.follow_brief))
+        listed = Path(packet.splitlines()[-1].rsplit(" | ", 1)[1])
+        self.assertEqual(listed, root / "changes.patch")
+        current = subprocess.run(["git", "diff", "--binary", runs.load_meta(root)["base"]],
+                                 cwd=root / "wt", env=self.env, capture_output=True, check=True)
+        self.assertEqual(listed.read_bytes(), current.stdout)
+        self.assertEqual(listed.read_text().count("+codex round"), 2)
+
+    def test_finalize_drops_patch_it_cannot_rewrite(self):
+        self.launch("codex", "no-patch")
+        root = self.root("no-patch")
+        self.assertTrue((root / "changes.patch").exists())
+        (root / "finalized_at").unlink()
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(runs, "make_patch", side_effect=SystemExit("git add -A -N failed: boom")), \
+             patch.object(runs.quota, "spawn_snapshot"), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            runs.finalize(root)
+        self.assertFalse((root / "changes.patch").exists())
+        self.assertTrue((root / "finalized_at").exists())
+        self.assertIn("WARNING: changes.patch not written: git add -A -N failed: boom", err.getvalue())
+        self.assertNotIn("changes.patch", out.getvalue().splitlines()[-1])
 
     def test_full_status_of_review_job(self):
         self.launch("codex", "rv")

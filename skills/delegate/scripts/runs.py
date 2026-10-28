@@ -1406,6 +1406,13 @@ def finalize(job):
         meta["history"] = sorted(history, key=lambda r: r.get("n", r.get("round", 0)))
         save_meta(root, meta)
         job_id = f"round-{n}"
+        if Path(meta["worktree"]).is_dir():
+            # the packet lists changes.patch; written only by diff/review/apply, it lagged a followup
+            try:
+                make_patch(root, meta)
+            except (Exception, SystemExit) as e:  # finalized_at below must still be written
+                (root / "changes.patch").unlink(missing_ok=True)
+                print(f"WARNING: changes.patch not written: {e}", file=sys.stderr)
     try:
         quota.spawn_snapshot("job-end", run=meta["name"], job=job_id)
     except Exception:
@@ -1595,7 +1602,7 @@ def packet(job):
     paths = f"artifacts: {job / 'last-message.md'} | {job / 'log'} | {job / 'verify.log'}"
     if review_meta is not None:
         paths += f" | {Path(meta['worktree']) / '.delegate' / (job.name + '.verify.log')}"
-    else:
+    elif (root / "changes.patch").exists():
         paths += f" | {root / 'changes.patch'}"
     tail.append(paths)
     budget = PACKET_MAX_LINES - len(prefix) - len(mid) - len(tail)
