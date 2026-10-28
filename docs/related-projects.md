@@ -214,6 +214,7 @@ Done on 2026-10-13 (wide-survey recommendations):
 1. `7bc654a`: `delegate cost --session` prices at list price including subagent transcripts (`<session>/subagents/agent-*.jsonl`, deduped), with 5-minute and 1-hour cache writes priced separately; matches `ccusage@20.0.30` to 1e-6 on two sessions (`docs/verified-behaviour.md`). Covers survey recommendations 1 and 2.
 2. `184bde7`: quota snapshots (`~/.cache/claude-delegate/quota.jsonl`) at session start/end, each run start, and from a timer; each reading has a `stale` flag. `delegate route` still uses openusage (can lag ~1 h, shown as DATA AGE); `--source direct` reads live. Recommendation 5 partly done.
 3. `698e857`, `b705445`: per-session summary rows log delegate commands; `delegate cost --by-mode` counts launches/runs per arm; `delegate rate` is a blinded item rater. Covers recommendation 4.
+4. Later, the rest of recommendation 5: `daf151a` (2026-10-27) leaves stale readings out of `delegate quota --unused`, and `b6603b2` (2026-10-28) re-reads a Codex pool over 15 min old with `--source direct` before a dispatch.
 
 Still open:
 - Machine-readable reviews via `codex exec --output-schema` (the plugin ships `review-output.schema.json`).
@@ -221,4 +222,3 @@ Still open:
 - Optional pre-launch spend or approval policies before destructive delegate actions (`omnigent-ai/omnigent`).
 - Carry gitignored env files into new worktrees via a `.worktreeinclude` convention (`kbwo/ccmanager`).
 - Control-session design is decided (per-session 50/25/25 orchestrator / claude-only / vanilla, intent-to-treat, metric = USD per finished item; no project/task-class blocking; nothing preregistered publicly). Recommendation 3 remains open apart from the randomisation: preregister the pilot, block assignment by project/task class, and report cost, success, regressions and elapsed time with uncertainty.
-- Refresh quota at dispatch and refuse to treat stale readings as unused allowance (remainder of recommendation 5; see quota-router).
