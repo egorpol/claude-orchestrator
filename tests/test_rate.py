@@ -62,7 +62,8 @@ class RateTests(unittest.TestCase):
         self.write_rows(self.log, [self.start, self.summary])
         patcher = mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": str(self.log),
                                               "CLAUDE_CONFIG_DIR": str(self.root / "claude"),
-                                              "CLAUDE_CODE_SESSION_ID": "rater-parent"})
+                                              "CLAUDE_CODE_SESSION_ID": "rater-parent",
+                                              "DELEGATE_CATALOG_LOCAL": ""})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -647,6 +648,7 @@ class RateTests(unittest.TestCase):
     def test_cli_registration_explicit_log_and_invalid_flags(self):
         env = os.environ.copy()
         env["CLAUDE_SESSION_LOG"] = str(self.root / "not-the-log")
+        env["DELEGATE_CATALOG_LOCAL"] = ""
         result = subprocess.run([str(SCRIPTS / "delegate"), "rate", "--session-log", str(self.log),
                                  "--session", SESSION[:8], "--dry-run"],
                                 capture_output=True, text=True, env=env)

@@ -42,7 +42,8 @@ class LifecycleTests(unittest.TestCase):
                     "CLAUDE_DELEGATE_QUOTA_SNAPSHOT": "0",
                     "CLAUDE_SESSION_LOG": str(self.tmp / "sessions.jsonl"),
                     "VSCODE_FAKE": "fixture", "GIT_CONFIG_GLOBAL": os.devnull,
-                    "GIT_CONFIG_NOSYSTEM": "1"}
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "DELEGATE_CATALOG_LOCAL": ""}
         self.env.pop("FAKE_AGENT_EXIT", None)
         for key in list(self.env):
             if key.startswith("FAKE_OPENUSAGE_"):

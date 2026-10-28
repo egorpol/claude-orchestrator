@@ -40,13 +40,22 @@ def check_dispatch(catalog_path=None):
 
     A failed auto read never retries. A failed direct read invalidates only the
     pools that needed refreshing. Neither failure prevents an agent dispatch.
+
+    The catalog (base + optional local overlay) is loaded before the quota fetch
+    and outside the fetch try, so a broken local file raises instead of being
+    reported as "quota unknown".
     """
-    catalog, threshold = {}, 10
+    # Import inside the function: hooks load this module via
+    # spec_from_file_location without the scripts dir on sys.path; a top-level
+    # `import catalog` would break spare_pools on SessionStart.
+    scripts = Path(__file__).resolve().parent
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import catalog as catalog_mod  # noqa: E402
+    catalog = catalog_mod.load(catalog_path or scripts / "catalog.json")
+    threshold = catalog.get("min_quota_pct", 10)
     try:
         entries = pools(fetch("auto", timeout=15))
-        catalog = json.loads(Path(catalog_path or Path(__file__).with_name("catalog.json"))
-                             .read_text(encoding="utf-8"))
-        threshold = catalog.get("min_quota_pct", 10)
     except Exception as exc:
         return {"catalog": catalog, "threshold": threshold, "error": str(exc),
                 "pools": {pid: {"state": "unknown", "reason": " ".join(_fetch_error(exc).split())}

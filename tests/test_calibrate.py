@@ -12,6 +12,7 @@ from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "delegate" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+os.environ["DELEGATE_CATALOG_LOCAL"] = ""
 
 import calibrate  # noqa: E402
 import cost  # noqa: E402

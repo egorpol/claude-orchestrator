@@ -16,6 +16,8 @@ from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/delegate/scripts"
 sys.path.insert(0, str(SCRIPTS))
+# Never read the developer's real catalog.local.json (or a hostile XDG fixture).
+os.environ["DELEGATE_CATALOG_LOCAL"] = ""
 
 import autoreport as afr  # noqa: E402
 import cost  # noqa: E402
@@ -998,7 +1000,8 @@ class CLITests(Fixtures):
         self.save(self.log, self.rows)
         result = subprocess.run([sys.executable, str(SCRIPTS / "delegate"), "report", "--digest", sid[:8],
                                  "--out", str(self.out), "--log", str(self.log), "--json"],
-                                text=True, capture_output=True)
+                                text=True, capture_output=True,
+                                env={**os.environ, "DELEGATE_CATALOG_LOCAL": ""})
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(json.loads(result.stdout)["sessions"][0]["status"], "dropped")
         self.assertFalse(self.out.exists())

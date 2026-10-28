@@ -30,7 +30,8 @@ class WorkingTreeReviewTests(unittest.TestCase):
                     "CLAUDE_DELEGATE_ROOT": str(self.storage), "CLAUDECODE": "fixture",
                     "CLAUDE_DELEGATE_QUOTA_SNAPSHOT": "0",
                     "CLAUDE_SESSION_LOG": str(self.tmp / "sessions.jsonl"),
-                    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+                    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                    "DELEGATE_CATALOG_LOCAL": ""}
         self.env.pop("FAKE_AGENT_EXIT", None)
         self.env.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)

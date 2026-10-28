@@ -55,6 +55,11 @@ def fixture(now):
 
 
 class DispatchCheckTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"DELEGATE_CATALOG_LOCAL": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def entries(self, **five):
         return {"codex-5h": {"left_pct": 10, "age_min": 15, **five},
                 "codex-7d": {"left_pct": 50, "age_min": 0},
@@ -133,7 +138,8 @@ class QuotaTests(unittest.TestCase):
                     "XDG_CACHE_HOME": str(self.tmp / "cache"),
                     "XDG_CONFIG_HOME": str(self.tmp / "config"),
                     "CLAUDE_CONFIG_DIR": str(self.projects.parent),
-                    "FAKE_QUOTA_EXPORT": str(self.export), "FAKE_QUOTA_CALLS": str(self.calls)}
+                    "FAKE_QUOTA_EXPORT": str(self.export), "FAKE_QUOTA_CALLS": str(self.calls),
+                    "DELEGATE_CATALOG_LOCAL": ""}
 
     def write_export(self):
         self.export.write_text(json.dumps(self.envelope))
