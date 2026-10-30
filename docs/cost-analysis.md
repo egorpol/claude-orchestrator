@@ -133,7 +133,7 @@ Idle rebuild share across later sessions is tabulated in [field-results.md](fiel
 
 - **Capping CLI output:** 0.05%.
 - **Screenshots through a text-returning worker:** 0.5%.
-- **Codex `--output-schema` for final messages:** it risks losing the free-form conflict flags that saved rounds. A soft `## Digest` block appended to the contract is enough for the exit packet.
+- **Codex `--output-schema` for final messages:** it risks losing the free-form conflict flags that saved rounds. A soft `## Digest` block appended to the contract is enough for the exit packet. Checked again for reviews on 2026-10-30: the regex parse of the Markdown reviews held on all 88 recorded reviews with a last message (49 Codex, 39 Cursor): every verdict parsed, no review gave two, and each review's finding bullets matched its severity tags (239 findings); cursor-agent has no schema option, so a schema would cover Codex reviews only.
 
 All eight levers were built between 2026-10-10 and 2026-10-13; see the [CHANGELOG](../CHANGELOG.md).
 
