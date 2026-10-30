@@ -1,6 +1,6 @@
 # Field results
 
-Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. `mode` is the session's drawn mode in the control-session experiment (hook registered 2026-10-13 10:29); — means the session started before it, and none that no draw was logged. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in.
+Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. `mode` is the session's drawn mode in the control-session experiment (hook registered 2026-10-13 10:29); — means the session started before it, and none that no draw was logged; excluded means sessions in this repo (claude-orchestrator), which the session-mode hook leaves out of the draw; they run with orchestrator rules. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in.
 
 | date | session | mode | calls | context at end | cost units | units per call | idle rebuild share |
 |---|---|---|---:|---:|---:|---:|---:|
@@ -51,8 +51,28 @@ Numbers come from `delegate cost --session` on each session's transcript and inc
 | 2026-10-23 | d4b6e9de | orchestrator | 71 | 161k | 1.33M | 18.7k | 0 |
 | 2026-10-23 | 48c1baa2 | orchestrator | 89 | 275k | 2.83M | 31.8k | 0 |
 | 2026-10-26 | e464ce15 | claude-only | 80 | 198k | 1.82M | 22.7k | 0 |
+| 2026-10-26 | dedf3bca | orchestrator | 49 | 160k | 1.06M | 21.7k | 0 |
+| 2026-10-27 | f8cd3c54 | excluded | 47 | 124k | 0.83M | 17.6k | 0 |
+| 2026-10-27 | 2c6e8689 | orchestrator | 95 | 195k | 1.97M | 20.8k | 0 |
+| 2026-10-27 | 81e2256b | excluded | 61 | 157k | 1.22M | 19.9k | 0 |
+| 2026-10-27 | 91b21d6f | orchestrator | 41 | 152k | 0.96M | 23.3k | 0 |
+| 2026-10-27 | 4999c377 | orchestrator | 37 | 146k | 0.80M | 21.5k | 0 |
+| 2026-10-27 | 502dc788 | orchestrator | 59 | 160k | 1.46M | 24.7k | 18.9% |
+| 2026-10-27 | ae326c85 | orchestrator | 33 | 87k | 0.48M | 14.7k | 0 |
+| 2026-10-27 | d159aab1 | orchestrator | 61 | 129k | 1.19M | 19.5k | 16.2% |
+| 2026-10-27 | 2dfb991d | orchestrator | 71 | 174k | 1.49M | 21.0k | 0 |
+| 2026-10-28 | c077328e | claude-only | 52 | 154k | 1.03M | 19.9k | 0 |
+| 2026-10-28 | 1edad6e3 | orchestrator | 49 | 186k | 1.20M | 24.6k | 0 |
+| 2026-10-28 | 52fd4251 | orchestrator | 48 | 180k | 1.19M | 24.8k | 0 |
+| 2026-10-28 | 9aabc1d7 | excluded | 68 | 153k | 1.26M | 18.5k | 0 |
+| 2026-10-28 | 5a76a1e0 | claude-only | 65 | 216k | 1.73M | 26.7k | 0 |
+| 2026-10-28 | 5e3c936f | excluded | 63 | 152k | 1.37M | 21.8k | 17.9% |
+| 2026-10-28 | a0480816 | excluded | 58 | 156k | 1.17M | 20.1k | 0 |
+| 2026-10-28 | 942b7366 | excluded | 47 | 111k | 0.69M | 14.7k | 0 |
+| 2026-10-30 | 5b7b3108 | orchestrator | 59 | 158k | 1.15M | 19.5k | 0 |
+| 2026-10-30 | 1b3948cb | orchestrator | 25 | 111k | 0.49M | 19.7k | 0 |
 
-47 sessions, 3,950 calls, 112.2M cost units; idle rebuilds 9.1M (8.1%). The 46 sessions after the marathon averaged 24.2k units per call.
+67 sessions, 5,038 calls, 135.0M cost units; idle rebuilds 9.9M (7.3%). The 66 sessions after the marathon averaged 23.4k units per call.
 
 ## 2026-10-10
 
@@ -293,9 +313,47 @@ Each closed with `/field-report`; folded in on 2026-10-26. Numbers from `delegat
 - **Commands.** A closing picker offered `/field-report`, which the model could not invoke (46869c36); it is model-invocable now. `/next` opens with "handoff predates N commits / M dirty files" when the handoff is older than the latest commit (e464ce15).
 - **Not adopted:** project-specific tips (SVG hover on painted children, assertions on markup form, post-merge regeneration paths, a `GIT_INDEX_FILE` export) and the triage's "inline is cheaper for ≤5-call rewrites", which the delegate-by-default decision supersedes apart from the <~10-line exception.
 
+## 2026-10-26 to 10-30: twenty sessions, six projects
+
+Each closed with `/field-report`; folded in on 2026-10-30 (`e626d06`). Numbers from `delegate cost --session <id>`. Modes: 12 orchestrator, 2 claude-only, 6 excluded; draw weights 70/15/15 from 2026-10-26. Claude moved to the Max plan on 2026-10-26: Claude 7d is the share left at report time on Max, and is not comparable with the Pro figures in earlier sections.
+
+| session | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---:|---:|---:|---:|---|---:|
+| dedf3bca, audiospylt: fade probes before a design decision | none | 49 | 160k | 1.06M | 21.7k | none | 99 |
+| f8cd3c54, this repo: report-design review and tool probes (excluded) | 2 × `ask --agent both`, 1 × `ask` (Codex) | 47 | 124k | 0.83M | 17.6k | none | 94 |
+| 2c6e8689, ddt_1_vol_29_30: notation triage and fixes | Codex triage (discarded), 2 × `ask --agent both` | 95 | 195k | 1.97M | 20.8k | none | 94 |
+| 81e2256b, this repo: outside-read guard and live checks (excluded) | Codex build, Cursor review, `ask --agent both` | 61 | 157k | 1.22M | 19.9k | none | 94 |
+| 91b21d6f, ddt_1_vol_11: regeneration review and release choice | Codex review, Cursor follow-up of an earlier run, `ask --agent both` | 41 | 152k | 0.96M | 23.3k | none | 93 |
+| 4999c377, opportunities-crawler: review and report design | 2 × `ask --agent both` | 37 | 146k | 0.80M | 21.5k | none | 90 |
+| 502dc788, opportunities-crawler: speed fixes | Cursor build and follow-up, Codex review | 59 | 160k | 1.46M | 24.7k | 241 min (18.9%) | 89 |
+| ae326c85, opportunities-crawler: first CI run and bot prompt | none | 33 | 87k | 0.48M | 14.7k | none | 88 |
+| d159aab1, opportunities-crawler: connector test and seed-link pruning | 2 × `ask --agent both` | 61 | 129k | 1.19M | 19.5k | 67 min (16.2%) | 87 |
+| 2dfb991d, ddt_1_vol_11: release docs and publication | Cursor build, Codex review | 71 | 174k | 1.49M | 21.0k | none | 85 |
+| c077328e, audiospylt: tutorial data and checker (claude-only) | none | 52 | 154k | 1.03M | 19.9k | none | 84 |
+| 1edad6e3, a private project: pipeline review with a read-only Cursor audit | Cursor read-only audit | 49 | 186k | 1.20M | 24.6k | none | 84 |
+| 52fd4251, audiospylt: tutorial notebooks rewritten | Cursor build and follow-up, Codex review | 48 | 180k | 1.19M | 24.8k | none | 83 |
+| 9aabc1d7, this repo: cwd-guard fixes and live check (excluded) | 2 × Codex review, 2 × Cursor follow-up of an earlier run | 68 | 153k | 1.26M | 18.5k | none | 83 |
+| 5a76a1e0, audiospylt: tutorial review and manual fixes (claude-only) | applied an earlier Cursor run after reading its Codex review; fix round by hand | 65 | 216k | 1.73M | 26.7k | none | 80 |
+| 5e3c936f, this repo: main-tree review built and tried on itself (excluded) | Codex review, Cursor follow-up of an earlier run; `review --working-tree` (both vendors) | 63 | 152k | 1.37M | 21.8k | 234 min (17.9%) | 79 |
+| a0480816, this repo: preflight warnings designed and built (excluded) | Cursor build and follow-up, Codex review, `ask --agent both` | 58 | 156k | 1.17M | 20.1k | none | 77 |
+| 942b7366, this repo: warnings reviewed and applied (excluded) | Codex review of round 2 | 47 | 111k | 0.69M | 14.7k | none | 76 |
+| 5b7b3108, a private project: scoring change built by Codex | Codex build, `ask --agent both` | 59 | 158k | 1.15M | 19.5k | none | 68 |
+| 1b3948cb, a private project: review and apply | Cursor review | 25 | 111k | 0.49M | 19.7k | none | 68 |
+
+- **Delegation resumed in the drawn orchestrator sessions.** Of the 12, six launched, two reviewed or followed up earlier runs, two only asked, and two used no delegate; the previous section's six from 10-21 launched nothing. The 13 runs touched here comprise eight launches (five Cursor, three Codex), four carried in and one working-tree review: ten applied, one discarded triage, one read-only audit, one review only; across them, 20 rounds and 15 reviews. Calls here: 8 launch, 7 follow-up, 12 review, 13 `ask` (12 both, one Codex). Both claude-only sessions launched nothing; one applied an earlier run and fixed it by hand. This follows the 10-26 delegate-by-default rules and 70/15/15 draw; it does not establish their effect.
+- **The twenty were smaller per call, but context guesses still missed the boundary.** They averaged 20.9k units per call (median 58 calls), against 22.4k (median 59) for the eleven before them. One ended above 200k (216k), none above 240k; the eleven had three above 200k and one above 240k. Two audiospylt pickers guessed 95k and ~110k when context was 143k and 205k. `e626d06` makes `hygiene.md` take context from `delegate cost --session latest`, use outlines for large files and diffs, and put the handoff boundary after review.
+- **All three idle rebuilds followed picker answers.** 502dc788 resumed after 241 min (18.9%) by choosing the `/clear`, then `/next` option itself; the reply rewrote 138k before clearing. d159aab1 answered a git-steps picker after 67 min (16.2%), adding `/field-report` first; 5e3c936f chose `/field-report` first after 234 min (17.9%). The idle hold sees typed prompts only. `hooks/attention.py` (`a2b11cf`) now marks the waiting Cursor window in KDE when a picker opens and pops a notice for handoff pickers; it does not extend the idle hold to picker replies.
+- **Correct totals did not make the labels or causes correct.** Four audiospylt probes refuted a fade explanation; centring gained at most 0.9 dB. In ddt_1_vol_11, eight removals had the wrong label despite matching counts, and a release split had to be re-measured as 4,753 + 18. A crawler question said six followed links where config said four. `e626d06` makes the rules re-measure handoff numbers, labels and causes; SKILL.md checks brief facts against the spec document and asks for the call that produced them.
+- **Acceptance cases need benign inputs and delayed wakeups.** The outside-read guard passed its suite but blocked an ordinary workspace glob with no directory argument. The crawler limiter started two requests 0.27 ms apart under a 30 ms limit when a thread overslept. A cwd-guard fix mistook `2>&1` for backgrounding. SKILL.md (`e626d06`) now chooses adversarial cases by code kind, probes benign guard events through the real agent, and requires neighbouring syntax tests in fix briefs. The working-tree review's live test found a missed peer-review failure after 621 tests; `96b5f65` includes its fix.
+- **Review cost needs a stopping rule.** The tutorial review repeated all four findings from the orchestrator's pass; Codex 5h fell from 73% to 57%. The cwd guard's second review listed five forms absent from 95 real sticking calls; the warnings re-review found two forms absent from 88 verify commands. Both stopped with documented limits. SKILL.md (`e626d06`) now starts a costly review after the orchestrator's first pass, lists handled findings in `--focus`, and gives heuristic reviewers frequencies and a stopping rule. Executed notebook outputs go in a text file named in the focus.
+- **A checker needs near misses and a working failure path.** A 16-case self-test still missed five false absolute-path hits; a release checker's planted failure raised a traceback before it could print FAIL. SKILL.md's acceptance guidance (`e626d06`) now asks for near misses, FAIL lines for missing elements, worst-case tests for stated bounds, and a `--self` mode when outputs do not exist yet. The recurring zsh traps also moved into `hygiene.md`: `=word`, unmatched globs and `$?` after a pipe. The preflight-warning scan found a real failed test behind a passing pipeline; `2c955f4` adds launch and log warnings.
+- **The CLI now shows the work and inputs the reports missed.** Reports missed live runs because only apply or cleanup logged them. `e626d06` lists launched or touched live runs in the skeleton without duplicating run-log rows, bounds Digest risks lines and reports a missing Digest. It names dirty main-tree paths in launch contracts and reviews after a reviewer rejected a correct uncommitted value. `b374591` adds `--include-uncommitted`; `3ff3747` refreshes stale `changes.patch` after each round. SKILL.md records the probed Codex `workspace-write` limit: `--link`ed paths are read-only inside its sandbox, so writes to them go to `--verify`.
+- **Not adopted.** The reported control-hook match on heredoc prose did not reproduce in 12 forms on the current tokenizer; positive controls fired. The blocked Bash call remains recorded with its cause unconfirmed. `delegate context` duplicates `cost --session latest`; reading it is now a rule. `review --attach` became the executed-output recipe in SKILL.md. Single-report ideas remain roadmap candidates: output harvesting, an ops-only session tag, a nudge near 100k before a skill load, flagging Cursor sub-agent deltas, and showing verify separately from running. These decisions were checked on 2026-10-30; the rule and recipe changes are in `e626d06`.
+
 ## Still open
 
 - Control sessions: USD per finished item needs many more items per arm before the arms can be compared. Re-read `delegate cost --by-mode` as sessions accumulate.
 
 - Re-measure on the next long session with `delegate cost --session latest`.
+- Picker replies still bypass the context guard's idle hold. Attention notices may shorten the wait; re-measure picker idle rebuilds as sessions accumulate.
 - Orchestrator effort: measured above ([lever 4](cost-analysis.md#4-keep-heavy-reading-and-scripting-out-of-the-main-context-about-4-measured-more-possible)), keep xhigh. For proof, run one routine work item at `high` and compare its thinking tokens and rounds against an xhigh item.

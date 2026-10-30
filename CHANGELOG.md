@@ -93,6 +93,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - `/field-report` is model-invocable, so a closing picker's `/field-report` option runs it.
 - `/next` opens with "handoff predates N commits / M dirty files" when `HANDOFF.md` is older than the latest commit or the tree is dirty.
 - Field results: eleven sessions from 2026-10-20 to 10-26; README totals now cover 47 sessions.
+- Field results: twenty sessions from 2026-10-26 to 10-30 and an `excluded` mode for this repo's own sessions; README totals now cover 67 sessions.
 
 ## [0.1.0] - 2026-10-13
 

@@ -10,10 +10,10 @@ It is a snapshot, published in case parts of it are useful to someone else. It i
 
 ## What it achieved so far
 
-These figures come from 47 Claude Code sessions across eight projects, 2026-10-09 to 2026-10-26; the per-session numbers are in [field results](docs/field-results.md). Cost units weigh tokens by API price: input 1, cache read 0.1, cache write 2, output 5. Each session did different work, so the comparisons are per call, not controlled experiments.
+These figures come from 67 Claude Code sessions across twelve projects, 2026-10-09 to 2026-10-30; the per-session numbers are in [field results](docs/field-results.md). Cost units weigh tokens by API price: input 1, cache read 0.1, cache write 2, output 5. Each session did different work, so the comparisons are per call, not controlled experiments.
 
-- **Short sessions with handoffs.** The baseline was one 13-hour session: 389 calls, with context growing to 779k tokens. Each call re-reads everything before it, so cost grows with the square of session length; cache re-reads were 98% of its tokens. It averaged 67.4k cost units per call. The 46 sessions since averaged 24.2k (about 64% less). Through 2026-10-20, those that did one item from a `HANDOFF.md` ran 16.5k–31.6k; the three above 27k each let that one item grow past 240k. The rules and the hook push for one work item per session.
-- **Idle cache rebuilds.** After an hour idle, the prompt cache expires, and the next turn rewrites the whole context at twice the input price. That happened in 14 of the 47 sessions and cost 8.1% of all logged units (9.1M of 112.2M), none of them among the eleven from 2026-10-20 to 10-26. The hook now holds the first typed prompt after an hour idle and suggests `/clear`; it first fired live on 2026-10-13. Slash commands and picker answers pass, and three rebuilds came from a `/field-report` typed after the break.
+- **Short sessions with handoffs.** The baseline was one 13-hour session: 389 calls, with context growing to 779k tokens. Each call re-reads everything before it, so cost grows with the square of session length; cache re-reads were 98% of its tokens. It averaged 67.4k cost units per call. The 66 sessions since averaged 23.4k (about 65% less). Through 2026-10-20, those that did one item from a `HANDOFF.md` ran 16.5k–31.6k; the three above 27k each let that one item grow past 240k. The rules and the hook push for one work item per session.
+- **Idle cache rebuilds.** After an hour idle, the prompt cache expires, and the next turn rewrites the whole context at twice the input price. That happened in 17 of the 67 sessions and cost 7.3% of all logged units (9.9M of 135.0M): none among the eleven from 2026-10-20 to 10-26, three among the twenty from 10-26 to 10-30. The hook now holds the first typed prompt after an hour idle and suggests `/clear`; it first fired live on 2026-10-13. Slash commands and picker answers pass: three earlier rebuilds came from a `/field-report` typed after the break, and all three since 10-26 from a picker answered after one, which `--attention` now flags by marking the waiting Cursor window.
 - **No polling.** In the baseline, 40 status checks cost 15.3% of the session. A finished delegate run now puts its status, at most 20 lines, into the task notification.
 - **Delegation.**
   - On the baseline day, Cursor Auto used about 5× fewer tokens per run than Codex at xhigh effort, and moved its quota pool about 1 point over 9 runs.
@@ -21,7 +21,7 @@ These figures come from 47 Claude Code sessions across eight projects, 2026-10-0
   - Cursor Auto built a 15-file feature in 2 rounds with 0 review findings.
   - A bulk pass labelled 6,529 rows with 0 failures for about 2.7 points of the Cursor Auto pool.
 - **Cross-vendor review.** On the module run, Cursor's review and Claude's own read each found a bug the other missed. Reviews also approved a wrong brief twice, so reviewers are now asked to challenge the brief.
-- **Still short of the goal.** Claude's 7-day pool fell about 3 points per session even in the best sessions, and several design- or data-heavy sessions delegated nothing.
+- **Still short of the goal.** On Pro (until 2026-10-26), Claude's 7-day pool fell about 3 points per session even in the best sessions, and several design- or data-heavy sessions delegated nothing.
 
 The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysis.md).
 
