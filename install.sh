@@ -10,6 +10,8 @@
 #                           and hooks/secret-guard.py as a PreToolUse (Bash) hook (timeout 30)
 #                           that asks before a commit or push that would expose secrets, and
 #                           denies a sticking cd/pushd into a project subdirectory
+#   ./install.sh --attention  also register hooks/attention.py (Stop, AskUserQuestion,
+#                           permission/elicitation notifications) for Cursor/KDE desktop attention
 #   ./install.sh --git-hook=DIR
 #                           link hooks/secret-guard.py as DIR's pre-push and pre-commit hooks
 #                           (respects core.hooksPath / worktrees); refuses a different existing
@@ -42,12 +44,13 @@ SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 USER_MD="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/CLAUDE.md"
 RULES_LINE="@$REPO/rules/orchestrator.md"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-mode=link bin=0 hooks=0 experiment=0 rules=0 timer=0 check_only=0 force=0 failed=0 git_hook_dir=
+mode=link bin=0 hooks=0 attention=0 experiment=0 rules=0 timer=0 check_only=0 force=0 failed=0 git_hook_dir=
 for arg in "$@"; do
   case "$arg" in
     --copy) mode=copy ;;
     --bin) bin=1 ;;
     --hooks) hooks=1 ;;
+    --attention) attention=1 ;;
     --experiment) experiment=1 ;;
     --rules) rules=1 ;;
     --timer) timer=1 ;;
@@ -99,6 +102,8 @@ check_prereqs() {
   else warn "optional: context-guard hook not registered (./install.sh --hooks)"; fi
   if grep -qs 'hooks/secret-guard.py' "$SETTINGS"; then ok "secret-guard hook registered in $SETTINGS"
   else warn "optional: secret-guard hook not registered (./install.sh --hooks)"; fi
+  if grep -qs 'hooks/attention.py' "$SETTINGS"; then ok "attention hook registered in $SETTINGS"
+  else warn "optional: attention hook not registered (./install.sh --attention)"; fi
   local imported=0
   rules_imported && imported=1
   if session_mode_registered; then
@@ -279,8 +284,8 @@ if [ "$bin" = 1 ]; then
   ln -sfn "$SKILLS_DIR/delegate/scripts/delegate" "$HOME/.local/bin/delegate"
   ok "delegate on PATH via ~/.local/bin/delegate"
 fi
-# Register hooks/context-guard.py + secret-guard.py (guard) or hooks/session-mode.py (session)
-# in settings.json.
+# Register context-guard.py + secret-guard.py (guard), session-mode.py (session), or
+# attention.py (attention) in settings.json.
 register_hooks() {
   # merge, never replace: keep every other key and hook; back the file up before a change
   python3 - "$SETTINGS" "$REPO/hooks" "$1" <<'PY_HOOK'
@@ -293,13 +298,16 @@ except ValueError as error:
     sys.exit(f"  miss  {path} is not valid JSON ({error}); fix it and re-run")
 if not isinstance(s, dict) or not isinstance(s.setdefault("hooks", {}), dict):
     sys.exit(f"  miss  {path}: expected an object with a \"hooks\" object; fix it and re-run")
-guard, secret, mode = (f'python3 "{hooks / name}"'
-                       for name in ("context-guard.py", "secret-guard.py", "session-mode.py"))
+guard, secret, mode, attention = (f'python3 "{hooks / name}"' for name in (
+    "context-guard.py", "secret-guard.py", "session-mode.py", "attention.py"))
 # session-mode starts its slow parts (quota reading, summary) detached, so short timeouts do
 entries = {"guard": [("UserPromptSubmit", None, guard, 5),
                      ("PreToolUse", "Bash", secret, 30)],
            "session": [("SessionStart", None, mode, 10), ("PreToolUse", "Skill|Agent|Bash", mode, 5),
-                       ("SessionEnd", None, mode, 10)]}[which]
+                       ("SessionEnd", None, mode, 10)],
+           "attention": [("Stop", None, attention, 5),
+                         ("PreToolUse", "AskUserQuestion", attention, 5),
+                         ("Notification", "permission_prompt|elicitation_dialog", attention, 5)]}[which]
 for event, matcher, cmd, timeout in entries:
     ours = {**({"matcher": matcher} if matcher else {}),
             "hooks": [{"type": "command", "command": cmd, "timeout": timeout}]}
@@ -388,6 +396,10 @@ install_one_git_hook() {
 if [ "$hooks" = 1 ]; then
   register_hooks guard
   ok "context-guard and secret-guard hooks registered in $SETTINGS"
+fi
+if [ "$attention" = 1 ]; then
+  register_hooks attention
+  ok "attention hook registered in $SETTINGS"
 fi
 if [ "$experiment" = 1 ]; then
   register_hooks session
