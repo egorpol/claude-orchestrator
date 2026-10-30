@@ -1087,6 +1087,41 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("risks: tracked.txt:1 - first risk; - tracked.txt:2 - second risk", compact)
         self.assertNotIn("wrong fallback", compact)
 
+    def test_digest_bounds_and_stops_after_blank_or_missing(self):
+        """Digest ends at a blank after a key; long values cut; missing Digest says so plainly."""
+        self.launch()
+        root = self.root("test")
+        junk = "x" * 1500
+        (root / "last-message.md").write_text(
+            "## Digest\nfiles: tracked.txt (+1/-0)\nverify: ok\nconflicts: none\n"
+            "risks: short risk\n\n" + junk + "\n")
+        compact = self.last_packet(self.cli("status", "test"))
+        self.assertIn("risks: short risk", compact)
+        self.assertNotIn(junk[:40], compact)
+        risks_line = next(l for l in compact.splitlines() if l.startswith("risks:"))
+        self.assertLessEqual(len(risks_line), 240)
+
+        long_risk = "R" * 600
+        (root / "last-message.md").write_text(
+            "## Digest\nfiles: a\nverify: ok\nconflicts: none\nrisks: " + long_risk + "\n")
+        compact = self.last_packet(self.cli("status", "test"))
+        risks_line = next(l for l in compact.splitlines() if l.startswith("risks:"))
+        self.assertEqual(len(risks_line), 240)
+        self.assertTrue(risks_line.endswith("… (see last-message.md)"))
+        self.assertLess(risks_line.count("R"), 600)
+        self.assertNotIn(long_risk, risks_line)
+
+        (root / "last-message.md").write_text(
+            "## Digest\nfiles: a\nverify: ok\nconflicts: none\n"
+            "risks: first line\n- continuation under risks\n")
+        compact = self.last_packet(self.cli("status", "test"))
+        self.assertIn("risks: first line; - continuation under risks", compact)
+
+        (root / "last-message.md").write_text("All done, no structured digest here.\n")
+        compact = self.last_packet(self.cli("status", "test"))
+        self.assertIn("digest: missing in last-message.md", compact)
+        self.assertNotIn("conflicts/risks: see last-message.md", compact)
+
     def test_cleanup_rejects_changes_since_apply(self):
         self.launch()
         self.cli("apply", "test")

@@ -433,13 +433,16 @@ def extract_pick(answer):
     return None
 
 
-def _fallback_for_both(a):
-    """Only the cheap quota read runs on a healthy both call."""
+def _fallback_for_both(a, prefix="ask"):
+    """Only the cheap quota read runs on a healthy both call.
+
+    `prefix` labels stderr notices (ask vs review --working-tree).
+    """
     if getattr(a, "no_fallback", False):
         return None
     check = quota.check_dispatch(SCRIPTS / "catalog.json")
     if check["error"] is not None:
-        print(f"ask: Codex quota unknown ({check['error']}); keeping Codex.", flush=True)
+        print(f"{prefix}: Codex quota unknown ({check['error']}); keeping Codex.", flush=True)
         return None
     catalog, threshold = check["catalog"], check["threshold"]
     empty, unknown = [], []
@@ -450,25 +453,25 @@ def _fallback_for_both(a):
             empty.append((pid, entry["left_pct"]))
     if not empty:
         if unknown:
-            print(f"ask: Codex quota unknown ({', '.join(unknown)}); keeping Codex.", flush=True)
+            print(f"{prefix}: Codex quota unknown ({', '.join(unknown)}); keeping Codex.", flush=True)
         return None
     trigger = ", ".join(f"{pid} {left:g}% left" for pid, left in empty)
-    prefix = f"ask: {trigger} below {threshold:g}% threshold; "
+    head = f"{prefix}: {trigger} below {threshold:g}% threshold; "
     # The expensive discovery and ratings load are deliberately below the trigger.
     import frontier
     half = (DEFAULTS["codex"][0], a.effort or DEFAULTS["codex"][1])
     try:
         report = frontier.load_report(catalog, default_codex=half)
     except Exception as exc:
-        print(prefix + f"keeping Codex: fallback ratings unavailable ({exc}).", flush=True)
+        print(head + f"keeping Codex: fallback ratings unavailable ({exc}).", flush=True)
         return None
     for warning in report["warnings"]:
-        print(f"ask: {warning}", file=sys.stderr)
+        print(f"{prefix}: {warning}", file=sys.stderr)
     selection = report["fallback"]
     if not selection:
-        print(prefix + f"keeping Codex: {report['fallback_reason']}.", flush=True)
+        print(head + f"keeping Codex: {report['fallback_reason']}.", flush=True)
         return None
-    print(prefix + "fallback " + frontier.fallback_description(selection), flush=True)
+    print(head + "fallback " + frontier.fallback_description(selection), flush=True)
     return selection["row"]
 
 

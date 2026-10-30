@@ -472,6 +472,100 @@ class TestReport(unittest.TestCase):
         self.assertIn("- `boundary`: codex gpt-test, 2 round(s), applied", text)
         self.assertNotIn("too-old", text)
 
+    def _write_live_run(self, storage, repo_name, run_name, meta, review_started=None,
+                        verify_code=None):
+        root = storage / repo_name / run_name
+        root.mkdir(parents=True)
+        (root / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        if verify_code is not None:
+            (root / "verify_code").write_text(f"{verify_code}\n", encoding="utf-8")
+        if review_started is not None:
+            job = root / "review-1"
+            job.mkdir()
+            (job / "started_at").write_text(review_started + "\n", encoding="utf-8")
+            (job / "meta.json").write_text(json.dumps({
+                "agent": "cursor", "model": "auto", "n": 1,
+            }), encoding="utf-8")
+        return root
+
+    def test_live_runs_in_skeleton_not_copied_to_jsonl(self):
+        """Live runs this session owns or reviewed appear in the skeleton; not in runs.jsonl."""
+        storage = self.root / "live-runs"
+        storage.mkdir()
+        # (a) earlier session's run, reviewed in this window, still live
+        self._write_live_run(storage, "toy", "reviewed-live", {
+            "name": "reviewed-live", "agent": "cursor", "model": "auto", "rounds": 2,
+            "session": OTHER_SESSION, "repo": str(self.repo),
+            "history": [
+                {"n": 1, "started": "2026-10-10T12:00:00Z", "verify": 0},
+                {"n": 2, "started": "2026-10-10T13:00:00Z", "verify": 0},
+            ],
+        }, review_started="2026-10-10T21:30:00Z")
+        # (b) same run name under another repo basename — must not appear
+        other_repo = self.root / "other-toy"
+        other_repo.mkdir()
+        self._write_live_run(storage, "other-toy", "reviewed-live", {
+            "name": "reviewed-live", "agent": "codex", "model": "gpt-x", "rounds": 1,
+            "session": SESSION, "repo": str(other_repo),
+            "history": [{"n": 1, "started": "2026-10-10T21:10:00Z", "verify": 0}],
+        })
+        # (c) log name matches meta.name even when the storage dir differs — listed once
+        self._write_live_run(storage, "toy", "storage-dir", {
+            "name": "already-logged", "agent": "codex", "model": "gpt-test", "rounds": 1,
+            "session": SESSION, "repo": str(self.repo),
+            "history": [{"n": 1, "started": "2026-10-10T21:05:00Z", "verify": 0}],
+        })
+        self.log.write_text(json.dumps({
+            "run": "already-logged", "ts": "2026-10-10T22:00:00Z", "repo": "toy",
+            "repo_path": str(self.repo), "agent": "codex", "model": "gpt-test",
+            "rounds": [{"n": 1}], "outcome": "applied", "session": SESSION,
+        }) + "\n", encoding="utf-8")
+        # (d) other session's live run with no round/review in this window
+        self._write_live_run(storage, "toy", "other-idle", {
+            "name": "other-idle", "agent": "cursor", "model": "auto", "rounds": 1,
+            "session": OTHER_SESSION, "repo": str(self.repo),
+            "history": [{"n": 1, "started": "2026-10-09T10:00:00Z", "verify": 0}],
+        })
+        # this session's own unapplied launch (history complete for both rounds)
+        self._write_live_run(storage, "toy", "own-live", {
+            "name": "own-live", "agent": "cursor", "model": "auto", "rounds": 2,
+            "session": SESSION, "repo": str(self.repo),
+            "history": [
+                {"n": 1, "started": "2026-10-10T21:10:00Z", "verify": 0},
+                {"n": 2, "started": "2026-10-10T21:40:00Z", "verify": 0},
+            ],
+        })
+        # (A) rounds=2 with only round 1 in history; verify_code is the current round's result
+        self._write_live_run(storage, "toy", "current-round", {
+            "name": "current-round", "agent": "cursor", "model": "auto", "rounds": 2,
+            "session": SESSION, "repo": str(self.repo),
+            "history": [{"n": 1, "started": "2026-10-10T21:10:00Z", "verify": 0}],
+        }, verify_code=1)
+        with mock.patch("runs.RUNS_ROOT", storage), mock.patch("cost.DEFAULT_LOG", self.log):
+            code, out, err = self.invoke()
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("runs copied: 1", out)
+        skeleton = Path(out.splitlines()[0]).read_text(encoding="utf-8")
+        self.assertIn(
+            "- `own-live`: cursor auto, 2 round(s), verify 0; live: not applied or cleaned up",
+            skeleton)
+        self.assertIn(
+            "- `current-round`: cursor auto, 2 round(s), verify 1; live: not applied or cleaned up",
+            skeleton)
+        self.assertIn(
+            "- `reviewed-live`: cursor auto, 2 round(s), verify 0; live: not applied or cleaned up",
+            skeleton)
+        self.assertIn("- `already-logged`: codex gpt-test, 1 round(s), applied", skeleton)
+        self.assertEqual(skeleton.count("already-logged"), 1)
+        self.assertNotIn("storage-dir", skeleton)
+        self.assertNotIn("live: not applied or cleaned up", skeleton.split("already-logged")[1].split("\n")[0])
+        self.assertNotIn("other-idle", skeleton)
+        # other-toy's same-named run must not appear (would show codex gpt-x if wrongly matched)
+        self.assertNotIn("gpt-x", skeleton)
+        copied = [json.loads(line) for line in (self.feedback / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([r["run"] for r in copied], ["already-logged"])
+        self.assertTrue(all(not r.get("live") for r in copied))
+
     def test_feedback_precedence_and_copy_install_error(self):
         install = self.root / "install"
         script = install / "skills/delegate/scripts/report.py"

@@ -71,7 +71,7 @@ CONTRACT = """
 ## Delegation contract (appended by the launcher; it overrides anything above that conflicts)
 - You are working in a git worktree at {wt} on branch `{branch}`, created from {base} for this task. {scope}
 - Do NOT run `git commit`, `git push`, `git merge`, `git rebase`, `git stash`, `git reset`, `git checkout <branch>` or create branches or tags. Leave every change uncommitted; the orchestrator reviews the diff and merges it.
-{links}{snapshot}- If a constraint in the brief would make you drop existing behaviour, data or a fallback, or real data contradicts an assumption in the brief, do not comply silently: keep the existing behaviour where you can and flag the conflict in your final message.
+{links}{snapshot}{dirty}- If a constraint in the brief would make you drop existing behaviour, data or a fallback, or real data contradicts an assumption in the brief, do not comply silently: keep the existing behaviour where you can and flag the conflict in your final message.
 - Verify against real data or tests where the brief says how (dry runs, test commands) and report the actual output, not what you expect it to be.
 - End with a final message containing: (1) what you changed, file by file; (2) the commands you ran to verify and their real results; (3) open questions, conflicts, and anything you skipped or were unsure about.
 - Keep those prose sections and append this short machine-readable block at the very end:
@@ -87,6 +87,21 @@ SNAPSHOT_BULLET = (
     "`{snapshot_of}` (`git show --stat HEAD` lists it). Treat that work as the starting point: "
     "don't redo or revert it. Your own changes are what `git diff HEAD` shows.\n"
 )
+
+MAIN_DIRTY_BULLET = (
+    "- These paths have uncommitted changes in the main checkout that this worktree does not have"
+    " ({paths}{more}); don't report their content here as wrong or stale; if the task depends on"
+    " them, say so in conflicts.\n"
+)
+
+MAIN_DIRTY_REVIEW_NOTE = (
+    "\nNote: at launch time, the main checkout had uncommitted changes not present in this"
+    " worktree ({paths}{more}). Don't report this worktree's copies of those paths as wrong or"
+    " stale; if the task depends on them, say so in conflicts.\n"
+)
+
+CONCERN_LINE_MAX = 240
+CONCERN_TRUNC_MARK = "… (see last-message.md)"
 
 FOLLOWUP_NOTE = """
 
@@ -589,6 +604,39 @@ def _snapshot_contract_bullet(base9, snapshot_of9):
     return SNAPSHOT_BULLET.format(base=base9, snapshot_of=snapshot_of9)
 
 
+def _main_dirty_info(repo, links=(), limit=20):
+    """Changed tracked + untracked paths (gitignore respected), excluding --link paths and .delegate/.
+
+    Rename/copy pairs list destination then source (both warned), before link skips and the cap.
+    """
+    # A --link'ed folder shows the main tree's content, so skip paths under it too.
+    skip = [l.rstrip("/") for l in links] + [".delegate"]
+    paths = []
+    for path in _iter_status_paths(repo, include_rename_sources=True):
+        if any(path == s or path.startswith(s + "/") for s in skip):
+            continue
+        paths.append(path)
+    if not paths:
+        return None
+    return {"paths": paths[:limit], "more": max(0, len(paths) - limit)}
+
+
+def _format_main_dirty_paths(info):
+    paths = ", ".join(f"`{p}`" for p in info.get("paths") or [])
+    more = f", and {info['more']} more" if info.get("more") else ""
+    return paths, more
+
+
+def _main_dirty_contract_bullet(info):
+    paths, more = _format_main_dirty_paths(info)
+    return MAIN_DIRTY_BULLET.format(paths=paths, more=more)
+
+
+def _main_dirty_review_note(info):
+    paths, more = _format_main_dirty_paths(info)
+    return MAIN_DIRTY_REVIEW_NOTE.format(paths=paths, more=more)
+
+
 def launch(a):
     repo = Path(git("rev-parse", "--show-toplevel", cwd=a.repo or os.getcwd()))
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -651,10 +699,18 @@ def launch(a):
              if a.read_only else "Work only inside this worktree; do not modify files outside it.")
     links_txt = "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
                         for l in links)
+    # Paths that differ in the main tree but not in a HEAD-based worktree (reviewers need the list).
+    dirty_info = None
+    dirty_txt = ""
+    if not include_uncommitted and not a.base and (tracked_n or untracked_n):
+        dirty_info = _main_dirty_info(repo, links)
+        if dirty_info:
+            dirty_txt = _main_dirty_contract_bullet(dirty_info)
 
     def build_prompt(base9, snapshot_txt):
         return brief.rstrip() + CONTRACT.format(
-            wt=wt, branch=branch, base=base9, scope=scope, links=links_txt, snapshot=snapshot_txt)
+            wt=wt, branch=branch, base=base9, scope=scope, links=links_txt,
+            snapshot=snapshot_txt, dirty=dirty_txt)
 
     cmd = build_cmd(a.agent, model, effort, wt, root, a.read_only, a.unsandboxed,
                     web_search=getattr(a, "web_search", False))
@@ -693,6 +749,8 @@ def launch(a):
             "brief_source": str(Path(a.brief).expanduser().resolve())}
     if snapshot_of:
         meta["snapshot_of"] = snapshot_of
+    if dirty_info:
+        meta["main_dirty"] = dirty_info
 
     root.mkdir(parents=True, exist_ok=True)
     excluded = []
@@ -823,10 +881,12 @@ def followup(a):
         snapshot_txt = ""
         if meta.get("snapshot_of"):
             snapshot_txt = _snapshot_contract_bullet(meta["base"][:9], meta["snapshot_of"][:9])
+        dirty_txt = (_main_dirty_contract_bullet(meta["main_dirty"])
+                     if meta.get("main_dirty") and meta["main_dirty"].get("paths") else "")
         prompt = (text + "\n\nAn earlier attempt's changes are already in this worktree (see `git diff "
                   f"{meta['base'][:9]}`); build on them rather than starting over."
                   + CONTRACT.format(wt=wt, branch=meta["branch"], base=meta["base"][:9], scope=scope,
-                                    links=links_txt, snapshot=snapshot_txt))
+                                    links=links_txt, snapshot=snapshot_txt, dirty=dirty_txt))
     else:
         prompt = text + FOLLOWUP_NOTE.format(round=k + 1)
         prompt += "".join(f"- `{l}` is a symlink to the main checkout's copy; treat it as read-only input.\n"
@@ -1132,7 +1192,7 @@ def _reviewers_for_working_tree(a):
     reviewers = _default_working_tree_reviewers(a)
     # Lazy: ask imports runs.
     import ask as ask_mod
-    fallback = ask_mod._fallback_for_both(a)
+    fallback = ask_mod._fallback_for_both(a, prefix="review")
     if fallback:
         return [("cursor", fallback["model"], None), ("cursor", reviewers[1][1], None)]
     return reviewers
@@ -1312,6 +1372,8 @@ def review(a):
                      f"{files}.\n")
     prompt = REVIEW_PROMPT.format(wt=wt, base=meta["base"][:9], n=n, shell_note=shell_note,
                                   brief=brief, focus=focus, omit_note=omit_note)
+    if meta.get("main_dirty") and meta["main_dirty"].get("paths"):
+        prompt += _main_dirty_review_note(meta["main_dirty"])
     cmd = build_cmd(agent, model, effort, wt, job, read_only=True)
     if a.dry_run:
         if omit_line:
@@ -1610,31 +1672,49 @@ def _one_line(text):
     return " ".join(str(text).split())
 
 
+def _bound_concern_line(line, limit=CONCERN_LINE_MAX):
+    """Keep a packet concerns line within `limit`, marking a cut with a pointer to the file."""
+    if len(line) <= limit:
+        return line
+    keep = limit - len(CONCERN_TRUNC_MARK)
+    if keep < 1:
+        return CONCERN_TRUNC_MARK[:limit]
+    return line[:keep] + CONCERN_TRUNC_MARK
+
+
 def _concerns(job):
     text = _read(job, "last-message.md") or ""
     digest = re.search(r"^## Digest\s*$([\s\S]*)", text, re.M)
+    had_digest = digest is not None
     if digest:
         values = {}
         key = None
         for line in digest.group(1).splitlines():
+            if re.match(r"^#{1,6}\s", line):
+                break  # next Markdown heading ends the Digest block
             match = re.match(r"^(files|verify|conflicts|risks):\s*(.*)", line)
             if match:
                 key = match[1]
                 values.setdefault(key, []).append(match[2])
-            elif line.strip() and key:
+            elif not line.strip():
+                if key is not None:
+                    break  # blank line after a key line ends the Digest block
+            elif key:
                 values[key].append(line.strip())
         if any(k in values for k in ("conflicts", "risks")):
             lines = []
             for k in ("conflicts", "risks"):
                 value = _one_line("; ".join(values.get(k, ["see last-message.md"])))
-                lines.append(f"{k}: {value}")
+                lines.append(_bound_concern_line(f"{k}: {value}"))
             return lines
     section = re.search(r"^#{1,6}[^\n]*(?:open.?questions|conflicts|open.?points)[^\n]*\n([\s\S]*?)(?=^#{1,6} |\Z)",
                         text, re.M | re.I)
     if section:
         lines = [l.strip() for l in section.group(1).splitlines() if l.strip()][:3]
         if lines:
-            return ["conflicts/risks: " + _one_line(l) for l in lines]
+            return [_bound_concern_line("conflicts/risks: " + _one_line(l)) for l in lines]
+    if not had_digest:
+        return ["digest: missing in last-message.md"]
     return ["conflicts/risks: see last-message.md"]
 
 
@@ -2265,8 +2345,12 @@ def _digest(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _iter_status_paths(wt):
-    """Exact paths from `git status --porcelain=v1 -z --untracked-files=all` (destination for renames)."""
+def _iter_status_paths(wt, include_rename_sources=False):
+    """Exact paths from `git status --porcelain=v1 -z --untracked-files=all`.
+
+    Default yields the destination only for renames/copies (callers like `_dirty_without_links`
+    depend on that). With `include_rename_sources=True`, yields destination then source.
+    """
     r = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=wt,
                        capture_output=True, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     data, i = r.stdout, 0
@@ -2284,8 +2368,15 @@ def _iter_status_paths(wt):
         # Rename/copy: an extra NUL-terminated source path follows.
         if code[:1] in b"RC" or code[1:2] in b"RC":
             z2 = data.find(b"\0", i)
-            i = len(data) if z2 < 0 else z2 + 1
-        yield path
+            if z2 < 0:
+                source_b, i = data[i:], len(data)
+            else:
+                source_b, i = data[i:z2], z2 + 1
+            yield path
+            if include_rename_sources:
+                yield source_b.decode("utf-8", "surrogateescape")
+        else:
+            yield path
 
 
 def _dirty_without_links(wt, meta):

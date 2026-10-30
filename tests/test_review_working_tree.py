@@ -286,12 +286,13 @@ class WorkingTreeReviewTests(unittest.TestCase):
         }
         report = {"fallback": selection, "fallback_reason": "", "warnings": []}
         started = []
+        out = io.StringIO()
         with patch("quota.fetch", return_value={"ok": True}), \
              patch("quota.pools", return_value=pools), \
              patch("frontier.load_report", return_value=report), \
              patch.object(runs.quota, "spawn_snapshot"), \
              patch.object(runs, "start_jobs", side_effect=lambda jobs, d, n: started.extend(jobs)), \
-             patch("sys.stdout", io.StringIO()):
+             patch("sys.stdout", out):
             runs.review_working_tree(self._wt_args(name="fb"))
         root = self.root("fb")
         self.assertEqual(len(started), 2)
@@ -299,6 +300,10 @@ class WorkingTreeReviewTests(unittest.TestCase):
         self.assertEqual(runs.load_meta(root / "review-1")["model"], "deepseek-fallback-test")
         self.assertEqual(runs.load_meta(root / "review-2")["agent"], "cursor")
         self.assertEqual(runs.load_meta(root / "review-2")["model"], "auto")
+        notice = next(line for line in out.getvalue().splitlines()
+                      if "below" in line and "threshold" in line and "fallback" in line)
+        self.assertTrue(notice.startswith("review:"), notice)
+        self.assertNotIn("ask:", notice)
 
     def test_dry_run_writes_nothing(self):
         self.dirty_main()
