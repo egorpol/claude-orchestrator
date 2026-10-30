@@ -2,6 +2,10 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-10-30
+
+- **Codex's `workspace-write` sandbox blocks writes through a `--link` symlink** (codex-cli 0.159.1, `codex sandbox -c 'sandbox_mode="workspace-write"'`, workspace and link target both under `~/.cache`, outside the writable `/tmp`). `echo x > link/f` failed with `Read-only file system`, as did a direct write to the target folder; a write to `own.txt` in the workspace succeeded, and `ls link/` read through the link. A field run (2026-10-30) whose brief asked for output under a linked folder wrote it to `/tmp` instead; its `--verify`, outside the sandbox, wrote the intended path. Not tested under Cursor's sandbox.
+
 ## 2026-10-28
 
 - **`git apply --3way` vs a dirty main tree, and a temp-index fix** (scratch repo, git 2.56.0). Snapshot S of a dirty main tree, worktree branch at S, delegate edits line 6, patch = `git diff --binary S` (only the delegate's line). Main tree then edits line 5 (adjacent). `git apply` fails (context); `git apply --3way` fails with `f.txt: does not match index`. Copy of the index + `git add` of the touched path in a temp index + `GIT_INDEX_FILE=tmp git apply --3way` prints `Applied patch to 'f.txt' with conflicts.`, `U f.txt`, writes `<<<<<<< ours` / `>>>>>>> theirs` markers into the working file, and leaves the real index untouched (`git status --short` shows ` M f.txt`). In a clean main tree, `git apply --3way` of a clean patch prints `Applied patch to 'g.txt' cleanly.` and stages the file (`M  g.txt`). `delegate apply --3way` now always uses the temp-index path so a clean 3-way stays unstaged.

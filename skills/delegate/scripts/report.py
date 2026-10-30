@@ -186,6 +186,113 @@ def matching_runs(directory, first_call):
     return matched
 
 
+def _meta_repo_matches(meta, directory):
+    """True when meta.json `repo` is this checkout (not another repo that shares a basename)."""
+    raw = meta.get("repo")
+    if not raw:
+        return False
+    path = Path(raw).expanduser().resolve()
+    if path == directory:
+        return True
+    top = git_toplevel(path)
+    return top == directory
+
+
+def _ts_in_window(value, first_call, last_call):
+    ts = _aware(value) if isinstance(value, str) else None
+    if ts is None:
+        return False
+    return first_call <= ts <= last_call
+
+
+def _read_started(path):
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _live_run_touched(root, meta, session, first_call, last_call):
+    """True when this session owns the run, or a round/review started in the session window."""
+    if _same_session(meta.get("session"), session):
+        return True
+    for row in meta.get("history") or []:
+        if _ts_in_window(row.get("started"), first_call, last_call):
+            return True
+    # Current round's start (not yet folded into history) uses the same started_at file.
+    if _ts_in_window(_read_started(root / "started_at"), first_call, last_call):
+        return True
+    for review_dir in sorted(root.glob("review-*")):
+        started = _read_started(review_dir / "started_at")
+        if started is None and (review_dir / "meta.json").is_file():
+            try:
+                started = json.loads((review_dir / "meta.json").read_text(encoding="utf-8")).get("started")
+            except (OSError, ValueError):
+                started = None
+        if _ts_in_window(started, first_call, last_call):
+            return True
+    return False
+
+
+def _live_run_row(root, meta):
+    """Display row for a live run; never written to runs.jsonl."""
+    history = list(meta.get("history") or [])
+    raw_rounds = meta.get("rounds")
+    if isinstance(raw_rounds, int) and raw_rounds > 0:
+        n_rounds = raw_rounds
+    else:
+        n_rounds = len(history) or 1
+    # Placeholder list so render_skeleton's len(rounds) matches the current round count.
+    rounds = [{"n": i} for i in range(1, n_rounds + 1)]
+    verify = None
+    hist_row = next((row for row in history if row.get("n") == n_rounds), None)
+    if hist_row is not None and hist_row.get("verify") is not None:
+        verify = hist_row.get("verify")
+    else:
+        try:
+            raw = (root / "verify_code").read_text(encoding="utf-8").strip()
+            verify = int(raw) if raw else None
+        except (OSError, ValueError):
+            verify = None
+    return {
+        "run": meta.get("name") or root.name,
+        "agent": meta.get("agent"),
+        "model": meta.get("model"),
+        "rounds": rounds,
+        "verify": verify,
+        "session": meta.get("session"),
+        "live": True,
+    }
+
+
+def matching_live_runs(directory, first_call, last_call, session, exclude=()):
+    """Live run dirs under RUNS_ROOT/<repo>/ that this session launched or touched.
+
+    A run already present in the run log (`exclude` names) is skipped so it is not listed twice.
+    Live rows are for the skeleton only — do not append them to runs.jsonl.
+    """
+    exclude = set(exclude)
+    matched = []
+    base = runs.RUNS_ROOT / directory.name
+    if not base.is_dir():
+        return matched
+    for meta_path in sorted(base.glob("*/meta.json")):
+        root = meta_path.parent
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict) or not _meta_repo_matches(meta, directory):
+            continue
+        name = meta.get("name") or root.name
+        if name in exclude:
+            continue
+        if not _live_run_touched(root, meta, session, first_call, last_call):
+            continue
+        matched.append(_live_run_row(root, meta))
+    return matched
+
+
 def append_runs(data, rows, sid, repo):
     seen = {(obj.get("run"), obj.get("ts")) for _, obj in _json_rows(data) if obj}
     new = []
@@ -298,13 +405,23 @@ def render_skeleton(row, summary, runs, asks=()):
         if measured and "error" not in measured else "not measured"
     run_text = "none"
     if runs:
-        run_text = "\n" + "\n".join(
-            f"- `{r.get('run', '?')}`: {r.get('agent', '?')} {r.get('model', '?')}, "
-            f"{len(r.get('rounds') or [])} round(s), {r.get('outcome') or 'unknown'}"
-            + (f", launched in session `{r['session'][:8]}`"
-               if r.get("session") and not _same_session(r["session"], row["session"]) else "")
-            for r in runs
-        )
+        lines = []
+        for r in runs:
+            agent = r.get("agent", "?")
+            model = r.get("model", "?")
+            n_rounds = len(r.get("rounds") or [])
+            if r.get("live"):
+                line = (f"- `{r.get('run', '?')}`: {agent} {model}, {n_rounds} round(s)"
+                        + (f", verify {r['verify']}" if r.get("verify") is not None else "")
+                        + "; live: not applied or cleaned up")
+            else:
+                line = (f"- `{r.get('run', '?')}`: {agent} {model}, "
+                        f"{n_rounds} round(s), {r.get('outcome') or 'unknown'}"
+                        + (f", launched in session `{r['session'][:8]}`"
+                           if r.get("session") and not _same_session(r["session"], row["session"])
+                           else ""))
+            lines.append(line)
+        run_text = "\n" + "\n".join(lines)
     ask_text = f"{len(asks)} ({', '.join(a.get('agent') or '?' for a in asks)})" if asks else "none"
     return f"""# Field report: {row['item'] or 'TODO title'} ({row['date']})
 
@@ -405,10 +522,15 @@ def cmd_report(a):
             "prompts": prompt_contexts(path, calls),
         }
         usage, action = upsert_usage(_read_bytes(usage_path), row)
-        runs = matching_runs(repo_dir, first)
+        logged_runs = matching_runs(repo_dir, first)
+        live_runs = matching_live_runs(
+            repo_dir, first, last, row["session"],
+            exclude={r.get("run") for r in logged_runs})
+        # Live runs are skeleton-only: cleanup writes the log row later; a second row would double-count.
+        display_runs = list(logged_runs) + live_runs
         old_runs = _read_bytes(runs_path)
-        run_data, copied = append_runs(old_runs, runs, row["session"], repo)
-        markdown = render_skeleton(row, summary, runs, session_asks(row["session"]))
+        run_data, copied = append_runs(old_runs, logged_runs, row["session"], repo)
+        markdown = render_skeleton(row, summary, display_runs, session_asks(row["session"]))
         if not a.dry_run:
             directory.mkdir(parents=True, exist_ok=True)
             _atomic_write(usage_path, usage)

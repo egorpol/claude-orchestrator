@@ -215,6 +215,79 @@ class IncludeUncommittedTests(unittest.TestCase):
         self.assertNotIn("snapshot_of", meta)
         self.cli("cleanup", "note", "--force", "--purge")
 
+    def test_main_dirty_paths_in_meta_prompt_and_review(self):
+        """HEAD launch on a dirty tree records paths for the delegate and later reviewers."""
+        (self.repo / "tracked.txt").write_text("base\nmodified\n")
+        (self.repo / "untracked.txt").write_text("untracked\n")
+        (self.repo / "linked.txt").write_text("live copy\n")  # untracked; --link shows main tree
+        (self.repo / "linkdir").mkdir()
+        (self.repo / "linkdir" / "inner.txt").write_text("live copy\n")  # under a --link'ed folder
+        r = self.cli("launch", "codex", "--brief", self.brief, "--name", "dirty-paths",
+                     "--link", "linked.txt", "--link", "linkdir/")
+        self.assertIn("--include-uncommitted snapshots them", r.stderr)
+        root = self.root("dirty-paths")
+        meta = runs.load_meta(root)
+        dirty = meta["main_dirty"]
+        self.assertIn("tracked.txt", dirty["paths"])
+        self.assertIn("untracked.txt", dirty["paths"])
+        self.assertNotIn("linked.txt", dirty["paths"])
+        self.assertNotIn("linkdir/inner.txt", dirty["paths"])
+        self.assertEqual(dirty["more"], 0)
+        prompt = (root / "prompt.md").read_text()
+        self.assertIn("uncommitted changes in the main checkout that this worktree does not have", prompt)
+        self.assertIn("`tracked.txt`", prompt)
+        self.assertIn("`untracked.txt`", prompt)
+        self.assertNotIn("`linked.txt`", prompt.split("uncommitted changes in the main checkout")[1].split("\n")[0])
+        self.cli("review", "dirty-paths")
+        review_prompt = (root / "review-1" / "prompt.md").read_text()
+        self.assertIn("at launch time", review_prompt)
+        self.assertIn("`tracked.txt`", review_prompt)
+        self.assertIn("uncommitted changes not present in this worktree", review_prompt)
+        self.cli("cleanup", "dirty-paths", "--force", "--purge")
+
+    def test_main_dirty_absent_when_clean_or_snapshot(self):
+        """Clean tree and --include-uncommitted omit the main_dirty bullet."""
+        self.cli("launch", "codex", "--brief", self.brief, "--name", "clean-dirt")
+        self.assertNotIn("main_dirty", runs.load_meta(self.root("clean-dirt")))
+        prompt = (self.root("clean-dirt") / "prompt.md").read_text()
+        self.assertNotIn("uncommitted changes in the main checkout that this worktree does not have", prompt)
+        self.cli("cleanup", "clean-dirt", "--force", "--purge")
+
+        self.dirty_main()
+        self.cli("launch", "codex", "--brief", self.brief, "--name", "snap-dirt",
+                 "--include-uncommitted")
+        meta = runs.load_meta(self.root("snap-dirt"))
+        self.assertNotIn("main_dirty", meta)
+        prompt = (self.root("snap-dirt") / "prompt.md").read_text()
+        self.assertNotIn("uncommitted changes in the main checkout that this worktree does not have", prompt)
+        self.assertIn("snapshot commit of the orchestrator's uncommitted work", prompt)
+        self.cli("cleanup", "snap-dirt", "--force", "--purge")
+
+    def test_main_dirty_caps_at_twenty_paths(self):
+        """25 dirty files → 20 listed in meta/prompt plus 'and 5 more'."""
+        for i in range(25):
+            (self.repo / f"extra-{i}.txt").write_text(f"{i}\n")
+        self.cli("launch", "codex", "--brief", self.brief, "--name", "many-dirt")
+        dirty = runs.load_meta(self.root("many-dirt"))["main_dirty"]
+        self.assertEqual(len(dirty["paths"]), 20)
+        self.assertEqual(dirty["more"], 5)
+        prompt = (self.root("many-dirt") / "prompt.md").read_text()
+        self.assertIn("and 5 more", prompt)
+        self.cli("cleanup", "many-dirt", "--force", "--purge")
+
+    def test_main_dirty_lists_rename_source_and_destination(self):
+        """Staged rename in the main tree → both paths in main_dirty (dest then source)."""
+        (self.repo / "old-data.csv").write_text("a,b\n")
+        self.git("add", "old-data.csv")
+        self.git("commit", "-qm", "add old-data")
+        self.git("mv", "old-data.csv", "new-data.csv")
+        self.cli("launch", "codex", "--brief", self.brief, "--name", "rename-dirt")
+        paths = runs.load_meta(self.root("rename-dirt"))["main_dirty"]["paths"]
+        self.assertIn("new-data.csv", paths)
+        self.assertIn("old-data.csv", paths)
+        self.assertLess(paths.index("new-data.csv"), paths.index("old-data.csv"))
+        self.cli("cleanup", "rename-dirt", "--force", "--purge")
+
     def test_followup_fresh_renders_snapshot_bullet(self):
         """followup --fresh of a snapshot run renders the snapshot bullet."""
         self.dirty_main()
