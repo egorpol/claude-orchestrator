@@ -546,6 +546,31 @@ def _release_excluded(repo, root, meta):
     save_meta(root, meta)
 
 
+def validate_link(repo, link, wt=None, existing=(), base=None):
+    """Check a link without changing anything; base stands in for a not-yet-created worktree."""
+    p = Path(link)
+    if p.is_absolute() or ".." in p.parts or not p.parts or p.parts[0] in (".git", ".delegate"):
+        sys.exit(f"--link {link}: expected a repo-relative input path outside .git and .delegate")
+    src = repo / p
+    if not src.exists():
+        sys.exit(f"--link {link}: {src} does not exist")
+    if wt is None:
+        return
+    dst = wt / p
+    if base is not None:
+        # cat-file does not follow symlinks tracked at base, so a link below one (0 of 63 recorded
+        # links, 2026-10-30) passes here; add_links' check on the real worktree still refuses it.
+        r = subprocess.run(["git", "cat-file", "-e", f"{base}:{p}"], cwd=repo, capture_output=True,
+                           env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        occupied = r.returncode == 0
+    else:
+        occupied = dst.exists() or dst.is_symlink()
+        if link in existing and dst.is_symlink() and dst.resolve() == src.resolve():
+            return
+    if occupied:
+        sys.exit(f"--link {link}: {dst} already exists in the worktree (tracked path?)")
+
+
 def add_links(repo, wt, paths, existing=()):
     """Validate links first, then install them and share launch/followup exclusions.
 
@@ -553,16 +578,7 @@ def add_links(repo, wt, paths, existing=()):
     ignored). `/.delegate` is never returned.
     """
     for link in paths:
-        p = Path(link)
-        if p.is_absolute() or ".." in p.parts or not p.parts or p.parts[0] in (".git", ".delegate"):
-            sys.exit(f"--link {link}: expected a repo-relative input path outside .git and .delegate")
-        src, dst = repo / p, wt / p
-        if not src.exists():
-            sys.exit(f"--link {link}: {src} does not exist")
-        if dst.exists() or dst.is_symlink():
-            if link in existing and dst.is_symlink() and dst.resolve() == src.resolve():
-                continue
-            sys.exit(f"--link {link}: {dst} already exists in the worktree (tracked path?)")
+        validate_link(repo, link, wt=wt, existing=existing)
     recordable = []
     for link in paths:
         pattern = "/" + link.strip("/")
@@ -716,6 +732,9 @@ def launch(a):
                     web_search=getattr(a, "web_search", False))
     run_sh = job_script(root, f"run {name}", repo, wt, cmd, a.agent, verify=a.verify)
 
+    if not will_snapshot:
+        for link in links:
+            validate_link(repo, link, wt=wt, base=base_sha)
     if a.dry_run:
         if will_snapshot:
             print(f"[dry run] would snapshot uncommitted work on top of {head_sha[:9]}")
@@ -856,12 +875,14 @@ def followup(a):
         warnings.extend(quota_warnings)
     _print_warnings(warnings)
 
+    new_links = [p.strip("/") for p in a.link]
+    for link in new_links:
+        validate_link(Path(meta["repo"]), link, wt=wt, existing=meta.get("links", []))
     archive = root / f"round-{k}"
     if a.dry_run:
         print(f"[dry run] round {k + 1}: {meta['agent']} {model}"
               + (f", resuming session {sid}" if sid else ", fresh session") + f"\n---- brief ----\n{text}")
         return
-    new_links = [p.strip("/") for p in a.link]
     links = list(dict.fromkeys(meta.get("links", []) + new_links))
     added = add_links(Path(meta["repo"]), wt, new_links, existing=meta.get("links", []))
     meta["links"] = links
@@ -1092,12 +1113,7 @@ def working_tree_has_changes(repo, base_sha, untracked=None):
 def validate_working_tree_links(repo, links):
     """Same path checks as add_links, plus refuse non-gitignored paths (already in the snapshot)."""
     for link in links:
-        p = Path(link)
-        if p.is_absolute() or ".." in p.parts or not p.parts or p.parts[0] in (".git", ".delegate"):
-            sys.exit(f"--link {link}: expected a repo-relative input path outside .git and .delegate")
-        src = repo / p
-        if not src.exists():
-            sys.exit(f"--link {link}: {src} does not exist")
+        validate_link(repo, link)
         # Index-aware check-ignore matches what `git add -A` skips: tracked paths count as not
         # ignored, and a delegate-owned info/exclude line (another run's --link) counts as ignored.
         r = subprocess.run(["git", "check-ignore", "-q", "--", link], cwd=repo, capture_output=True,
