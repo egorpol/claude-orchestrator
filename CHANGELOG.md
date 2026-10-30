@@ -46,6 +46,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Fixed
 
+- `delegate launch --dry-run` and `followup --dry-run` accepted `--link`s the real command rejected; both now run the same checks before printing a plan, without creating anything.
 - `delegate report` printed "Delegate runs: none" for a session whose runs were not yet applied or cleaned up (4 of the 20 field reports folded in below), because only `apply` and `cleanup` write the run log. It now also lists run records this session launched, or that had a round or review in its window, as `live: not applied or cleaned up`, in the skeleton only, so `cleanup`'s later row isn't counted twice.
 - Exit packet: a risks or conflicts line comes from the Digest block alone (it ends at a blank line after a key or at a heading) and is cut at 240 characters with `… (see last-message.md)`; Cursor sub-agent output appended after the Digest had made one line ~1.5k characters. With no Digest and no open-questions section, the packet says `digest: missing in last-message.md` instead of `conflicts/risks: see last-message.md`.
 - `review --working-tree`'s Codex-fallback line starts with `review:`, not `ask:`.

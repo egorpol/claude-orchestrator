@@ -760,6 +760,137 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.git("branch", "--list", "delegate/badlink"), "")
         self.launch("cursor", "badlink")  # the name is free again
 
+    def test_launch_dry_run_rejects_links_like_real_launch_without_changes(self):
+        (self.repo / ".delegate/x").mkdir(parents=True)
+        (self.repo / ".git/x").mkdir()
+        (self.tmp / "out").mkdir()
+        (self.repo / "tracked").mkdir()
+        (self.repo / "tracked/input").write_text("tracked input\n")
+        self.git("add", "tracked")
+        self.git("commit", "-qm", "track link fixture directory")
+        branches = self.git("branch", "--list", "delegate/*")
+        worktrees = self.git("worktree", "list", "--porcelain")
+        exclude = self.repo / ".git/info/exclude"
+        before = exclude.read_bytes()
+        for link in (".delegate/x", ".git/x", "missing-dir", "tracked", "tracked.txt",
+                     "../out", "/abs", "", "."):
+            with self.subTest(link=link):
+                errors = []
+                for extra in (("--dry-run",), ()):
+                    r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "bad-dry-link",
+                                     "--link", link, *extra, code=1)
+                    self.assertEqual(r.stdout, "")
+                    errors.append(r.stderr.splitlines()[-1])
+                    self.assertFalse(self.root("bad-dry-link").exists())
+                    self.assertEqual(self.git("branch", "--list", "delegate/*"), branches)
+                    self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
+                    self.assertEqual(exclude.read_bytes(), before)
+                self.assertEqual(errors[0], errors[1])
+                if link in ("tracked", "tracked.txt"):
+                    self.assertEqual(errors[0], f"--link {link}: {self.root('bad-dry-link') / 'wt' / link} "
+                                     "already exists in the worktree (tracked path?)")
+
+    def test_launch_dry_run_accepts_untracked_link_kinds_without_changes(self):
+        (self.repo / "data/cache").mkdir(parents=True)
+        (self.repo / "data/cache/input").write_text("ignored input\n")
+        (self.repo / "other-cache").write_text("ignored file\n")
+        (self.repo / "loose-input").write_text("untracked input\n")
+        exclude = self.repo / ".git/info/exclude"
+        for i, link in enumerate(("data/cache", "other-cache", "loose-input")):
+            with self.subTest(link=link):
+                name = f"allowed-dry-link-{i}"
+                before = exclude.read_bytes()
+                branches = self.git("branch", "--list", "delegate/*")
+                worktrees = self.git("worktree", "list", "--porcelain")
+                r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", name,
+                                 "--link", link, "--dry-run")
+                self.assertIn("[dry run] would create", r.stdout)
+                self.assertIn(f"- `{link}` is a symlink to the main checkout's copy", r.stdout)
+                self.assertFalse(self.root(name).exists())
+                self.assertEqual(exclude.read_bytes(), before)
+                self.assertEqual(self.git("branch", "--list", "delegate/*"), branches)
+                self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
+                r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", name,
+                                 "--link", link, "--read-only")
+                dst = self.root(name) / "wt" / link
+                self.assertTrue(dst.is_symlink())
+                self.assertEqual(dst.resolve(), self.repo / link)
+                warning = f"WARNING: --link {link} is not gitignored"
+                if link == "loose-input":
+                    self.assertIn(warning, r.stderr)
+                else:
+                    self.assertNotIn(warning, r.stderr)
+                self.cli("cleanup", name, "--force", "--purge")
+
+    def test_launch_dry_run_checks_link_destination_at_selected_base(self):
+        base = self.git("rev-parse", "HEAD")
+        (self.repo / "later-input").write_text("added after base\n")
+        self.git("add", "later-input")
+        self.git("commit", "-qm", "track input after selected base")
+        self.launch("codex", "old-base-link", "--base", base, "--link", "later-input", "--dry-run")
+        self.assertFalse(self.root("old-base-link").exists())
+        self.launch("codex", "old-base-link", "--base", base, "--link", "later-input", "--read-only")
+        self.assertTrue((self.root("old-base-link") / "wt/later-input").is_symlink())
+        for extra in (("--dry-run",), ()):
+            r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "head-link",
+                             "--link", "later-input", *extra, code=1)
+            self.assertIn("already exists in the worktree (tracked path?)", r.stderr)
+            self.assertFalse(self.root("head-link").exists())
+
+    def test_followup_dry_run_validates_new_links_without_archiving_or_meta_changes(self):
+        (self.repo / ".delegate/x").mkdir(parents=True)
+        (self.repo / "data/cache").mkdir(parents=True)
+        self.launch("codex", "follow-dry-link", "--link", "data/cache")
+        root = self.root("follow-dry-link")
+        before = (root / "meta.json").read_bytes()
+        exclude = self.repo / ".git/info/exclude"
+        excluded_before = exclude.read_bytes()
+        for link in (".delegate/x", "missing-dir", "tracked.txt", "data/cache"):
+            with self.subTest(link=link):
+                allowed = link == "data/cache"
+                r = self.cli_raw("followup", "follow-dry-link", "--brief", self.follow_brief,
+                                 "--dry-run", "--link", link, code=0 if allowed else 1)
+                if allowed:
+                    self.assertIn("[dry run] round 2:", r.stdout)
+                else:
+                    self.assertEqual(r.stdout, "")
+                    real = self.cli_raw("followup", "follow-dry-link", "--brief", self.follow_brief,
+                                        "--link", link, code=1)
+                    self.assertEqual(r.stderr.splitlines()[-1], real.stderr.splitlines()[-1])
+                self.assertEqual((root / "meta.json").read_bytes(), before)
+                self.assertEqual(list(root.glob("round-*")), [])
+                self.assertEqual(exclude.read_bytes(), excluded_before)
+        # An existing link only passes when its symlink still resolves to the same input.
+        dst = root / "wt/data/cache"
+        dst.unlink()
+        dst.symlink_to(self.tmp / "missing-target")
+        errors = []
+        for extra in (("--dry-run",), ()):
+            r = self.cli_raw("followup", "follow-dry-link", "--brief", self.follow_brief,
+                             "--link", "data/cache", *extra, code=1)
+            self.assertEqual(r.stdout, "")
+            errors.append(r.stderr.splitlines()[-1])
+            self.assertEqual((root / "meta.json").read_bytes(), before)
+            self.assertEqual(list(root.glob("round-*")), [])
+            self.assertEqual(exclude.read_bytes(), excluded_before)
+        self.assertEqual(errors[0], errors[1])
+        self.assertIn("already exists in the worktree (tracked path?)", errors[0])
+
+    def test_snapshot_dry_run_keeps_tracked_link_gitignore_refusal(self):
+        (self.repo / "tracked.txt").write_text("dirty input\n")
+        exclude = self.repo / ".git/info/exclude"
+        before = exclude.read_bytes()
+        objects = self.git("count-objects", "-v")
+        r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "snapshot-dry-link",
+                         "--include-uncommitted", "--dry-run", "--link", "tracked.txt", code=1)
+        self.assertNotIn("[dry run]", r.stdout)
+        self.assertEqual(r.stderr.splitlines()[-1], "--link tracked.txt: not gitignored (or tracked), "
+                         "so the snapshot already holds it; drop --link")
+        self.assertFalse(self.root("snapshot-dry-link").exists())
+        self.assertEqual(self.git("branch", "--list", "delegate/*"), "")
+        self.assertEqual(exclude.read_bytes(), before)
+        self.assertEqual(self.git("count-objects", "-v"), objects)
+
     def _assert_preflight_clean(self, name):
         self.assertFalse(self.root(name).exists())
         self.assertNotIn(name, self.git("worktree", "list"))
