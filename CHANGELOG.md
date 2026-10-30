@@ -6,6 +6,10 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-30
+
+Everything from 2026-10-13 to 10-30. The larger additions: an opt-in randomised experiment that draws each session's mode (orchestrator, Claude only or vanilla) and the commands that score it (`cost --by-mode` and the blinded `delegate rate`); timed quota readings and their calibration against tokens (`quota --snapshot`, `cost --calibrate`); a quota check before Codex launches, follow-ups and reviews; model cost frontiers (`route --frontier`); work with uncommitted changes (`review --working-tree`, `launch --include-uncommitted`, `apply --3way`); a secret guard for commits and pushes; an optional desktop alert hook (`install.sh --attention`); and personal catalog overrides in `catalog.local.json`. The session rules were cut to fit inline at session start, and now make delegation the default in orchestrator sessions.
+
 ### Added
 
 - Optional `hooks/attention.py` (`./install.sh --attention`): marks this workspace's inactive Cursor window in KDE Plasma for question pickers, completed turns and permission/elicitation prompts. Handoffs offering `/clear` get a desktop notification; picker/permission alerts fall back to `notify-send` when KWin is unavailable. Stop ignores pending background tasks launched in the last 3 hours; SDK runs and `ATTENTION_DISABLE=1` are silent. Runs in every session mode without adding context.
@@ -80,10 +84,8 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - The context guard, `hygiene.md` and SKILL.md suggest "`/clear`, then `/next`" instead of "continue from the handoff".
 - Implement template: a byte invariant also says how the output should look.
 - Rules split into `rules/hygiene.md` (every session) and `rules/delegation.md` (when to delegate, second opinions). `rules/orchestrator.md` imports both, so a `--rules` install loads the same text as before; the second-opinion rule is now a bullet of its own.
-- Field results: the 2026-10-13 MEI 5.1 session; README totals now cover 17 sessions.
 - Rules from four 2026-10-13 field reports: `HANDOFF.md` under ~10 KB with state first, committed items cut to a line, and commands that run as written; a sweep request above ~100k counts as a new item, and renders are downscaled before reading; `/field-report` offered while the cache is warm; status lines before any run of 2+ silent calls; ask before accepting terms on the user's behalf; generated IDs normalised before a render diff; stderr kept for warning checks. The second-opinion rule gives the CLI's full path and says that neither `ask` agent can check fresh web facts.
 - SKILL.md: `install.sh --bin` for a bare `delegate`; web access of the `ask` agents.
-- Field results: four more 2026-10-13 sessions and a `mode` column; README totals now cover 21 sessions, and the idle hold has been seen live.
 - `docs/related-projects.md` folds in the 2026-10-13 wide survey (Codex with live web search): new orchestrators and routers, a quota-aware routing section, and a measurement section on the ccusage family, Claude Code's OpenTelemetry export and published controlled comparisons. It also records which of the survey's recommendations are done and adds the rest to the open list and the README roadmap.
 - Rules from 15 field reports (2026-10-13 to 10-20): an item may stop at a step boundary above ~120k; every item closes with a picker; above ~100k the handoff is refreshed before a picker or hand-paste step; `HANDOFF.md` stays at the root (`.git/info/exclude`); status lines after unexpected results, before long calls and with the plan position on a resume; checks in the audience's own tool, same-day before/after runs for scoring changes, headless browser checks; ranged reads of large files; subshell `cd`, `pgrep -f`, `;` between probes, counted output, PASS/FAIL lines, whole-sentence replaces and kept file formatting.
 - `/next` looks one folder down (such as `private/HANDOFF.md`) and in the project memory when the root has no `HANDOFF.md`.
@@ -93,8 +95,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - SKILL.md: write the independent checker while a run goes; read semantic modules' core files whole and their tests by outline; look at one real render before accepting an APPROVE; audits ask whether each gate can pass once fixed.
 - `/field-report` is model-invocable, so a closing picker's `/field-report` option runs it.
 - `/next` opens with "handoff predates N commits / M dirty files" when `HANDOFF.md` is older than the latest commit or the tree is dirty.
-- Field results: eleven sessions from 2026-10-20 to 10-26; README totals now cover 47 sessions.
-- Field results: twenty sessions from 2026-10-26 to 10-30 and an `excluded` mode for this repo's own sessions; README totals now cover 67 sessions.
+- Field results: 51 more sessions (2026-10-13 to 10-30), a `mode` column, an `excluded` mode for this repo's own sessions, the first per-arm numbers for the control sessions and the idle hold's first live sighting; README totals now cover 67 sessions across twelve projects, up from 16 across five at 0.1.0.
 
 ## [0.1.0] - 2026-10-13
 
@@ -148,5 +149,6 @@ The repo was private and unversioned before 0.1.0. Its 12 commits:
 - 2026-10-13 `02a9f87`: decisions in pickers; `ask --agent both`.
 - 2026-10-13 `958b4ab`: MIT licence and README positioning; `launch` rolls back the worktree when `--link` is rejected.
 
-[Unreleased]: https://github.com/egorpol/claude-orchestrator/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/egorpol/claude-orchestrator/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/egorpol/claude-orchestrator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/egorpol/claude-orchestrator/releases/tag/v0.1.0
