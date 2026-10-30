@@ -15,6 +15,7 @@ RULES_LINE = f"@{REPO}/rules/orchestrator.md"
 GUARD = f'python3 "{REPO}/hooks/context-guard.py"'
 SECRET = f'python3 "{REPO}/hooks/secret-guard.py"'
 MODE = f'python3 "{REPO}/hooks/session-mode.py"'
+ATTENTION = f'python3 "{REPO}/hooks/attention.py"'
 
 
 class InstallTests(unittest.TestCase):
@@ -93,6 +94,62 @@ class InstallTests(unittest.TestCase):
                              (event, command))
         # The re-run changed nothing, so it made no backup.
         self.assertEqual(sorted(self.settings.parent.glob("settings.json.bak-*")), backups)
+
+    def test_attention_registers_merges_backs_up_and_is_idempotent(self):
+        self.settings.parent.mkdir(parents=True)
+        other = {"matcher": "Read", "hooks": [{"type": "command", "command": "mine"}]}
+        original = json.dumps({"theme": "dark", "hooks": {"PreToolUse": [other],
+                                                         "SessionStart": [{"hooks": None}]}})
+        self.settings.write_text(original)
+        self.assertIn("attention hook registered", self.install("--attention"))
+        text = self.settings.read_text()
+        settings = json.loads(text)
+        self.assertEqual(text, json.dumps(settings, indent=2) + "\n")
+        self.assertEqual(settings["theme"], "dark")
+        hooks = settings["hooks"]
+        self.assertEqual(set(hooks), {"SessionStart", "Stop", "PreToolUse", "Notification"})
+        self.assertEqual(hooks["SessionStart"], [{"hooks": None}])
+        command = {"type": "command", "command": ATTENTION, "timeout": 5}
+        self.assertEqual(hooks["Stop"], [{"hooks": [command]}])
+        self.assertEqual(hooks["PreToolUse"], [other, {"matcher": "AskUserQuestion", "hooks": [command]}])
+        self.assertEqual(hooks["Notification"], [
+            {"matcher": "permission_prompt|elicitation_dialog", "hooks": [command]}])
+        backups = sorted(self.settings.parent.glob("settings.json.bak-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), original)
+        self.install("--attention")
+        self.assertEqual(self.settings.read_text(), text)
+        self.assertEqual(sorted(self.settings.parent.glob("settings.json.bak-*")), backups)
+        self.assertIn("attention hook registered", self.install("--check"))
+
+    def test_attention_check_and_help_before_install(self):
+        self.assertIn("optional: attention hook not registered (./install.sh --attention)",
+                      self.install("--check"))
+        self.assertFalse(self.settings.exists())
+        self.assertIn("--attention", self.install("--help"))
+
+    def test_attention_keeps_guard_experiment_and_rules_behaviour(self):
+        self.install("--hooks", "--experiment")
+        original = json.loads(self.settings.read_text())["hooks"]
+        self.install("--attention")
+        hooks = json.loads(self.settings.read_text())["hooks"]
+        for event, groups in original.items():
+            self.assertEqual([g for g in hooks[event] if not any(
+                h.get("command") == ATTENTION for h in g.get("hooks") or [])], groups)
+        self.assertFalse(self.user_md.exists())
+
+    def test_attention_replaces_stale_registration_keeps_other_hooks(self):
+        self.settings.parent.mkdir(parents=True)
+        self.settings.write_text(json.dumps({"hooks": {
+            "Stop": [{"matcher": "old", "hooks": [{"type": "command", "command": ATTENTION},
+                                                    {"type": "command", "command": "mine"}]}],
+            "PreToolUse": [{"hooks": None}]}}))
+        self.install("--attention")
+        hooks = json.loads(self.settings.read_text())["hooks"]
+        self.assertEqual(hooks["Stop"], [
+            {"matcher": "old", "hooks": [{"type": "command", "command": "mine"}]},
+            {"hooks": [{"type": "command", "command": ATTENTION, "timeout": 5}]}])
+        self.assertEqual(hooks["PreToolUse"][0], {"hooks": None})
 
     def test_hooks_replace_stale_registrations_and_tolerate_null_groups(self):
         self.settings.parent.mkdir(parents=True)

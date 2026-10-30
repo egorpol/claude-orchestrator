@@ -47,6 +47,7 @@ cd claude-orchestrator
 ./install.sh --check        # what is missing; deny-list path/count and warning if inside a git work tree
 ./install.sh                # symlink skills into ~/.claude/skills and /next into ~/.claude/commands (add --bin for `delegate` on PATH)
 ./install.sh --hooks        # optional: register hooks/context-guard.py and hooks/secret-guard.py
+./install.sh --attention    # optional: mark the waiting Cursor window on KDE Plasma (hooks/attention.py)
 ./install.sh --git-hook=.   # optional: link secret-guard.py as this repo's pre-commit and pre-push hooks
 ./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
 ./install.sh --experiment   # opt-in: randomised control sessions via hooks/session-mode.py (see below)
@@ -66,6 +67,10 @@ Prerequisites (`--check` prints install hints):
 - `openusage` for quota data
 - optional: the [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) (needs Node 18.18+), which adds `/codex:review` and `/codex:adversarial-review` for the current checkout. Install it with `claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex`.
 - optional: `ARTIFICIAL_ANALYSIS_API_KEY` (free) for AA's official coding index. Without it, ratings are parsed from the public leaderboard page.
+
+### Desktop attention
+
+`hooks/attention.py` marks this workspace's Cursor window as demanding attention (its panel entry flashes) when a picker, permission prompt or completed turn needs you. It skips turn ends while a recent background task is pending and works in every session mode. It needs KDE Plasma (KWin scripting through `qdbus6`) and Cursor's default window title. It uses `notify-send` for handoffs offering `/clear`, then `/next`, and as a fallback for pickers and permissions. Install with `./install.sh --attention`; switch off with `ATTENTION_DISABLE=1`. Headless SDK sessions are skipped. Use one window per workspace folder; a custom `window.title` breaks the match. For separate panel entries, set Plasma Task Manager → Behavior → Group: Do not group.
 
 ## Field reports
 
