@@ -81,7 +81,6 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 
 ## Roadmap
 
-- Machine-readable reviews through `codex exec --output-schema`.
 - Automatic field reports, shelved 2026-10-27: Cursor Auto was to write lessons for the sessions that get no `/field-report` (about 89%), but two trials against sessions that have one recalled about 40% of the hand reports' lessons, under the 50% bar. The design and results are in [docs/auto-field-reports.md](docs/auto-field-reports.md).
 - The open ideas in the [survey](docs/related-projects.md): loop cost scoring, pre-launch approval policies, control-session preregistration and blocked assignment.
 

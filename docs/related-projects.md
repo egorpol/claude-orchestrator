@@ -19,7 +19,7 @@ A Claude Code plugin that wraps the Codex app-server:
 - **Worth taking:**
   - The review commands, as is: `/plugin marketplace add openai/codex-plugin-cc`.
   - Its prompting skill (`skills/gpt-5-4-prompting`), which structures briefs as XML-tagged contracts (`<task>`, `<structured_output_contract>`, `<default_follow_through_policy>`, `<verification_loop>`). It also says not to mix unrelated jobs in one run.
-  - `schemas/review-output.schema.json`, which could pair with `codex exec --output-schema` for machine-readable reviews.
+  - `schemas/review-output.schema.json`, which could pair with `codex exec --output-schema` for machine-readable reviews. Not taken (2026-10-30); see the open list below.
 - **Dated:** its defaults reference gpt-5.4.
 
 ### [obra/superpowers](https://github.com/obra/superpowers)
@@ -217,7 +217,7 @@ Done on 2026-10-13 (wide-survey recommendations):
 4. Later, the rest of recommendation 5: `daf151a` (2026-10-27) leaves stale readings out of `delegate quota --unused`, and `b6603b2` (2026-10-28) re-reads a Codex pool over 15 min old with `--source direct` before a dispatch.
 
 Still open:
-- Machine-readable reviews via `codex exec --output-schema` (the plugin ships `review-output.schema.json`).
+- Machine-readable reviews via `codex exec --output-schema` (the plugin ships `review-output.schema.json`). Dropped 2026-10-30: the regex parse of the Markdown reviews held on all 88 recorded reviews with a last message (49 Codex, 39 Cursor): every verdict parsed, no review gave two, and each review's finding bullets matched its severity tags (239 findings); cursor-agent has no schema option, so a schema would cover Codex reviews only. Reopen as `followup --from-review N` with a chosen subset of findings if forwarding a review's wrong findings (about one per review) costs measurable rounds.
 - Loop cost / readiness scoring for repeated delegate cycles (`cobusgreyling/loop-engineering`, `loop-cost` / `loop-audit`).
 - Optional pre-launch spend or approval policies before destructive delegate actions (`omnigent-ai/omnigent`).
 - Carry gitignored env files into new worktrees via a `.worktreeinclude` convention (`kbwo/ccmanager`). Dropped 2026-10-28: `delegate launch --link` covers it.
