@@ -101,8 +101,9 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 ## Layout
 
 ```text
-install.sh                         link/copy skills and commands, check prerequisites; --hooks, --git-hook=DIR, --rules, --experiment, --timer, --bin
+install.sh                         link/copy skills and commands, check prerequisites; --hooks, --attention, --git-hook=DIR, --rules, --experiment, --timer, --bin
 commands/next.md                   /next: continue from HANDOFF.md after /clear
+hooks/attention.py                 Stop/PreToolUse/Notification: mark the waiting Cursor window (KDE Plasma)
 hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle; mid-session `delegate` nudge when spare pools sit unused
 hooks/secret-guard.py              PreToolUse (Bash), git pre-commit/pre-push, --check: secrets, private names, working files; cwd stick/drift guard
 hooks/session-mode.py              SessionStart/PreToolUse/SessionEnd: control-session draw, rules, summary rows
