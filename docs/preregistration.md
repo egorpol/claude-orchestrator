@@ -67,4 +67,4 @@ Resampling period 1's 46 rated sessions pooled across arms (USD 5.37 per finishe
 
 ## Amendments
 
-None yet.
+- **2026-10-31, registration date.** The first commit adding this file is `04ff5aa`, committed 2026-10-31 00:29:58 UTC, not 2026-10-30 as the opening line says (it was written the day before). T0 is that commit's timestamp, as Design defines it, so no rule changes.
