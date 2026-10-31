@@ -419,8 +419,9 @@ def load_jsonl(path):
     return rows
 
 
-def load_run_log(path, since=None, repo=None):
+def load_run_log(path, since=None, repo=None, until=None):
     since_dt = _since_dt(since)
+    until_dt = _since_dt(until)
     rows = []
     for obj in load_jsonl(path):
         if repo and obj.get("repo") != repo:
@@ -428,6 +429,10 @@ def load_run_log(path, since=None, repo=None):
         if since_dt:
             ts = _row_ts(obj.get("ts"))
             if ts is None or ts < since_dt:
+                continue
+        if until_dt is not None:
+            ts = _row_ts(obj.get("ts"))
+            if ts is None or ts >= until_dt:
                 continue
         rows.append(obj)
     return rows
@@ -501,7 +506,7 @@ def _points(values):
     return {"sum": sum(values), "n": len(values), "mean": sum(values) / len(values) if values else None}
 
 
-def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None):
+def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None, until=None):
     """Intent-to-treat arm totals and per-session records, without I/O or mutations.
 
     Sessions retain their first start's assignment and last summary/end in file
@@ -535,6 +540,7 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None):
 
     joined = _join_session_runs(state, run_rows)
     cutoff = _since_dt(since)
+    upper = _since_dt(until)
     not_drawn = dict.fromkeys(("excluded", "forced", "unassigned", "other"), 0)
     skipped = 0
     sessions = []
@@ -547,6 +553,8 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None):
             continue
         ts = _row_ts(start.get("ts"))
         if cutoff is not None and (ts is None or ts < cutoff):
+            continue
+        if upper is not None and (ts is None or ts >= upper):
             continue
         if repo and start.get("repo_dir") != repo:
             continue
@@ -612,7 +620,7 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None):
             arm["pools"][pool] = _points([session["pools"][pool] for session in live
                                           if session["pools"].get(pool) is not None])
         arms[mode] = arm
-    return {"log": None, "run_log": None, "since": since, "calibration": calibration, "arms": arms,
+    return {"log": None, "run_log": None, "since": since, **({"until": until} if until is not None else {}), "calibration": calibration, "arms": arms,
             "not_drawn": not_drawn, "skipped_no_start": skipped,
             "weights": {"configs": [{"weights": dict(config), "sessions": count}
                                     for config, count in sorted(configs.items())], "unknown": unknown},
@@ -630,7 +638,13 @@ def render_by_mode(result, as_json=False, sessions=False):
     arms = result["arms"]
     count = sum(arm["sessions"] for arm in arms.values())
     since = f" since {result['since']}" if result["since"] else ""
-    lines = [f"session log: {result['log']}  ({count} drawn sessions{since})"]
+    until = f" until {result['until']} (exclusive)" if result.get("until") else ""
+    lines = [f"session log: {result['log']}  ({count} drawn sessions{since}{until})"]
+    cap = result.get("early_look")
+    if cap:
+        lines.append(f"early-look cap: {cap['held_back']} drawn sessions held back; "
+                     f"starts strictly before {cap['until']}; freeze {cap['freeze']}"
+                     + (" (close provisional)" if cap["close_provisional"] else ""))
     table = [("MODE", "SESS", "GHOST", "REROLL", "PEND", "CALLS", "SUB", "UNITS", "USD", "USD/S",
               "LAUNCH", "RUNS", "APPLIED", "ASK", "BLOCKED")]
     money = lambda value: f"{value:.2f}" if value is not None else "-"
@@ -811,16 +825,18 @@ def summarise_runs(rows):
     return groups
 
 
-def render_runs(rows, groups, since=None, repo=None, log_path=None, as_json=False):
+def render_runs(rows, groups, since=None, repo=None, log_path=None, as_json=False, until=None):
     if as_json:
         out = []
         for (agent, model), g in sorted(groups.items()):
             out.append({"agent": agent, "model": model, **g})
-        return json.dumps({"runs": len(rows), "since": since, "repo": repo,
+        return json.dumps({"runs": len(rows), "since": since, **({"until": until} if until is not None else {}), "repo": repo,
                            "log": str(log_path), "by_agent_model": out}, indent=2)
     hdr = f"run log: {log_path}  ({len(rows)} runs"
     if since:
         hdr += f" since {since}"
+    if until:
+        hdr += f" until {until} (exclusive)"
     if repo:
         hdr += f" repo={repo}"
     hdr += ")"
@@ -846,6 +862,8 @@ def render_runs(rows, groups, since=None, repo=None, log_path=None, as_json=Fals
 
 
 def cmd_cost(a):
+    if a.until is not None and (a.calibrate or a.session is not None):
+        sys.exit("--until cannot be combined with --calibrate or --session")
     if a.save and not a.calibrate:
         sys.exit("--save needs --calibrate")
     if a.calibrate:
@@ -860,10 +878,31 @@ def cmd_cost(a):
         log = runs.session_log_path(a.session_log)
         run_log = Path(a.log) if a.log else DEFAULT_LOG
         rows = load_jsonl(log)
+        import prereg  # here, not at the top: prereg imports cost
+        until, cap = a.until, None
+        if log.resolve() == runs.session_log_path().resolve():
+            info = prereg.progress(rows, prereg._now(), experiment_log=True)
+            if not info["freeze_reached"]:
+                requested_upper, lower = _since_dt(until), _since_dt(a.since)
+                held = 0
+                for record in prereg.session_records(rows).values():
+                    start = record.get("start", {})
+                    ts = _row_ts(start.get("ts"))
+                    if (is_drawn(start) and ts is not None and ts >= prereg.PERIOD2_START
+                            and (lower is None or ts >= lower)
+                            and (requested_upper is None or ts < requested_upper)
+                            and (not a.repo or start.get("repo_dir") == a.repo)):
+                        held += 1
+                upper = min(requested_upper, prereg.PERIOD2_START) if requested_upper else prereg.PERIOD2_START
+                until = upper.isoformat()
+                cap = {"held_back": held, "until": prereg.iso(upper), "freeze": info["freeze"],
+                       "close_provisional": info["close_provisional"]}
         import calibrate  # here, not at the top: calibrate imports cost
-        result = by_mode(rows, load_jsonl(run_log), since=a.since, repo=a.repo,
+        result = by_mode(rows, load_jsonl(run_log), since=a.since, repo=a.repo, until=until,
                          calibration=calibrate.usd_rates(calibrate.saved_path(a.calibration, a.quota_log)))
         result.update(log=str(log), run_log=str(run_log))
+        if cap is not None:
+            result["early_look"] = cap
         import rate  # here, not at the top: rate imports cost
         weights, prices = load_catalog_cost()
         rate.attach_items(result, rows, weights, prices)
@@ -877,13 +916,14 @@ def cmd_cost(a):
         print(render_session(path, summary, as_json=a.json))
         return
     log = Path(a.log) if a.log else DEFAULT_LOG
-    rows = load_run_log(log, since=a.since, repo=a.repo)
+    rows = load_run_log(log, since=a.since, repo=a.repo, until=a.until)
     groups = summarise_runs(rows)
-    print(render_runs(rows, groups, since=a.since, repo=a.repo, log_path=log, as_json=a.json))
+    print(render_runs(rows, groups, since=a.since, repo=a.repo, log_path=log, as_json=a.json, until=a.until))
 
 
 def _add_args(p):
     p.add_argument("--since", help="YYYY-MM-DD (local) or ISO timestamp; only runs/session starts at or after it")
+    p.add_argument("--until", help="like --since; only runs/session starts strictly before it")
     p.add_argument("--repo", help="filter by repo directory name")
     p.add_argument("--log", help=f"run log path (default {DEFAULT_LOG})")
     p.add_argument("--session", metavar="ID|latest|PATH",
