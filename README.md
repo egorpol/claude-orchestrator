@@ -87,7 +87,6 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 ## Roadmap
 
 - Automatic field reports, shelved 2026-10-27: Cursor Auto was to write lessons for the sessions that get no `/field-report` (about 89%), but two trials against sessions that have one recalled about 40% of the hand reports' lessons, under the 50% bar. The design and results are in [docs/auto-field-reports.md](docs/auto-field-reports.md).
-- The open ideas in the [survey](docs/related-projects.md): loop cost scoring and pre-launch approval policies.
 - The [preregistered](docs/preregistration.md) control-session experiment: its analysis code is committed (`delegate prereg`); the Max-plan pool calibration is due from 2026-11-02, and outcomes are read at the freeze, 7 days after the window closes.
 
 ## Docs
@@ -107,7 +106,7 @@ install.sh                         link/copy skills and commands, check prerequi
 commands/next.md                   /next: continue from HANDOFF.md after /clear
 hooks/attention.py                 Stop/PreToolUse/Notification: mark the waiting Cursor window (KDE Plasma)
 hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle; mid-session `delegate` nudge when spare pools sit unused
-hooks/secret-guard.py              PreToolUse (Bash), git pre-commit/pre-push, --check: secrets, private names, working files; cwd stick/drift guard
+hooks/secret-guard.py              PreToolUse (Bash), git pre-commit/pre-push, --check: secrets, private names, working files; cwd stick/drift guard; asks before unsandboxed delegate runs
 hooks/session-mode.py              SessionStart/PreToolUse/SessionEnd: control-session draw, rules, summary rows
 rules/orchestrator.md              user-level rules for every session (install.sh --rules, or the session-mode hook)
 skills/delegate/SKILL.md           instructions Claude loads

@@ -9,7 +9,9 @@ Four entry points, one file:
   git segment before a push in the same Bash call returns "deny". Also denies a
   top-level ``cd``/``pushd`` that would leave the shell in a project subdirectory
   (Claude Code keeps that directory for later Bash calls), and notices when the
-  input ``cwd`` has already drifted from ``CLAUDE_PROJECT_DIR``.
+  input ``cwd`` has already drifted from ``CLAUDE_PROJECT_DIR``. A sandbox guard
+  asks before delegate launches or followups that run cursor-agent unsandboxed,
+  including in subagents and every session mode.
 * git pre-push: argv = remote name and URL; stdin lines are the ref updates. Findings
   or errors go to stderr and exit 1 (override with git push --no-verify).
 * git pre-commit (symlink name), or ``--pre-commit [DIR]``: scan the inherited
@@ -24,7 +26,8 @@ Approving Claude's ask still hits an installed git hook; --no-verify is scanned 
 
 Env: SECRET_GUARD_BUDGET_S (default 20 for git/Claude hooks; bounds --check only when set),
 SECRET_GUARD_DISABLE=1 (skip secret scans only), CWD_GUARD_DISABLE=1 (skip the cd check
-only). Same disable convention as CONTEXT_GUARD_DISABLE.
+only), SANDBOX_GUARD_DISABLE=1 (skip the sandbox check only). Same disable convention
+as CONTEXT_GUARD_DISABLE.
 
 Guiding principle: false positives cost one click; a miss leaks a secret. Where
 emulating git exactly is hard, scan more, not less.
@@ -1801,6 +1804,191 @@ def predict_shell_cwd(command, cwd):
     return final, final is not None
 
 
+def _sandbox_shell_text(text, depth=0):
+    """Visit both sides of || with the unchanged, heredoc-aware cwd walker."""
+    if depth > 32:
+        return text
+    out, line, quote, i = [], [], None, 0
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and quote != "'" and i + 1 < len(text):
+            out.append(text[i:i + 2])
+            line.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote is None and char == "#" and (i == 0 or text[i - 1].isspace()):
+            end = text.find("\n", i)
+            end = len(text) if end < 0 else end
+            out.append(text[i:end])
+            i = end
+            continue
+        if quote != "'" and (text.startswith("$(", i) or char == "`"):
+            backtick = char == "`"
+            start = i + (1 if backtick else 2)
+            end = _substitution_end(text, start, backtick)
+            out.extend((text[i:start], _sandbox_shell_text(text[start:end], depth + 1),
+                        text[end:end + 1]))
+            line.append(_SUBSTITUTION_MARK)
+            i = end + 1
+            continue
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif quote is None and text.startswith("||", i):
+            out.append("&&")
+            line.append("&&")
+            i += 2
+            continue
+        elif quote is None and char == "\n":
+            end = i + 1
+            for delim, strip_tabs in _heredoc_infos("".join(line)):
+                end = _skip_heredoc_body(text, end, delim, strip_tabs)
+            out.append(text[i:end])
+            line = []
+            i = end
+            continue
+        out.append(char)
+        line.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _delegate_args(words):
+    """Arguments after delegate, including when invoked as a Python script."""
+    if not words:
+        return []
+    i = 0
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?", Path(words[0]).name):
+        i = 1
+        while i < len(words) and words[i].startswith("-"):
+            opt = words[i]
+            i += 1
+            if opt == "--":
+                break
+            if opt in ("-", "--help", "--help-env", "--help-xoptions", "--help-all", "--version"):
+                return []
+            if opt == "--check-hash-based-pycs":
+                i += 1
+            elif not opt.startswith("--"):
+                for pos, char in enumerate(opt[1:], 1):
+                    if char in "cmhV":
+                        return []  # Code/module or help/version, not a script path.
+                    if char in "WX":
+                        if pos == len(opt) - 1:
+                            i += 1
+                        break
+    if i < len(words) and Path(words[i]).name == "delegate":
+        return words[i + 1:]
+    return []
+
+
+def _followup_run(args):
+    value_options = ("--brief", "--from-review", "--model", "--effort", "--verify", "--link")
+    i = 0
+    while i < len(args):
+        word = args[i]
+        if word == "--":
+            return args[i + 1] if i + 1 < len(args) else None
+        if not word.startswith("-"):
+            return word
+        # argparse accepts unique long-option prefixes here too.
+        if "=" not in word and word.startswith("--") and any(
+                opt.startswith(word) for opt in value_options):
+            i += 1
+        i += 1
+    return None
+
+
+def _unsandboxed_run(run, cwd):
+    """Return unsandboxed / unverifiable / None, without importing the delegate CLI."""
+    root = Path(os.environ.get("CLAUDE_DELEGATE_ROOT",
+                               Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+                               / "claude-delegate" / "runs"))
+    if not root.is_absolute() and cwd is not None:
+        root = Path(cwd) / root
+    literal = bool(run) and not any(char in run for char in "$`*?[]") and (
+        "__substitution__" not in run)
+    try:
+        paths = None
+        if literal:
+            path = Path(run).expanduser()
+            if not path.is_absolute():
+                path = Path(cwd) / path if cwd is not None else None
+            if path is not None and (path / "meta.json").exists():
+                paths = [path / "meta.json"]
+        if paths is None:
+            paths = root.glob(f"*/{run}/meta.json" if literal else "*/*/meta.json")
+        for path in paths:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(meta, dict):
+                return "unverifiable"
+            if meta.get("unsandboxed") is True:
+                return "unsandboxed"
+    except (OSError, ValueError, RuntimeError):
+        # Never quote exception text: corrupt metadata may contain secrets.
+        return "unverifiable"
+    return None
+
+
+def sandbox_guard_reason(command, cwd):
+    """Ask for delegate's sandbox opt-out, independently of secret/cwd nudges."""
+    if not isinstance(command, str) or "delegate" not in command:
+        return None
+    reasons = []
+    rule = ("with --sandbox disabled --force (network, installs, "
+            "writes outside the worktree); the delegate skill needs the user's OK for it")
+
+    def walk(text, work, depth):
+        return _walk_shell(_sandbox_shell_text(text), work, handle_one, depth,
+                           skip_heredocs=True, cwd_control=True)
+
+    def handle_one(segment, work, depth=0):
+        if depth > 32:
+            return work
+        raw = _tokens(segment)
+        nested = _nested_shell(raw)
+        if nested is not None:
+            kind, text, rest, chdir = nested
+            child = resolve_cd_target(chdir, work) if chdir else work
+            if kind == "env_s":
+                text = " ".join(shlex.quote(w) for w in _tokens(text) + list(rest))
+            final = walk(text, child, depth + 1)
+            return final if kind == "eval" else work
+        words, _, _, _ = _skip_wrappers(_skip_keywords(raw))
+        if words and Path(words[0]).name in ("cd", "pushd"):
+            return resolve_cd_target(_cd_arg(words), work)
+        args = _delegate_args(words)
+        if "--dry-run" in args:
+            return work
+        sub = next((i for i, word in enumerate(args) if not word.startswith("-")), None)
+        if sub is None:
+            return work
+        reason = None
+        if args[sub] == "launch":
+            before_end = args[:args.index("--")] if "--" in args else args
+            if any(word.startswith("--u") and "--unsandboxed".startswith(word)
+                   for word in before_end):
+                reason = "sandbox guard: `delegate launch --unsandboxed` runs cursor-agent " + rule
+        elif args[sub] == "followup":
+            run = _followup_run(args[sub + 1:])
+            status = _unsandboxed_run(run, work)
+            name = " ".join((run or "(unknown)").split())
+            if status == "unsandboxed":
+                reason = (f"sandbox guard: run {name} was launched --unsandboxed, "
+                          "so this followup runs cursor-agent unsandboxed again " + rule)
+            elif status == "unverifiable":
+                reason = (f"sandbox guard: cannot verify metadata for run {name}; "
+                          "this followup may run cursor-agent " + rule)
+        if reason and reason not in reasons:
+            reasons.append(reason)
+        return work
+
+    walk(command, cwd, 0)
+    return "\n".join(reasons) or None
+
+
 def _cwd_rel_display(path, root):
     root_r, path_r = _realpath(root), _realpath(path)
     if path_r == root_r:
@@ -1946,7 +2134,8 @@ def format_reason(findings, target, extra_prefix=None, guard=None):
     return guard.redact(reason) if guard is not None else reason
 
 
-def print_ask(reason, guard=None, additional_context=None):
+def print_ask(reason, guard=None, additional_context=None, extra_prefix=None):
+    reason = "\n".join(part for part in (extra_prefix, reason) if part)
     payload = {
         "hookEventName": "PreToolUse",
         "permissionDecision": "ask",
@@ -2031,7 +2220,7 @@ def run_push_scans(guard, pushes):
 
 
 def _ask_could_not_finish(exc, repo_dir=None, guard=None, operation="push",
-                          additional_context=None):
+                          additional_context=None, extra_prefix=None):
     name = type(exc).__name__
     script = Path(__file__).resolve()
     repo = repo_dir or os.getcwd()
@@ -2039,7 +2228,7 @@ def _ask_could_not_finish(exc, repo_dir=None, guard=None, operation="push",
     print_ask(
         f"secret guard could not finish: {name}: {exc}; "
         f"scan without a time limit: {hint}; {operation} anyway?", guard=guard,
-        additional_context=additional_context,
+        additional_context=additional_context, extra_prefix=extra_prefix,
     )
 
 
@@ -2080,14 +2269,26 @@ def claude_main(data):
             print_deny(cwd_deny)
             return 0
 
-    if os.environ.get("SECRET_GUARD_DISABLE") == "1":
-        if cwd_notice:
+    sandbox_reason = None
+    if (os.environ.get("SANDBOX_GUARD_DISABLE") != "1"
+            and data.get("hook_event_name") == "PreToolUse"
+            and data.get("tool_name") == "Bash"):
+        sandbox_reason = sandbox_guard_reason(command, cwd)
+
+    def no_findings(guard=None):
+        if sandbox_reason:
+            # Load private-name redactions even when secret scanning is disabled.
+            print_ask(sandbox_reason, guard=guard or Guard(budget_s=None),
+                      additional_context=cwd_notice)
+        elif cwd_notice:
             print_cwd_notice(cwd_notice)
+
+    if os.environ.get("SECRET_GUARD_DISABLE") == "1":
+        no_findings()
         return 0
 
     if not might_push(command or ""):
-        if cwd_notice:
-            print_cwd_notice(cwd_notice)
+        no_findings()
         return 0
 
     guard = Guard(budget_s=None)  # default 20 s (or SECRET_GUARD_BUDGET_S)
@@ -2095,8 +2296,7 @@ def claude_main(data):
     try:
         pushes, commit_before = analyze_command(command, cwd, guard, commits=commits)
         if not pushes and not commits:
-            if cwd_notice:
-                print_cwd_notice(cwd_notice)
+            no_findings(guard)
             return 0
         if commit_before:
             print_deny(
@@ -2113,20 +2313,19 @@ def claude_main(data):
             msg = str(exc)
             if "is not a git repository" in msg.lower():
                 print_ask(f"secret guard could not finish: {msg}", guard=guard,
-                          additional_context=cwd_notice)
+                          additional_context=cwd_notice, extra_prefix=sandbox_reason)
                 return 0
             _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
                                   operation="commit" if commits else "push",
-                                  additional_context=cwd_notice)
+                                  additional_context=cwd_notice, extra_prefix=sandbox_reason)
             return 0
         except Exception as exc:
             _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
                                   operation="commit" if commits else "push",
-                                  additional_context=cwd_notice)
+                                  additional_context=cwd_notice, extra_prefix=sandbox_reason)
             return 0
         if not guard.findings:
-            if cwd_notice:
-                print_cwd_notice(cwd_notice)
+            no_findings(guard)
             return 0
         targets = []
         for p in pushes + commits:
@@ -2139,27 +2338,28 @@ def claude_main(data):
             targets = [first.get("_target") or first.get("remote") or "remote"]
         target = ", ".join(str(t) for t in targets)
         print_ask(format_reason(guard.findings, target, guard=guard),
-                  additional_context=cwd_notice)
+                  additional_context=cwd_notice,
+                  extra_prefix=guard.redact(sandbox_reason) if sandbox_reason else None)
         return 0
     except BudgetExceeded as exc:
         _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
                               operation="commit" if commits else "push",
-                              additional_context=cwd_notice)
+                              additional_context=cwd_notice, extra_prefix=sandbox_reason)
         return 0
     except GitError as exc:
         msg = str(exc)
         if "is not a git repository" in msg.lower():
             print_ask(f"secret guard could not finish: {msg}", guard=guard,
-                      additional_context=cwd_notice)
+                      additional_context=cwd_notice, extra_prefix=sandbox_reason)
             return 0
         _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
                               operation="commit" if commits else "push",
-                              additional_context=cwd_notice)
+                              additional_context=cwd_notice, extra_prefix=sandbox_reason)
         return 0
     except Exception as exc:
         _ask_could_not_finish(exc, repo_dir=cwd, guard=guard,
                               operation="commit" if commits else "push",
-                              additional_context=cwd_notice)
+                              additional_context=cwd_notice, extra_prefix=sandbox_reason)
         return 0
 
 

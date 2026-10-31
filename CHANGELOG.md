@@ -12,6 +12,11 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - `delegate cost --until D`: exclusive upper bound for run timestamps and first session starts. Before the freeze, `cost --by-mode` on the experiment’s log holds back period-2 sessions and reports their count; explicit paths and symlinks keep the guard.
 - `docs/preregistration.md`: the preregistration of the control-session experiment's Max period (window, primary outcome, freeze, bootstrap, sensitivity analyses). Its first commit opens the confirmatory window. Dated amendments correct the registration date and record how `delegate prereg` reads the rules, including that a session whose transcript is gone at the freeze leaves the analysis set.
 - Session-log start rows record `checkout` (HEAD of the hook's own checkout; null unless git's top level is that folder), `dirty` (whether `git status --porcelain` lists any change, untracked files included), `context_sha256` (SHA-256 of the injected context without the spare-pool line) and `spare` (that line).
+- `hooks/secret-guard.py` asks before `delegate launch --unsandboxed` and before a `followup` of a run launched that way, since followups reuse the stored flag; it also asks for subagents and in vanilla sessions. `SANDBOX_GUARD_DISABLE=1` turns this check off.
+
+### Changed
+
+- The survey's last two roadmap ideas are closed (`docs/related-projects.md`): loop cost scoring as covered by the measured per-round pool costs in `delegate quota` and `route`, and pre-launch approval policies by the hook's unsandboxed check.
 
 ## [0.2.0] - 2026-10-30
 

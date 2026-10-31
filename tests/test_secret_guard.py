@@ -1931,5 +1931,332 @@ class CwdGuardTests(_SecretGuardHarness, unittest.TestCase):
         self.assertNotIn("additionalContext", out)
 
 
+class SandboxGuardTests(_SecretGuardHarness, unittest.TestCase):
+    """Delegate's sandbox opt-out is a safety gate in every Claude session."""
+
+    launch = "delegate launch cursor --brief b.md --unsandboxed"
+
+    def setUp(self):
+        super().setUp()
+        self.env.pop("SANDBOX_GUARD_DISABLE", None)
+        self.runs = self.tmp / "runs"
+        self.env["CLAUDE_DELEGATE_ROOT"] = str(self.runs)
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp / "config")
+        self.env["XDG_CACHE_HOME"] = str(self.tmp / "cache")
+
+    def _meta(self, name, unsandboxed, repo="project", root=None):
+        run = (root or self.runs) / repo / name
+        run.mkdir(parents=True, exist_ok=True)
+        (run / "meta.json").write_text(json.dumps({"unsandboxed": unsandboxed}))
+        return run
+
+    def _out(self, command, **kwargs):
+        result = self.claude(command, **kwargs)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        if not result.stdout:
+            return None
+        # json.loads rejects multiple responses; all gates must share one decision.
+        out = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(out["hookEventName"], "PreToolUse")
+        self.assertIn(out.get("permissionDecision"), ("ask", "deny", None))
+        return out
+
+    def _ask(self, command, **kwargs):
+        out = self._out(command, **kwargs)
+        self.assertIsNotNone(out, command)
+        self.assertEqual(out["permissionDecision"], "ask", command)
+        self.assertTrue(out["permissionDecisionReason"].startswith("sandbox guard:"))
+        return out
+
+    def _silent(self, command, **kwargs):
+        self.assertIsNone(self._out(command, **kwargs), command)
+
+    def test_launch_unsandboxed_abbreviations(self):
+        for flag in ("--unsandboxed", "--uns", "--u"):
+            with self.subTest(flag=flag):
+                self._ask(f"delegate launch cursor --brief b.md {flag}")
+
+    def test_launch_safe_dry_run_and_separator(self):
+        for command in (
+            "delegate launch cursor --brief b.md",
+            self.launch + " --dry-run",
+            "delegate launch cursor --brief b.md -- --unsandboxed",
+            "delegate launch cursor --brief b.md --unsandboxed=no",
+            "delegate launch cursor --brief b.md --unsandboxed-extra",
+            "delegate status --unsandboxed",
+        ):
+            with self.subTest(command=command):
+                self._silent(command)
+
+    def test_command_positions_and_data_controls(self):
+        text = "skills/delegate/scripts/" + self.launch
+        self._ask(text)
+        for command in (
+            f"echo '{text}'",
+            f'printf "%s\\n" "{text}"',
+            "grep -n -- --unsandboxed SKILL.md",
+            f"cat <<'EOF'\n{text}\nEOF",
+            f"cat <<'EOF' | head\n{text}\nEOF",
+            f"cat <<-EOF\n\t{text}\n\tEOF",
+            f"echo ok # {text}",
+            f"'{text}'",
+            f"echo '$( {text} )'",
+        ):
+            with self.subTest(command=command):
+                self._silent(command)
+        self._ask(f"cat <<'EOF'\n{text}\nEOF\n{text}")
+        self._ask(f"cat <<'EOF' && {text}\nplain text\nEOF")
+        # Quotes and substitutions in heredoc data must not affect later operators.
+        self._ask(f"cat <<'EOF'\n\" $(ignored)\nEOF\nfalse || {text}")
+
+    def test_wrappers_and_shell_operators(self):
+        for command in (
+            f"bash -c '{self.launch}'",
+            f"sh -c '{self.launch}'",
+            f"eval '{self.launch}'",
+            f"env A=1 {self.launch}",
+            f"env -C x {self.launch}",
+            f"env -C x -S '{self.launch}'",
+            f"(cd x && {self.launch})",
+            f"true && {self.launch}",
+            f"false || {self.launch}",
+            f"true; {self.launch}",
+            f"printf x | {self.launch}",
+            f"true\n{self.launch}",
+            f"echo $({self.launch})",
+            f'echo "$(false || {self.launch})"',
+            f"echo `{self.launch}`",
+            f"if true; then {self.launch}; fi",
+            f"timeout 10 command {self.launch}",
+        ):
+            with self.subTest(command=command):
+                self._ask(command)
+
+    def test_python_interpreter_options_and_executable_names(self):
+        for command in (
+            "python3 -I path/to/" + self.launch,
+            "python -W ignore -X dev path/to/" + self.launch,
+            "python3 -IW ignore -BX dev path/to/" + self.launch,
+            "python3.9 -- path/to/" + self.launch,
+            "python3 --check-hash-based-pycs always path/to/" + self.launch,
+            "delegate --verbose launch cursor --unsandboxed",
+        ):
+            with self.subTest(command=command):
+                self._ask(command)
+        for prefix in ("other-delegate", "python2 delegate", "python3 -m delegate",
+                       "python3 -c delegate", "python3 -Ic delegate", "python3 --help delegate",
+                       "python3 other-script delegate"):
+            self._silent(prefix + " launch cursor --unsandboxed")
+
+    def test_followup_metadata_name_and_directory(self):
+        run = self._meta("unsafe", True)
+        self._meta("safe", False)
+        for ref in ("unsafe", str(run), "runs/project/unsafe"):
+            with self.subTest(ref=ref):
+                reason = self._ask(f"delegate followup {ref}")["permissionDecisionReason"]
+                self.assertIn(f"run {ref} was launched --unsandboxed", reason)
+        self._silent("delegate followup safe")
+        # A direct directory wins over a same-named record in the run root.
+        direct = self.tmp / "unsafe"
+        direct.mkdir()
+        (direct / "meta.json").write_text('{"unsandboxed": false}')
+        self._silent("delegate followup unsafe")
+        self._meta("unsafe", True, root=Path(self.env["HOME"]))
+        self._ask("delegate followup ~/project/unsafe")
+
+    def test_followup_unknown_and_dynamic_names(self):
+        self._meta("safe", False)
+        self._silent("delegate followup unknown")
+        dynamic = ("$NAME", '"$NAME"', "'run*'", "run?", "'[ab]'", "$(printf unsafe)",
+                   "`printf unsafe`", "")
+        for ref in dynamic:
+            with self.subTest(ref=ref):
+                self._silent(f"delegate followup {ref}")
+        self._meta("unsafe", True)
+        self._silent("delegate followup unknown")
+        for ref in dynamic:
+            with self.subTest(ref=ref):
+                self._ask(f"delegate followup {ref}")
+
+    def test_followup_unreadable_or_invalid_metadata(self):
+        run = self._meta("broken", False)
+        path = run / "meta.json"
+        for contents in ("not json", "[]", "{", b"\xff"):
+            with self.subTest(contents=contents):
+                path.write_bytes(contents if isinstance(contents, bytes) else contents.encode())
+                out = self._ask("delegate followup broken")
+                self.assertIn("cannot verify metadata for run broken", out["permissionDecisionReason"])
+        path.unlink()
+        path.mkdir()  # read_text fails even when the tests run as root.
+        self._ask("delegate followup broken")
+        self._ask(f"delegate followup {run}")
+        self._meta("ambiguous", False, repo="first")
+        self._meta("ambiguous", True, repo="second")
+        self._ask("delegate followup ambiguous")
+
+    def test_followup_options_before_name_and_dry_run(self):
+        self._meta("unsafe", True)
+        self._meta("safe", False)
+        for option, value in (("--brief", "f.md"), ("--from-review", "2"),
+                              ("--model", "auto"), ("--effort", "high"),
+                              ("--verify", "check"), ("--link", "files"), ("--br", "f.md")):
+            for sep in (" ", "="):
+                with self.subTest(option=option, sep=sep):
+                    self._ask(f"delegate followup {option}{sep}{value} unsafe")
+                    self._silent(f"delegate followup {option}{sep}{value} safe")
+        self._ask("delegate followup --fresh --detach unsafe")
+        self._ask("delegate followup -- unsafe")
+        self._silent("delegate followup --brief unsafe safe")
+        for args in ("unsafe --dry-run", "--dry-run unsafe", "--dry-run $NAME", "--dry-run"):
+            self._silent(f"delegate followup {args}")
+
+    def test_followup_working_directories(self):
+        directory = self.tmp / "x"
+        directory.mkdir()
+        (directory / "meta.json").write_text('{"unsandboxed": true}')
+        for command in (
+            "(cd x && delegate followup .)",
+            "env -C x delegate followup .",
+            "env --chdir=x delegate followup .",
+            "bash -c 'cd x; delegate followup .'",
+            "eval 'cd x'; delegate followup .",
+        ):
+            with self.subTest(command=command):
+                self._ask(command)
+        self._silent("(cd x); delegate followup .")
+        self._silent("env -C x true; delegate followup .")
+        self._silent("bash -c 'cd x'; delegate followup .")
+        self._meta("relative-root", True, root=directory / "records")
+        self._ask("env -C x delegate followup relative-root",
+                  env={"CLAUDE_DELEGATE_ROOT": "records"})
+
+    def test_run_root_environment_precedence(self):
+        self._meta("unsafe", True)
+        self._ask("delegate followup unsafe")
+        del self.env["CLAUDE_DELEGATE_ROOT"]
+        cache_root = Path(self.env["XDG_CACHE_HOME"]) / "claude-delegate" / "runs"
+        self._silent("delegate followup unsafe")
+        self._meta("unsafe", True, root=cache_root)
+        self._ask("delegate followup unsafe")
+        del self.env["XDG_CACHE_HOME"]
+        self._silent("delegate followup unsafe")
+        home_root = Path(self.env["HOME"]) / ".cache" / "claude-delegate" / "runs"
+        self._meta("unsafe", True, root=home_root)
+        self._ask("delegate followup unsafe")
+
+    def test_environment_switches_are_independent(self):
+        self._silent(self.launch, env={"SANDBOX_GUARD_DISABLE": "1"})
+        for switch in ("SECRET_GUARD_DISABLE", "CWD_GUARD_DISABLE"):
+            self._ask(self.launch, env={switch: "1"})
+        local, _ = self.make_pair()
+        (local / "sub").mkdir()
+        env = {"SANDBOX_GUARD_DISABLE": "1", "CLAUDE_PROJECT_DIR": str(local)}
+        out = self._out(self.launch + "; cd sub", cwd=local, env=env)
+        self.assertEqual(out["permissionDecision"], "deny")
+        (local / "leak.txt").write_text(_fake_token("ghp_", 36))
+        _git(local, "add", "leak.txt")
+        _git(local, "commit", "-m", "leak")
+        out = self._out(self.launch + "; git push origin main", cwd=local, env=env)
+        self.assertEqual(out["permissionDecision"], "ask")
+        self.assertIn("GitHub token", out["permissionDecisionReason"])
+        self.assertNotIn("sandbox guard:", out["permissionDecisionReason"])
+
+    def test_combines_push_findings_and_scan_failures(self):
+        local, _ = self.make_pair()
+        command = self.launch + "; git push origin main"
+        self._ask(command, cwd=local)  # Clean scan must still emit the sandbox ask.
+        token = _fake_token("ghp_", 36)
+        (local / "leak.txt").write_text(token)
+        _git(local, "add", "leak.txt")
+        _git(local, "commit", "-m", "leak")
+        out = self._ask(command, cwd=local)
+        self.assertIn("GitHub token", out["permissionDecisionReason"])
+        self.assertNotIn(token, json.dumps(out))
+        out = self._ask(command, cwd=local, env={"SECRET_GUARD_BUDGET_S": "0"})
+        self.assertIn("secret guard could not finish", out["permissionDecisionReason"])
+        self.assertIn("BudgetExceeded", out["permissionDecisionReason"])
+        out = self._ask(command)  # Not a repository is its own error branch.
+        self.assertIn("is not a git repository", out["permissionDecisionReason"])
+
+    def test_denies_win_over_sandbox_ask(self):
+        local, _ = self.make_pair()
+        (local / "sub").mkdir()
+        out = self._out(self.launch + "; cd sub", cwd=local,
+                        env={"CLAUDE_PROJECT_DIR": str(local)})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertTrue(out["permissionDecisionReason"].startswith("cwd guard:"))
+        out = self._out(self.launch + "; git commit -m x && git push", cwd=local)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("own Bash call", out["permissionDecisionReason"])
+
+    def test_drift_notice_is_additional_context(self):
+        repo = self.tmp / "repo"
+        (repo / "sub").mkdir(parents=True)
+        out = self._ask(self.launch, cwd=repo / "sub",
+                        env={"CLAUDE_PROJECT_DIR": str(repo)})
+        self.assertTrue(out["additionalContext"].startswith("cwd guard:"))
+        self.assertIn("sub", out["additionalContext"])
+
+    def test_all_modes_and_subagents(self):
+        self._ask(self.launch, extra={"agent_id": "worker"})
+        log = self.tmp / "sessions.jsonl"
+        for mode in ("vanilla", "claude-only", "orchestrator"):
+            log.write_text(json.dumps({"event": "start", "session": "s", "mode": mode}) + "\n")
+            with self.subTest(mode=mode):
+                self._ask(self.launch, env={"CLAUDE_SESSION_LOG": str(log)},
+                          extra={"session_id": "s"})
+
+    def test_exact_event_and_tool_scope(self):
+        for key, values in (("hook_event_name", (None, "", "PostToolUse", "preToolUse")),
+                            ("tool_name", (None, "", "Read", "bash"))):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self._silent(self.launch, extra={key: value})
+            payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": self.launch}}
+            del payload[key]
+            result = self.run_hook(payload)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_reason_effect_rule_and_redaction(self):
+        reason = self._ask(self.launch)["permissionDecisionReason"]
+        for text in ("cursor-agent", "--sandbox disabled --force", "network, installs",
+                     "writes outside the worktree", "delegate skill needs the user's OK"):
+            self.assertIn(text, reason)
+        self.assertNotIn("\n", reason)
+        config = Path(self.env["XDG_CONFIG_HOME"]) / "claude-orchestrator"
+        config.mkdir(parents=True)
+        (config / "private-names.txt").write_text("HiddenRun\n")
+        for name in ("HiddenRun", _fake_token("ghp_", 36), "line\nbreak"):
+            self._meta(name, True)
+            out = self._ask(f"delegate followup '{name}'")
+            reason = out["permissionDecisionReason"]
+            self.assertNotIn("\n", reason)
+            self.assertNotIn(name, json.dumps(out))
+
+    def test_fast_path_and_lazy_run_root(self):
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("sg", HOOK)
+        sg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sg)
+        with mock.patch.object(sg, "_walk_shell", side_effect=AssertionError("shell walked")), \
+                mock.patch.object(sg, "Path", side_effect=AssertionError("filesystem touched")):
+            self.assertIsNone(sg.sandbox_guard_reason("ls -la", str(self.tmp)))
+        with mock.patch.object(sg, "_unsandboxed_run", side_effect=AssertionError("run root read")), \
+                mock.patch.object(Path, "glob", side_effect=AssertionError("globbed")), \
+                mock.patch.object(Path, "read_text", side_effect=AssertionError("read")):
+            self.assertIsNotNone(sg.sandbox_guard_reason(self.launch, str(self.tmp)))
+            self.assertIsNone(sg.sandbox_guard_reason("echo 'delegate followup unsafe'", str(self.tmp)))
+            self.assertIsNone(sg.sandbox_guard_reason("delegate status unsafe", str(self.tmp)))
+            self.assertIsNone(sg.sandbox_guard_reason("delegate followup unsafe --dry-run", str(self.tmp)))
+
+    def test_module_docstring_describes_guard(self):
+        doc = ast.get_docstring(ast.parse(HOOK.read_text()))
+        for text in ("sandbox guard", "followups", "subagents", "every session mode",
+                     "SANDBOX_GUARD_DISABLE=1 (skip the sandbox check only)"):
+            self.assertIn(text, doc)
+
+
 if __name__ == "__main__":
     unittest.main()
