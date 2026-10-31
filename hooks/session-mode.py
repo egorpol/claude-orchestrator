@@ -6,6 +6,7 @@ Resume/compact recover it from the JSONL log, so intent-to-treat accounting keep
 the original mode even after compaction. PreToolUse blocks new Codex/Cursor work
 in controls; SessionEnd records distinct main-thread calls and possible rerolls.
 SessionStart (startup/clear) and SessionEnd copy HANDOFF.md for the blinded rater.
+Start rows record the hook checkout commit, dirty flag, context hash and spare line.
 Log/config/rules errors stay silent, and quota.jsonl snapshots and session summaries
 run detached: a broken measurement hook must never get in the way of a session.
 SessionEnd starts `delegate report --auto` (quota reading, then a summary row);
@@ -20,6 +21,7 @@ XDG_CACHE_HOME and XDG_CONFIG_HOME default to ~/.cache and ~/.config.
 Register this command for SessionStart, PreToolUse (Skill|Agent|Bash), SessionEnd.
 """
 import configparser
+import hashlib
 import json
 import math
 import os
@@ -284,39 +286,109 @@ def _spare_line(path):
         return None
 
 
-def session_context(mode, path=None):
-    """Build additionalContext. Orchestrator: mode, spare, delegation, hygiene (preview order)."""
+GIT_TIMEOUT = 2
+
+
+def _scrubbed_git_env():
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+        env.pop(key, None)
+    return env
+
+
+def _run_git(root, args, timeout=GIT_TIMEOUT):
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=_scrubbed_git_env(), timeout=timeout)
+
+
+def hook_checkout(root=None):
+    """(checkout, dirty) for the hook's own ROOT; None fields when ROOT is not a repo top."""
+    root = ROOT if root is None else Path(root)
+    try:
+        marker = root / ".git"
+        # Require ROOT itself to be a work-tree top; do not walk parents (nested copy case).
+        if not (marker.is_dir() or marker.is_file()):
+            return None, None
+        try:
+            proc = _run_git(root, ["rev-parse", "--show-toplevel", "HEAD"])
+        except subprocess.TimeoutExpired:
+            return None, None
+        if proc.returncode != 0:
+            return None, None
+        lines = proc.stdout.decode("utf-8", "replace").splitlines()
+        # An invalid .git (e.g. an empty directory) makes git use a parent repository.
+        if len(lines) != 2 or Path(lines[0]).resolve() != root.resolve():
+            return None, None
+        checkout = lines[1].strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", checkout):
+            return None, None
+        try:
+            # Explicit, so status.showUntrackedFiles=no can't hide untracked files.
+            proc = _run_git(root, ["--no-optional-locks", "status", "--porcelain",
+                                   "--untracked-files=normal"])
+        except subprocess.TimeoutExpired:
+            return checkout, None
+        if proc.returncode != 0:
+            return checkout, None
+        return checkout, bool(proc.stdout.strip())
+    except Exception:
+        return None, None
+
+
+def _session_context_parts(mode, path=None):
+    """Build inject parts and spare once. Returns (inject_parts, spare); vanilla → ([], None)."""
     if mode == "vanilla":
-        return None
+        return [], None
     directory = Path(os.environ.get("CLAUDE_SESSION_RULES_DIR", ROOT / "rules"))
-    parts = []
+    fixed, spare = [], None
     if mode == "orchestrator":
-        parts.append(ORCHESTRATOR_LINE)
+        fixed.append(ORCHESTRATOR_LINE)
         spare = _spare_line(path) if path is not None else None
-        if spare:
-            parts.append(spare)
         for filename in ("delegation.md", "hygiene.md"):
             try:
                 text = (directory / filename).read_text(encoding="utf-8").strip()
                 if text:
-                    parts.append(text)
+                    fixed.append(text)
             except (OSError, ValueError):
                 pass
     else:
-        parts.append(CONTROL_LINE)
+        fixed.append(CONTROL_LINE)
         try:
             text = (directory / "hygiene.md").read_text(encoding="utf-8").strip()
             if text:
-                parts.append(text)
+                fixed.append(text)
         except (OSError, ValueError):
             pass
     reference = directory / "reference.md"
     if reference.is_file():
-        parts.append(
+        fixed.append(
             "Topic tips (handoffs, decisions, data checks, shell, edits, reads): read the matching "
             f"section of {reference.resolve()} before that kind of work."
         )
+    inject = list(fixed)
+    if spare:
+        inject.insert(1, spare)
+    return inject, spare
+
+
+def session_context(mode, path=None):
+    """Build additionalContext. Orchestrator: mode, spare, delegation, hygiene (preview order)."""
+    parts, _spare = _session_context_parts(mode, path)
     return "\n\n".join(parts) or None
+
+
+def context_pin(mode, path=None):
+    """(additionalContext, context_sha256, spare) from one rules read; hash omits the spare line."""
+    parts, spare = _session_context_parts(mode, path)
+    context = "\n\n".join(parts) or None
+    if context is None:
+        return None, None, None
+    hashed = context
+    if spare:
+        hashed = context.replace("\n\n" + spare, "", 1)
+    return context, hashlib.sha256(hashed.encode("utf-8")).hexdigest(), spare
 
 
 def quota_enabled(config):
@@ -577,14 +649,16 @@ def start_session(data, path, config, previous):
     session = data["session_id"]
     handoff = (snapshot_handoff(data.get("cwd"), path, session)
                if source in ("startup", "clear") else (previous or {}).get("handoff"))
+    context, context_sha256, spare = context_pin(mode, path)
+    checkout, dirty = hook_checkout()
     append_row(path, "start", session, source=source, mode=mode,
                weights=config["weights"],
                u=round(u, 6) if u is not None else None, forced=forced, excluded=excluded,
                inherited=inherited, unassigned=unassigned, cwd=data.get("cwd"), repo=repo,
                repo_dir=repo_dir, model=data.get("model"), transcript=data.get("transcript_path"),
-               handoff=handoff)
+               handoff=handoff, checkout=checkout, dirty=dirty,
+               context_sha256=context_sha256, spare=spare)
     specific = {"hookEventName": "SessionStart"}
-    context = session_context(mode, path)
     if context is not None:
         specific["additionalContext"] = context
     output = {"hookSpecificOutput": specific}

@@ -1,4 +1,5 @@
 """Session-mode hook subprocess tests: assignment, controls, accounting, failures."""
+import hashlib
 import importlib.util
 import io
 import json
@@ -146,7 +147,8 @@ class SessionModeTests(unittest.TestCase):
         self.assertEqual([row["u"] for row in rows], [0.622902, 0.622902])
         self.assertEqual(set(rows[0]), {"event", "session", "ts", "source", "mode", "u", "forced",
                                        "excluded", "inherited", "unassigned", "cwd", "repo", "repo_dir",
-                                       "model", "transcript", "weights", "handoff"})
+                                       "model", "transcript", "weights", "handoff",
+                                       "checkout", "dirty", "context_sha256", "spare"})
         self.assertEqual(rows[0]["weights"], SESSION_MODE.DEFAULT_WEIGHTS)
         self.assertEqual(rows[0]["session"], "first")
         self.assertEqual(rows[0]["cwd"], str(self.repo))
@@ -927,6 +929,228 @@ class SessionModeTests(unittest.TestCase):
             ctx = (out or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
             self.assertNotIn("Delegate pools ahead of pace", ctx)
             self.assertNotIn(ORCHESTRATOR_LINE, ctx)
+
+    def _git_env(self):
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
+        env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        return env
+
+    def _git(self, *args, cwd):
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+            cwd=str(cwd), env=self._git_env(), capture_output=True, text=True, check=True)
+
+    def _copy_hook_root(self, root):
+        hook = root / "hooks/session-mode.py"
+        hook.parent.mkdir(parents=True)
+        shutil.copyfile(HOOK, hook)
+        scripts = root / "skills/delegate/scripts"
+        scripts.mkdir(parents=True)
+        shutil.copyfile(ROOT / "skills/delegate/scripts/quota.py", scripts / "quota.py")
+        # The hook loads quota.py before git status; a __pycache__ would make the copy dirty.
+        # The real checkout ignores __pycache__/. The user's git config must not matter either.
+        self.env.update({"PYTHONDONTWRITEBYTECODE": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                         "GIT_CONFIG_NOSYSTEM": "1"})
+        return hook
+
+    def _start_copied(self, hook, session="pin", mode="orchestrator", source="startup", **fields):
+        if mode is not None:
+            self.env["CLAUDE_SESSION_MODE"] = mode
+        else:
+            self.env.pop("CLAUDE_SESSION_MODE", None)
+        self.run_hook({"hook_event_name": "SessionStart", "session_id": session,
+                       "source": source, "cwd": str(self.repo), "model": "claude-opus-5-5",
+                       "transcript_path": str(self.transcript), **fields}, hook=hook)
+        return self.rows()[-1]
+
+    def test_start_row_checkout_clean_scratch_repo(self):
+        root = self.tmp / "hook-root"
+        root.mkdir()
+        hook = self._copy_hook_root(root)
+        self._git("init", cwd=root)
+        (root / "tracked.txt").write_text("ok\n", encoding="utf-8")
+        self._git("add", "-A", cwd=root)
+        self._git("commit", "-m", "init", cwd=root)
+        head = self._git("rev-parse", "HEAD", cwd=root).stdout.strip()
+        row = self._start_copied(hook, session="clean")
+        self.assertEqual(row["checkout"], head)
+        self.assertIs(row["dirty"], False)
+
+    def test_start_row_dirty_tracked_untracked_and_ignored(self):
+        root = self.tmp / "hook-root"
+        root.mkdir()
+        hook = self._copy_hook_root(root)
+        self._git("init", cwd=root)
+        (root / "tracked.txt").write_text("ok\n", encoding="utf-8")
+        (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+        self._git("add", "-A", cwd=root)
+        self._git("commit", "-m", "init", cwd=root)
+        (root / "tracked.txt").write_text("changed\n", encoding="utf-8")
+        row = self._start_copied(hook, session="mod")
+        self.assertIs(row["dirty"], True)
+        self._git("checkout", "--", "tracked.txt", cwd=root)
+        (root / "untracked.txt").write_text("new\n", encoding="utf-8")
+        row = self._start_copied(hook, session="untracked")
+        self.assertIs(row["dirty"], True)
+        (root / "untracked.txt").unlink()
+        (root / "ignored.txt").write_text("noise\n", encoding="utf-8")
+        row = self._start_copied(hook, session="ignored")
+        self.assertIs(row["dirty"], False)
+        self._git("config", "status.showUntrackedFiles", "no", cwd=root)
+        (root / "untracked.txt").write_text("new\n", encoding="utf-8")
+        row = self._start_copied(hook, session="untracked-hidden")
+        self.assertIs(row["dirty"], True)
+
+    def test_start_row_nested_non_root_checkout_is_none(self):
+        parent = self.tmp / "parent-repo"
+        parent.mkdir()
+        self._git("init", cwd=parent)
+        (parent / "readme").write_text("p\n", encoding="utf-8")
+        self._git("add", "readme", cwd=parent)
+        self._git("commit", "-m", "init", cwd=parent)
+        nested = parent / "sub"
+        nested.mkdir()
+        hook = self._copy_hook_root(nested)
+        row = self._start_copied(hook, session="nested")
+        self.assertIsNone(row["checkout"])
+        self.assertIsNone(row["dirty"])
+        (nested / ".git").mkdir()  # invalid marker: git falls through to the parent
+        row = self._start_copied(hook, session="nested-empty-git")
+        self.assertIsNone(row["checkout"])
+        self.assertIsNone(row["dirty"])
+
+    def test_start_row_no_repo_and_unborn_head_are_none(self):
+        plain = self.tmp / "plain-root"
+        plain.mkdir()
+        hook = self._copy_hook_root(plain)
+        row = self._start_copied(hook, session="plain")
+        self.assertIsNone(row["checkout"])
+        self.assertIsNone(row["dirty"])
+        unborn = self.tmp / "unborn-root"
+        unborn.mkdir()
+        self._git("init", cwd=unborn)
+        hook = self._copy_hook_root(unborn)
+        row = self._start_copied(hook, session="unborn")
+        self.assertIsNone(row["checkout"])
+        self.assertIsNone(row["dirty"])
+
+    def test_start_row_linked_worktree_records_head(self):
+        main = self.tmp / "main-repo"
+        main.mkdir()
+        self._copy_hook_root(main)
+        self._git("init", cwd=main)
+        (main / "tracked.txt").write_text("ok\n", encoding="utf-8")
+        self._git("add", "-A", cwd=main)
+        self._git("commit", "-m", "init", cwd=main)
+        wt = self.tmp / "linked-wt"
+        self._git("worktree", "add", str(wt), "HEAD", cwd=main)
+        head = self._git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+        hook = wt / "hooks/session-mode.py"
+        row = self._start_copied(hook, session="wt")
+        self.assertEqual(row["checkout"], head)
+        self.assertIs(row["dirty"], False)
+
+    def test_start_row_git_timeout_and_failure_yield_none(self):
+        root = self.tmp / "hook-root"
+        root.mkdir()
+        hook = self._copy_hook_root(root)
+        self._git("init", cwd=root)
+        (root / "tracked.txt").write_text("ok\n", encoding="utf-8")
+        self._git("add", "-A", cwd=root)
+        self._git("commit", "-m", "init", cwd=root)
+        bin_dir = self.tmp / "fake-git-bin"
+        bin_dir.mkdir()
+        slow = bin_dir / "git"
+        slow.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+        slow.chmod(0o755)
+        env = self.env.copy()
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+        env["CLAUDE_SESSION_MODE"] = "orchestrator"
+        started = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps({"hook_event_name": "SessionStart", "session_id": "slow",
+                              "source": "startup", "cwd": str(self.repo),
+                              "model": "claude-opus-5-5",
+                              "transcript_path": str(self.transcript)}),
+            env=env, capture_output=True, text=True, timeout=10)
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertLess(elapsed, 5)
+        out = json.loads(result.stdout)
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        row = self.rows()[-1]
+        self.assertIsNone(row["checkout"])
+        self.assertIsNone(row["dirty"])
+        failing = bin_dir / "git"
+        failing.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        failing.chmod(0o755)
+        result = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps({"hook_event_name": "SessionStart", "session_id": "fail",
+                              "source": "startup", "cwd": str(self.repo),
+                              "model": "claude-opus-5-5",
+                              "transcript_path": str(self.transcript)}),
+            env=env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        row = self.rows()[-1]
+        self.assertIsNone(row["checkout"])
+        self.assertIsNone(row["dirty"])
+
+    def test_context_sha256_matches_injected_minus_spare(self):
+        out = self.start("claude-only", session="hash-c")
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        row = self.rows()[-1]
+        self.assertEqual(row["context_sha256"], hashlib.sha256(ctx.encode()).hexdigest())
+        self.assertIsNone(row["spare"])
+        out = self.start("orchestrator", session="hash-o-nospare")
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        row = self.rows()[-1]
+        self.assertIsNone(row["spare"])
+        self.assertEqual(row["context_sha256"], hashlib.sha256(ctx.encode()).hexdigest())
+        self._write_spare_quota(used_auto=1.0, used_7d=90.0)
+        out = self.start("orchestrator", session="hash-o-spare")
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        row = self.rows()[-1]
+        spare = row["spare"]
+        self.assertIsNotNone(spare)
+        self.assertIn(spare, ctx)
+        hashed = ctx.replace("\n\n" + spare, "", 1)
+        self.assertEqual(row["context_sha256"], hashlib.sha256(hashed.encode()).hexdigest())
+        first_hash = row["context_sha256"]
+        self._write_spare_quota(used_auto=5.0, used_7d=10.0, age_h=0.2)
+        out2 = self.start("orchestrator", session="hash-o-spare2")
+        row2 = self.rows()[-1]
+        self.assertNotEqual(row2["spare"], spare)
+        self.assertEqual(row2["context_sha256"], first_hash)
+        self.assertIn(row2["spare"], out2["hookSpecificOutput"]["additionalContext"])
+        (self.rules / "hygiene.md").write_text("HYGIENE_CHANGED\n", encoding="utf-8")
+        self.start("orchestrator", session="hash-o-changed")
+        self.assertNotEqual(self.rows()[-1]["context_sha256"], first_hash)
+
+    def test_vanilla_context_pin_fields_are_none(self):
+        self.start("vanilla", session="vanilla-pin")
+        row = self.rows()[-1]
+        self.assertIsNone(row["context_sha256"])
+        self.assertIsNone(row["spare"])
+
+    def test_resume_start_row_carries_pin_fields(self):
+        self.start("claude-only", session="resume-pin")
+        first = self.rows()[-1]
+        self.assertIsNotNone(first["context_sha256"])
+        self.env.pop("CLAUDE_SESSION_MODE", None)
+        self.event("SessionStart", "resume-pin", source="resume", model="claude-opus-5-5")
+        row = self.rows()[-1]
+        self.assertEqual(row["source"], "resume")
+        self.assertIs(row["inherited"], True)
+        for key in ("checkout", "dirty", "context_sha256", "spare"):
+            self.assertIn(key, row)
+        self.assertEqual(row["context_sha256"], first["context_sha256"])
+        self.assertIsNone(row["spare"])
 
     def test_control_lines_carry_session_only_sentence(self):
         self.assertEqual(CONTROL_LINE, SESSION_MODE.CONTROL_LINE)

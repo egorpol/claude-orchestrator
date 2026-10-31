@@ -6,6 +6,11 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ## [Unreleased]
 
+### Added
+
+- `docs/preregistration.md`: the preregistration of the control-session experiment's Max period (window, primary outcome, freeze, bootstrap, sensitivity analyses). Its first commit opens the confirmatory window.
+- Session-log start rows record `checkout` (HEAD of the hook's own checkout; null unless git's top level is that folder), `dirty` (whether `git status --porcelain` lists any change, untracked files included), `context_sha256` (SHA-256 of the injected context without the spare-pool line) and `spare` (that line).
+
 ## [0.2.0] - 2026-10-30
 
 Everything from 2026-10-13 to 10-30. The larger additions: an opt-in randomised experiment that draws each session's mode (orchestrator, Claude only or vanilla) and the commands that score it (`cost --by-mode` and the blinded `delegate rate`); timed quota readings and their calibration against tokens (`quota --snapshot`, `cost --calibrate`); a quota check before Codex launches, follow-ups and reviews; model cost frontiers (`route --frontier`); work with uncommitted changes (`review --working-tree`, `launch --include-uncommitted`, `apply --3way`); a secret guard for commits and pushes; an optional desktop alert hook (`install.sh --attention`); and personal catalog overrides in `catalog.local.json`. The session rules were cut to fit inline at session start, and now make delegation the default in orchestrator sessions.
