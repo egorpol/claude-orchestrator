@@ -88,7 +88,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
 
 - Automatic field reports, shelved 2026-10-27: Cursor Auto was to write lessons for the sessions that get no `/field-report` (about 89%), but two trials against sessions that have one recalled about 40% of the hand reports' lessons, under the 50% bar. The design and results are in [docs/auto-field-reports.md](docs/auto-field-reports.md).
 - The open ideas in the [survey](docs/related-projects.md): loop cost scoring and pre-launch approval policies.
-- Analysis code for the [preregistered](docs/preregistration.md) control-session experiment (window filter, freeze, bootstraps), due before its window closes.
+- The [preregistered](docs/preregistration.md) control-session experiment: its analysis code is committed (`delegate prereg`); the Max-plan pool calibration is due from 2026-11-02, and outcomes are read at the freeze, 7 days after the window closes.
 
 ## Docs
 
