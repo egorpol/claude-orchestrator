@@ -409,6 +409,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         record = records[0]
         self.assertEqual(record["v"], 1)
+        self.assertNotIn("kind", record)
         self.assertIn("session", record)
         self.assertIsNone(record["session"])
         self.assertEqual(record["outcome"], "applied")
@@ -456,6 +457,17 @@ class LifecycleTests(unittest.TestCase):
         runs.save_meta(root, meta)
         self.cli("apply", "test", extra_env={"CLAUDE_CODE_SESSION_ID": "apply-session"})
         self.assertIsNone(json.loads((self.storage / "runs.jsonl").read_text())["session"])
+
+    def test_working_tree_review_kind_reaches_run_log(self):
+        (self.repo / "tracked.txt").write_text("base\nchange to review\n")
+        self.cli("review", "--working-tree", "--brief", self.brief, "--name", "wt-review",
+                 "--no-fallback")
+        self.cli("cleanup", "wt-review")
+        record = json.loads((self.storage / "runs.jsonl").read_text())
+        self.assertEqual(record["kind"], "working-tree")
+        self.assertEqual(record["outcome"], "reviewed")
+        self.assertEqual(record["rounds"], [])
+        self.assertEqual(len(record["reviews"]), 2)
 
     def test_discard_safety_and_purge_accounting(self):
         self.launch()

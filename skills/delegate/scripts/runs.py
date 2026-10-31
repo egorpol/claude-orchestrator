@@ -2349,6 +2349,8 @@ def log_run(root, meta, outcome):
               "mode": mode, "links": meta.get("links", []), "base": meta["base"], "outcome": outcome,
               "files": len(rows), "insertions": sum(r["insertions"] for r in rows),
               "deletions": sum(r["deletions"] for r in rows), "rounds": rounds, "reviews": reviews}
+    if "kind" in meta:
+        record["kind"] = meta["kind"]
     if meta.get("snapshot_of"):
         record["snapshot_of"] = meta["snapshot_of"]
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)

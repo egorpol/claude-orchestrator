@@ -78,12 +78,17 @@ class TestAsk(unittest.TestCase):
 
     def test_build_prompt(self):
         p = ask.build_prompt("What is x?", 50, ["foo.py"])
-        self.assertIn("at most 50 words", p)
-        self.assertIn("path:line", p)
-        self.assertIn("not found", p)
-        self.assertIn("read-only", p)
-        self.assertIn("- foo.py", p)
-        self.assertIn("What is x?", p)
+        self.assertEqual(p, "\n".join([
+            "Answer in at most 50 words.",
+            "Cite path:line for claims.",
+            "Cite tracked files or the question itself, not working notes such as HANDOFF.md that may change while you answer.",
+            'Say "not found" rather than guess.',
+            "This is read-only; do not modify, create or delete any files.",
+            "Focus on these files:",
+            "- foo.py",
+            "",
+            "What is x?",
+        ]))
 
     def test_cursor_ask(self):
         ns = argparse_ns(

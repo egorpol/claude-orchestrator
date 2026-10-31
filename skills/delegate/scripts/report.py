@@ -254,7 +254,7 @@ def _live_run_row(root, meta):
             verify = int(raw) if raw else None
         except (OSError, ValueError):
             verify = None
-    return {
+    row = {
         "run": meta.get("name") or root.name,
         "agent": meta.get("agent"),
         "model": meta.get("model"),
@@ -263,6 +263,19 @@ def _live_run_row(root, meta):
         "session": meta.get("session"),
         "live": True,
     }
+    if meta.get("kind") == "working-tree":
+        row["kind"] = meta["kind"]
+        row["reviews"] = []
+        for path in sorted(root.glob("review-*/meta.json"),
+                           key=lambda p: int(p.parent.name.split("-")[1])):
+            try:
+                review = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(review, dict):
+                review.setdefault("verdict", runs._verdict(path.parent))
+                row["reviews"].append(review)
+    return row
 
 
 def matching_live_runs(directory, first_call, last_call, session, exclude=()):
@@ -316,8 +329,30 @@ def _fmt_tokens(n):
     return f"{n / 1e6:.1f}M" if n >= 1e6 else cost._fmt_k(n)
 
 
+def _rejection_prompts(rows):
+    marker = "The user provided the following reason for the rejection:"
+    for row in rows:
+        if row.get("type") != "user" or row.get("isSidechain"):
+            continue
+        message = row.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if (not isinstance(block, dict) or block.get("type") != "tool_result"
+                    or block.get("is_error") is not True):
+                continue
+            text = block.get("content")
+            if isinstance(text, list):
+                text = "\n".join(b["text"] for b in text if isinstance(b, dict)
+                                 and b.get("type") == "text" and isinstance(b.get("text"), str))
+            if isinstance(text, str) and text.partition(marker)[2].strip():
+                yield {"timestamp": row.get("timestamp"), "rejection": True}
+                break
+
+
 def prompt_contexts(path, calls=None):
-    """Context of the first main call answering each typed prompt, plus guard events."""
+    """Context answering typed prompts and rejection reasons, plus typed-prompt guard events."""
     rows = rate.json_rows(path)
     prompt_rows = list(rate._typed_prompt_rows(rows))
     prompts = [prompt for _, prompt in prompt_rows]
@@ -329,8 +364,11 @@ def prompt_contexts(path, calls=None):
                          key=lambda pair: pair[0])
     call_times = [ts for ts, _ in timed_calls]
     prompt_times = [_aware(p["timestamp"]) for p in prompts]
+    rejections = list(_rejection_prompts(rows))
     entries = []
-    for prompt, ts in zip(prompts, prompt_times):
+    # Keep typed prompts first so guard indices cannot refer to a rejection.
+    for prompt in prompts + rejections:
+        ts = _aware(prompt["timestamp"])
         # Legacy untimed prompts remain visible, using the first available call.
         index = bisect_left(call_times, ts) if ts is not None else 0
         call = timed_calls[min(index, len(timed_calls) - 1)][1] if timed_calls else \
@@ -338,6 +376,8 @@ def prompt_contexts(path, calls=None):
         entries.append({"timestamp": prompt["timestamp"],
                         "context": sum(call[k] for k in ("input", "cache_read", "cache_creation"))
                         if call else 0, "guard": None})
+        if prompt.get("rejection"):
+            entries[-1]["rejection"] = True
     for row_index, row in enumerate(rows):
         if row.get("isSidechain"):
             continue
@@ -378,12 +418,16 @@ def prompt_contexts(path, calls=None):
                           if ts is not None and ts >= event_time), None)
         if index is not None and entries[index]["guard"] != "idle_hold":
             entries[index]["guard"] = guard
+    if rejections:
+        entries.sort(key=lambda p: _aware(p["timestamp"]) or datetime.min.replace(tzinfo=timezone.utc))
     return entries
 
 
 def render_prompt_contexts(prompts):
     tags = {None: "", "nudge": " (guard)", "idle_hold": " (idle hold)"}
-    contexts = ", ".join(cost._fmt_k(p["context"]) + tags[p["guard"]] for p in prompts)
+    contexts = ", ".join(cost._fmt_k(p["context"])
+                         + (" (rejection)" if p.get("rejection") else tags[p["guard"]])
+                         for p in prompts)
     return f"Context at typed prompts: {contexts or 'none'}."
 
 
@@ -410,16 +454,24 @@ def render_skeleton(row, summary, runs, asks=()):
             agent = r.get("agent", "?")
             model = r.get("model", "?")
             n_rounds = len(r.get("rounds") or [])
-            if r.get("live"):
+            working_tree = (r.get("kind") == "working-tree"
+                            or ("kind" not in r and agent == "claude" and not n_rounds
+                                and r.get("reviews")))
+            if working_tree:
+                reviews = ", ".join(f"{rv.get('agent', '?')} {rv.get('model', '?')} "
+                                    f"{rv.get('verdict') or 'no verdict'}"
+                                    for rv in r.get("reviews") or [])
+                line = f"- `{r.get('run', '?')}`: review (working-tree): {reviews or 'no reviews'}"
+            elif r.get("live"):
                 line = (f"- `{r.get('run', '?')}`: {agent} {model}, {n_rounds} round(s)"
-                        + (f", verify {r['verify']}" if r.get("verify") is not None else "")
-                        + "; live: not applied or cleaned up")
+                        + (f", verify {r['verify']}" if r.get("verify") is not None else ""))
             else:
                 line = (f"- `{r.get('run', '?')}`: {agent} {model}, "
-                        f"{n_rounds} round(s), {r.get('outcome') or 'unknown'}"
-                        + (f", launched in session `{r['session'][:8]}`"
-                           if r.get("session") and not _same_session(r["session"], row["session"])
-                           else ""))
+                        f"{n_rounds} round(s), {r.get('outcome') or 'unknown'}")
+            if r.get("live"):
+                line += "; live: not applied or cleaned up"
+            elif r.get("session") and not _same_session(r["session"], row["session"]):
+                line += f", launched in session `{r['session'][:8]}`"
             lines.append(line)
         run_text = "\n" + "\n".join(lines)
     ask_text = f"{len(asks)} ({', '.join(a.get('agent') or '?' for a in asks)})" if asks else "none"
