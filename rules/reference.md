@@ -14,10 +14,10 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - **Sweeps:** one "check everything" request ran from 110k to 240k within a single prompt, with about 30 image reads.
 - **Hand-paste loops:** a user posting prepared texts one by one is a new item. Make "`/clear`, then `/next`" an option in the picker that closes the first answer.
 - **Handoff size:** two 29–31 KB handoffs, mostly done-item history, cost ~8k tokens per resume.
-- **Gates in handoffs:** list each gate with its interpreter and env, plus a one-line scratch-venv recipe; a file regenerated with provenance names the env that produced it (two sessions lost 6 calls and a 5 min rerun between them). A full `pytest -x` once stopped at test 188 of 531 on a known failure, so give the ready `--deselect` flag. `delegate` is on PATH only after `install.sh --bin`, so write its full path.
+- **Gates in handoffs:** list each gate with its interpreter and env, plus a one-line scratch-venv recipe; a file regenerated with provenance names the env that produced it (two sessions lost 6 calls and a 5 min rerun between them). A full `pytest -x` once stopped at test 188 of 531 on a known failure, so give the ready `--deselect` flag. `delegate` is on PATH only after `install.sh --bin`, so write its full path. Run each gate command once before writing it in: a `--dump` gate broke when its data moved.
 - **Cross-repo notes** go into the target repo's `HANDOFF.md`. Before editing another repo's handoff, check its mtime, re-read the anchor and replace one line.
 - **Handoff steps as hypotheses:** mark a step taken from an external audit "from audit, unverified against neighbouring rules". A handoff's "watch for X" is a hypothesis: run the generic check, not only X.
-- **Facts in handoffs:** each later item names its source (file:line, or date and who asked); a number names the command that measured it (an unmeasured "158 buys, EUR 45.2k" cost 4 calls); a user-side prerequisite (bot, account, connector) says whether it exists yet, not only the plan to use it.
+- **Facts in handoffs:** each later item names its source (file:line, or date and who asked); a number names the command that measured it, with any non-default parameter (difflib `autojunk=False`) (an unmeasured "158 buys, EUR 45.2k" cost 4 calls); a user-side prerequisite (bot, account, connector) says whether it exists yet, not only the plan to use it.
 - **No handoff:** a "continue from the handoff" that finds no file costs the next session several calls of transcript digging.
 - **Status lines:** all 9 harness status requests in three sessions (2026-10-13/14) came at the points the session rules name: runs of calls without text, unexpected results, calls that may run over a minute.
 - **Destructive git steps** run in their own Bash call: bundled with other edits, the auto-mode classifier denied the whole call.
@@ -28,6 +28,7 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - Ask an unstated quantity that shapes the plan (session length, audience, budget) before writing, not as an "assumption to confirm" afterwards: one outline revision took 15 edits.
 - "Other" in a picker came back as a bare selection with no text, so an option that needs typed input fails.
 - When the user names the consumer of the output (a bot, a person, a tool), offer an option where that consumer does the work. A picker that asks for a user-side test result offers "not set up yet: help set it up" and says what in pasted output would decide it.
+- **Reading first:** when the next step is "the user reads X", ask whether the reading is done before content picks or git approval; a push picker came back "still reading".
 - **Vague reports:** when the first check shows nothing wrong, show it and ask what is missing before widening the test matrix. Ten calls across browsers, widths and themes once failed to reproduce a complaint that was about taste.
 
 ## Delegation evidence
@@ -55,6 +56,8 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - When a note qualifies a headline value (a source's real date, say), carry it into every doc that states the value. Check public claims against what is deployed, not the checkout.
 - Doc examples with invented content use fictional IDs, never a real record's.
 - Never write an identifier (GND, VIAF, ISNI, Wikidata QID, DOI) from memory; look it up. Don't offer one, or a name or publisher, from memory for the user to confirm either: a from-memory publisher got a "yes", and only a later search kept it out of the file. Dates and names inherited from an import or a conversion are claims to check too.
+- **Source vs fact:** a substring match proves the source says X, not that X holds; go through a fact sheet's caveats before review. A claim that joins two sources gets its own check, and claims added in a fix round get the claim check again.
+- **Layout fit:** probe the changed block's own line count, with a variant known to change it as the positive control.
 - Tally categorical values by exact match: a substring test (`'eu' in flag`) counted 252 where the source said 65.
 - An editable dependency's version: `git -C <lib> log -3`, not `importlib.metadata`.
 
@@ -89,4 +92,5 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - Trim (`magick -trim`) and downscale renders and crops to ≤1000 px wide before reading them.
 - Generated reports with wide tables: grep the `##` outline and read one section through `cut -c1-300`; a 240-line read of a 121 KB report cost ~25k. Send whole reads to `delegate ask`. For a diff that moves a large block, read `git diff --stat`, then the new functions by line range.
 - Dump catalogues with only the fields you need; read vendor PDFs by grepping for the section. To compare long headers with a peer file, tally with `grep -c` first.
+- **Transcripts:** picker answers and rejection reasons live in `tool_result` blocks, not typed prompts. `grep -c` counts lines, so on a one-line page count with `grep -o … | wc -l`.
 - A file over ~1.5k lines can also go to a subagent that returns findings: one 2.8k-line read carried ~40k tokens through 70 later calls, ~14% of that session's cache reads.

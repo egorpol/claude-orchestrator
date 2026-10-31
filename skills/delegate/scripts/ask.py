@@ -55,6 +55,7 @@ def build_prompt(question, max_words, files):
     lines = [
         f"Answer in at most {max_words} words.",
         "Cite path:line for claims.",
+        "Cite tracked files or the question itself, not working notes such as HANDOFF.md that may change while you answer.",
         'Say "not found" rather than guess.',
         "This is read-only; do not modify, create or delete any files.",
     ]

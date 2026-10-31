@@ -1,14 +1,14 @@
 ---
 name: field-report
 description: Write a field report on the current Claude Code session into the claude-orchestrator feedback folder. `delegate report` fills in the session's cost, quota and delegate runs; Claude then writes the flow, what worked, friction and suggestions. Use only when the user asks for a field report, a session log or feedback for claude-orchestrator.
-argument-hint: "[topic]"
+argument-hint: "[topic] [--session <id>]"
 ---
 
 # Field report
 
 A field report records what one orchestrator session did and what it cost, so that lessons can be folded into the claude-orchestrator rules, `delegate` SKILL.md, CLI and hook later. Reports go to `feedback/` in the claude-orchestrator checkout. That folder is gitignored and stays local.
 
-1. **Topic:** use `$ARGUMENTS` as a kebab-case slug of 2–5 words. If it is empty, derive one from the session's main item.
+1. **Topic:** use `$ARGUMENTS` as a kebab-case slug of 2–5 words. If it is empty, derive one from the session's main item. If it holds `--session <id>`, take the slug from the rest and report on that session (see "An earlier session" below); the closing picker offers this after `/clear`, so the report doesn't resume a large context.
 2. **Numbers:** from the project root, run
 
    ```bash
@@ -16,7 +16,7 @@ A field report records what one orchestrator session did and what it cost, so th
    ```
 
    It reads this session's transcript (via `CLAUDE_CODE_SESSION_ID`) and:
-   - writes the skeleton `feedback/<date>-<project>-<topic>.md`, with calls, tokens, context, cost units, idle rebuilds, the context at each typed prompt (tagged where the context guard nudged or held it), quota and delegate runs already filled in;
+   - writes the skeleton `feedback/<date>-<project>-<topic>.md`, with calls, tokens, context, cost units, idle rebuilds, the context at each typed prompt (tagged where the context guard nudged or held it) and at each tool rejection with a typed reason (tagged `(rejection)`), quota and delegate runs already filled in;
    - upserts the session's row in `feedback/token_usage.jsonl`;
    - copies this session's delegate runs into `feedback/runs.jsonl`.
 

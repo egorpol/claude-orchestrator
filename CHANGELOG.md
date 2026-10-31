@@ -14,8 +14,15 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - Session-log start rows record `checkout` (HEAD of the hook's own checkout; null unless git's top level is that folder), `dirty` (whether `git status --porcelain` lists any change, untracked files included), `context_sha256` (SHA-256 of the injected context without the spare-pool line) and `spare` (that line).
 - `hooks/secret-guard.py` asks before `delegate launch --unsandboxed` and before a `followup` of a run launched that way, since followups reuse the stored flag; it also asks for subagents and in vanilla sessions. `SANDBOX_GUARD_DISABLE=1` turns this check off.
 
+- `delegate report` lists tool rejections that carry a typed reason in "Context at typed prompts", tagged `(rejection)`: such replies are `tool_result` blocks, not typed prompts.
+- `/field-report --session <id>` reports on an earlier session; the closing picker offers it after `/clear` above ~100k context.
+- Run-log rows carry `kind` (`working-tree` for `review --working-tree`).
+
 ### Changed
 
+- `delegate report` shows a working-tree review as `review (working-tree): <agent> <model> <verdict>, …` instead of `claude None, 0 round(s)`; older run-log rows without `kind` are recognised by their shape.
+- `delegate ask` tells the agents to cite tracked files or the question, not working notes such as `HANDOFF.md`.
+- Rules from four field reports (2026-10-30 to 10-31): the closing picker's field-report options above ~100k (`rules/hygiene.md`); run a gate command before writing it into a handoff, measured numbers carry their non-default parameters, ask whether reading is done before picks, a substring match proves what a source says rather than the fact, picker answers live in `tool_result` blocks (`rules/reference.md`); `/next` flags a handoff found one folder down; SKILL.md's recipe for prose and fact reviews (numbered source dump via `--link`, known doubts in the brief).
 - The survey's last two roadmap ideas are closed (`docs/related-projects.md`): loop cost scoring as covered by the measured per-round pool costs in `delegate quota` and `route`, and pre-launch approval policies by the hook's unsandboxed check.
 
 ## [0.2.0] - 2026-10-30

@@ -4,6 +4,7 @@ Facts tested live, dated, so a reader can tell what may have changed since.
 
 ## 2026-10-31
 
+- **A tool rejection with a typed reason** (all 477 local transcripts): Claude Code records it as a `tool_result` block with `is_error: true` in a non-sidechain `user` row, reading "The user doesn't want to proceed with this tool use. …" and then "The user provided the following reason for the rejection:" with the reason. Two such rows exist, in two sessions. Three more `tool_result` blocks contain the sentence only because a file read quoted it (`is_error` false or absent), so `delegate report` requires `is_error: true` and a non-empty reason.
 - **The preregistration's early-look guard on the real session log** (`delegate prereg` from run `prereg-analysis`, about 1.5 h after T0). `delegate prereg` printed counts only: 4 drawn sessions in the window, none rated, close provisional at 2026-11-30, freeze 2026-12-07. `delegate prereg --outcomes` exited 1 with "freeze not yet known: the close is provisional" and printed no USD or finished line. `delegate cost --by-mode` showed 138 drawn sessions, the latest starting at 17:05:10 UTC on 10-26, and held back 230 period-2 draws (from 17:20:51 UTC). A local checker with its own code, sharing none with `prereg.py`, matched the CLI on a fake log of 49 window sessions with 0 failures.
 
 ## 2026-10-30

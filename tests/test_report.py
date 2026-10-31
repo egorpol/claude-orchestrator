@@ -35,6 +35,11 @@ def typed_prompt(timestamp, text="do the work", **overrides):
     return {"type": "user", "timestamp": timestamp, "message": {"content": text}, **overrides}
 
 
+def tool_rejection(timestamp, content, **overrides):
+    return typed_prompt(timestamp, [{"type": "tool_result", "is_error": True,
+                                     "content": content}], **overrides)
+
+
 def queued_prompt(timestamp, kind="human", mode="prompt"):
     return {"type": "attachment", "timestamp": timestamp, "isSidechain": False,
             "attachment": {"type": "queued_command", "prompt": "queued work", "commandMode": mode,
@@ -202,6 +207,70 @@ class TestReport(unittest.TestCase):
         self.assertEqual(json.loads(out)["row"]["prompts"], [
             {"timestamp": timestamp, "context": 7007, "guard": None},
         ])
+
+    def test_rejection_contexts_in_timestamp_order(self):
+        prompt = typed_prompt("2026-10-10T20:59:00Z")
+        self.write_log(self.transcript, [prompt, *self.calls])
+        self.assertEqual(self.invoke()[0], 0)
+        before = self.skeleton().read_text(encoding="utf-8")
+        marker = "The user provided the following reason for the rejection:"
+        self.write_log(self.transcript, [
+            prompt, self.calls[0],
+            tool_rejection("2026-10-10T22:59:00Z", [
+                {"type": "text", "text": marker}, {"type": "text", "text": "Check the diff first."},
+            ]),
+            tool_rejection("2026-10-10T21:59:00Z", "Tool rejected.\n" + marker + "\nRead the brief."),
+            *self.calls[1:],
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+            {"timestamp": "2026-10-10T21:59:00Z", "context": 2055, "guard": None, "rejection": True},
+            {"timestamp": "2026-10-10T22:59:00Z", "context": 7007, "guard": None, "rejection": True},
+        ])
+        self.assertEqual(len(report.rate.typed_prompts(report.rate.json_rows(self.transcript))), 1)
+        self.assertEqual(self.invoke("--force")[0], 0)
+        self.assertEqual(self.skeleton().read_text(encoding="utf-8"), before.replace(
+            "Context at typed prompts: 1201k.",
+            "Context at typed prompts: 1201k, 2.1k (rejection), 7.0k (rejection)."))
+
+    def test_rejections_without_typed_reason_are_ignored(self):
+        marker = "The user provided the following reason for the rejection:"
+        for content in ("Tool rejected.", marker + " \n\t", [
+            {"type": "text", "text": marker}, {"type": "text", "text": " \n"},
+        ]):
+            with self.subTest(content=content):
+                self.write_log(self.transcript, [
+                    tool_rejection("2026-10-10T20:59:00Z", content), *self.calls,
+                ])
+                self.assertEqual(report.prompt_contexts(self.transcript), [])
+
+    def test_sidechain_rejection_and_non_error_tool_result_are_ignored(self):
+        content = "The user provided the following reason for the rejection: read the brief"
+        non_error = tool_rejection("2026-10-10T20:59:00Z", content)
+        non_error["message"]["content"][0]["is_error"] = False
+        self.write_log(self.transcript, [
+            tool_rejection("2026-10-10T20:59:00Z", content, isSidechain=True), non_error, *self.calls,
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [])
+
+    def test_rejection_does_not_take_guard_tags(self):
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+            tool_rejection("2026-10-10T21:01:00Z",
+                           "The user provided the following reason for the rejection: inspect first"),
+            guard_event("2026-10-10T21:01:00.030Z", "nudge"),
+            guard_event("2026-10-10T21:30:00Z", "idle_hold"), self.calls[1],
+            typed_prompt("2026-10-10T22:59:00Z"), self.calls[2],
+        ])
+        prompts = report.prompt_contexts(self.transcript)
+        self.assertEqual(prompts, [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+            {"timestamp": "2026-10-10T21:01:00Z", "context": 2055, "guard": None, "rejection": True},
+            {"timestamp": "2026-10-10T22:59:00Z", "context": 7007, "guard": "idle_hold"},
+        ])
+        self.assertEqual(report.render_prompt_contexts(prompts),
+                         "Context at typed prompts: 1201k, 2.1k (rejection), 7.0k (idle hold).")
+        self.assertEqual(len(report.rate.typed_prompts(report.rate.json_rows(self.transcript))), 2)
 
     def test_sidechain_guard_events_are_ignored(self):
         self.write_log(self.transcript, [
@@ -487,6 +556,74 @@ class TestReport(unittest.TestCase):
                 "agent": "cursor", "model": "auto", "n": 1,
             }), encoding="utf-8")
         return root
+
+    def test_working_tree_review_run_lines(self):
+        self.assertEqual(self.invoke()[0], 0)
+        before = self.skeleton().read_text(encoding="utf-8")
+        reviews = [{"agent": "codex", "model": "gpt-6.1-sol", "verdict": "CHANGES REQUESTED"},
+                   {"agent": "cursor", "model": "auto", "verdict": "CHANGES REQUESTED"}]
+
+        def run(name, **overrides):
+            return {"run": name, "ts": "2026-10-10T21:00:00Z", "repo": "toy",
+                    "agent": "claude", "model": None, "rounds": [], "outcome": "reviewed",
+                    "reviews": reviews, **overrides}
+
+        rows = [run("explicit", kind="working-tree"), run("legacy", session=OTHER_SESSION),
+                run("no-verdict", kind="working-tree", reviews=[
+                    {"agent": "codex", "model": "gpt-test", "verdict": None},
+                    {"agent": "cursor", "model": "auto"},
+                ]),
+                run("empty", kind="working-tree", reviews=[]),
+                run("codex", agent="codex", model="gpt-test", reviews=reviews[:1]),
+                run("cursor", agent="cursor", model="auto", reviews=reviews[:1]),
+                run("other-kind", kind="other"), run("no-reviews", reviews=[]),
+                run("with-rounds", rounds=[{"n": 1}])]
+        self.write_log(self.log, rows)
+        self.assertEqual(self.invoke("--force")[0], 0)
+        review_text = "codex gpt-6.1-sol CHANGES REQUESTED, cursor auto CHANGES REQUESTED"
+        expected = [
+            f"- `explicit`: review (working-tree): {review_text}",
+            f"- `legacy`: review (working-tree): {review_text}, launched in session `aaaaaaaa`",
+            "- `no-verdict`: review (working-tree): codex gpt-test no verdict, cursor auto no verdict",
+            "- `empty`: review (working-tree): no reviews",
+            "- `codex`: codex gpt-test, 0 round(s), reviewed",
+            "- `cursor`: cursor auto, 0 round(s), reviewed",
+            "- `other-kind`: claude None, 0 round(s), reviewed",
+            "- `no-reviews`: claude None, 0 round(s), reviewed",
+            "- `with-rounds`: claude None, 1 round(s), reviewed",
+        ]
+        self.assertEqual(self.skeleton().read_text(encoding="utf-8"), before.replace(
+            "Delegate runs: none.", "Delegate runs: \n" + "\n".join(expected) + "."))
+
+    def test_live_working_tree_review_run_lines(self):
+        self.assertEqual(self.invoke()[0], 0)
+        before = self.skeleton().read_text(encoding="utf-8")
+        storage = self.root / "live-runs"
+        root = self._write_live_run(storage, "toy", "live-review", {
+            "kind": "working-tree", "agent": "claude", "model": None, "rounds": 0,
+            "session": OTHER_SESSION, "repo": str(self.repo),
+        }, review_started="2026-10-10T21:30:00Z")
+        for n, agent, model, verdict in ((10, "cursor", "auto", "APPROVE"),
+                                          (2, "codex", "gpt-test", "CHANGES REQUESTED")):
+            job = root / f"review-{n}"
+            job.mkdir()
+            (job / "meta.json").write_text(json.dumps({"agent": agent, "model": model}),
+                                            encoding="utf-8")
+            (job / "last-message.md").write_text(f"Verdict: {verdict}\n", encoding="utf-8")
+        self._write_live_run(storage, "toy", "empty-review", {
+            "kind": "working-tree", "agent": "claude", "rounds": 0,
+            "session": SESSION, "repo": str(self.repo),
+        })
+        with mock.patch("runs.RUNS_ROOT", storage):
+            self.assertEqual(self.invoke("--force")[0], 0)
+        expected = (
+            "Delegate runs: \n"
+            "- `empty-review`: review (working-tree): no reviews; live: not applied or cleaned up\n"
+            "- `live-review`: review (working-tree): cursor auto no verdict, "
+            "codex gpt-test CHANGES REQUESTED, cursor auto APPROVE; live: not applied or cleaned up.")
+        self.assertEqual(self.skeleton().read_text(encoding="utf-8"),
+                         before.replace("Delegate runs: none.", expected))
+        self.assertEqual((self.feedback / "runs.jsonl").read_bytes(), b"")
 
     def test_live_runs_in_skeleton_not_copied_to_jsonl(self):
         """Live runs this session owns or reviewed appear in the skeleton; not in runs.jsonl."""

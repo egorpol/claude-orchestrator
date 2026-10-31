@@ -71,8 +71,10 @@ Numbers come from `delegate cost --session` on each session's transcript and inc
 | 2026-10-28 | 942b7366 | excluded | 47 | 111k | 0.69M | 14.7k | 0 |
 | 2026-10-30 | 5b7b3108 | orchestrator | 59 | 158k | 1.15M | 19.5k | 0 |
 | 2026-10-30 | 1b3948cb | orchestrator | 25 | 111k | 0.49M | 19.7k | 0 |
+| 2026-10-30 | 11468922 | period 2 | 50 | 111k | 0.76M | 15.3k | 0 |
+| 2026-10-31 | dfb8b0e1 | period 2 | 41 | 156k | 1.20M | 29.2k | 20.6% |
 
-67 sessions, 5,038 calls, 135.0M cost units; idle rebuilds 9.9M (7.3%). The 66 sessions after the marathon averaged 23.4k units per call.
+69 sessions, 5,129 calls, 136.9M cost units; idle rebuilds 10.1M (7.4%). The 68 sessions after the marathon averaged 23.4k units per call.
 
 ## 2026-10-10
 
@@ -349,6 +351,23 @@ Each closed with `/field-report`; folded in on 2026-10-30 (`e626d06`). Numbers f
 - **A checker needs near misses and a working failure path.** A 16-case self-test still missed five false absolute-path hits; a release checker's planted failure raised a traceback before it could print FAIL. SKILL.md's acceptance guidance (`e626d06`) now asks for near misses, FAIL lines for missing elements, worst-case tests for stated bounds, and a `--self` mode when outputs do not exist yet. The recurring zsh traps also moved into `hygiene.md`: `=word`, unmatched globs and `$?` after a pipe. The preflight-warning scan found a real failed test behind a passing pipeline; `2c955f4` adds launch and log warnings.
 - **The CLI now shows the work and inputs the reports missed.** Reports missed live runs because only apply or cleanup logged them. `e626d06` lists launched or touched live runs in the skeleton without duplicating run-log rows, bounds Digest risks lines and reports a missing Digest. It names dirty main-tree paths in launch contracts and reviews after a reviewer rejected a correct uncommitted value. `b374591` adds `--include-uncommitted`; `3ff3747` refreshes stale `changes.patch` after each round. SKILL.md records the probed Codex `workspace-write` limit: `--link`ed paths are read-only inside its sandbox, so writes to them go to `--verify`.
 - **Not adopted.** The reported control-hook match on heredoc prose did not reproduce in 12 forms on the current tokenizer; positive controls fired. The blocked Bash call remains recorded with its cause unconfirmed. `delegate context` duplicates `cost --session latest`; reading it is now a rule. `review --attach` became the executed-output recipe in SKILL.md. Single-report ideas remain roadmap candidates: output harvesting, an ops-only session tag, a nudge near 100k before a skill load, flagging Cursor sub-agent deltas, and showing verify separately from running. These decisions were checked on 2026-10-30; the rule and recipe changes are in `e626d06`.
+
+## 2026-10-30 to 10-31: four sessions, three projects
+
+Each closed with `/field-report`; folded in on 2026-10-31. All four ran in period 2. Two started before the preregistration's T0 (2026-10-31 00:29:58 UTC) and get numbers here, with mode `period 2`. The other two started inside the confirmatory window: this section carries their lessons only, and their numbers wait for the freeze. Numbers from `delegate cost --session <id>`; both sessions ran on after their reports (46 and 36 calls then).
+
+| session | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---:|---:|---:|---:|---|---:|
+| 11468922, eu-pd-composers: award review round | 2 × `ask --agent both` | 50 | 111k | 0.76M | 15.3k | none | 62 |
+| dfb8b0e1, egorpol.github.io: Notes post drafted and claim-checked | `review --working-tree` (both vendors) | 41 | 156k | 1.20M | 29.2k | 494 min (20.6%) | 58 |
+
+- **Handoff gates and numbers went stale.** A handoff's figures gate (`--dump r020`) failed because that dump had left `data/` one session earlier. Viewer overlap figures in another handoff reproduced only with difflib `autojunk=False`, which the handoff didn't name. Re-measured, two facts were wrong: a path in a handoff and a comparison base in an earlier question. `rules/reference.md` now says to run each gate once before writing it in and to name non-default parameters.
+- **A numbered source dump made a prose review checkable.** `review --working-tree` with a 204 KB numbered dump `--link`ed from a gitignored folder: both vendors cited source lines and answered each of five named doubts, and found no wrong number. SKILL.md now has the recipe. The report skeleton printed that review as `claude None, 0 round(s)`; `delegate report` now prints `review (working-tree):` with each reviewer's verdict.
+- **A substring match proves what a source says, not that it holds.** 43 of 43 exact-substring claim checks passed, yet one claim matched README while `verified-behaviour.md` qualifies it, and a claim that joined two sources overreached (both reviewers flagged it). The fact sheet had listed the caveat. Now in `rules/reference.md`.
+- **Answers that don't arrive as typed prompts.** A push was rejected with "still reading" after content picks and git approval were asked together; the rejection's text held the session's main new request, which the report's "Context at typed prompts" missed. The report now lists rejections with a typed reason, tagged `(rejection)`. `grep -c` on a one-line page counted 1 card where `grep -o … | wc -l` counted 12.
+- **The closing picker's `/field-report` answer rebuilt the context.** dfb8b0e1's picker was answered after 494 min, rewriting 123k (20.6% of its cost units). Above ~100k the closing picker now also offers "type `/clear`, then `/field-report --session <id>`", and `/field-report` takes `--session`.
+- **Smaller fixes.** `delegate ask` tells the agents to cite tracked files or the question, after a Cursor answer cited `HANDOFF.md` line numbers that went stale while the file was being edited. `/next` says when it found the handoff one folder down (two reports) and offers to move it.
+- **Not adopted.** `cost --ctx` (`cost --session latest` already prints the context in 11 lines; the miss was not running it), `delegate handoff-check` and `delegate transcript-grep` (one report each), and a rule for release questions (covered by checking public claims against what is deployed).
 
 ## Still open
 
