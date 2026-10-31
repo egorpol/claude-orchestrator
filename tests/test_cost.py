@@ -900,6 +900,129 @@ class TestListPrice(unittest.TestCase):
         self.assertIn("list price: $0.00  (main $0.00, subagents $0.00; prices as of 2026-10-06)", text)
         self.assertIn("by model: (prices as of 2026-10-06; USD)", text)
 
+class TestUntilAndPreregCap(unittest.TestCase):
+    def setUp(self):
+        import prereg
+        self.prereg = prereg
+        tmp = tempfile.TemporaryDirectory(prefix="cost-prereg-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.session_log, self.run_log = self.root / "sessions", self.root / "runs"
+        self.run_log.write_text("")
+        env = mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": str(self.session_log),
+                                          "CLAUDE_DELEGATE_QUOTA_LOG": str(self.root / "quota")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def write(self, path, rows):
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def rows(self):
+        rows = []
+        for session, ts, usd in (("period1", "2026-10-26T17:20:50Z", 2),
+                                 ("period2", "2026-10-26T17:20:51Z", 999),
+                                 ("confirmatory", "2026-11-02T00:00:00Z", 999)):
+            rows += [{"event": "start", "session": session, "ts": ts, "mode": "orchestrator", "u": .1},
+                     {"event": "summary", "session": session, "transcript": "/missing", "calls": 1,
+                      "usd_list_price": usd}]
+        return rows
+
+    def invoke(self, *args, now=None):
+        out = io.StringIO()
+        now = now or self.prereg.T0
+        with redirect_stdout(out), mock.patch.object(self.prereg, "_now", return_value=now):
+            cost.main(["--log", str(self.run_log), *args])
+        return out.getvalue()
+
+    def test_until_exclusive_by_mode_first_start_and_combined_since(self):
+        rows = self.rows()
+        rows += [{"event": "start", "session": "period1", "ts": "2026-11-05T00:00:00Z", "u": None,
+                  "mode": "vanilla"}]
+        result = cost.by_mode(rows, [], until="2026-10-26T17:20:51Z")
+        self.assertEqual([s["session"] for s in result["sessions"]], ["period1"])
+        self.assertIn("until 2026-10-26T17:20:51Z", cost.render_by_mode(result))
+        result = cost.by_mode(rows, [], since="2026-10-26T17:20:51Z", until="2026-10-31T00:29:58Z")
+        self.assertEqual([s["session"] for s in result["sessions"]], ["period2"])
+        self.assertFalse(cost.by_mode(rows, [], since="2026-11-02T00:00:00Z",
+                                      until="2026-11-02T00:00:00Z")["sessions"])
+
+    def test_until_run_report_strict_ts_with_since_and_local_naive_dates(self):
+        rows = [_run_record(run=str(i), ts=ts) for i, ts in enumerate(("2026-10-26T17:20:50Z",
+                "2026-10-26T17:20:51Z", "2026-10-31T00:29:58Z"))]
+        rows.append(_run_record(run="missing", ts=None))
+        self.write(self.run_log, rows)
+        loaded = cost.load_run_log(self.run_log, since="2026-10-26T17:20:51Z", until="2026-10-31T00:29:58Z")
+        self.assertEqual([s["run"] for s in loaded], ["1"])
+        payload = json.loads(self.invoke("--since", "2026-10-26T17:20:51Z", "--until", "2026-10-31T00:29:58Z", "--json"))
+        self.assertEqual(payload["runs"], 1)
+        self.assertIn("until 2026-10-31T00:29:58Z", self.invoke("--until", "2026-10-31T00:29:58Z"))
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Europe/Berlin"
+            time.tzset()
+            for until in ("2026-10-27", "2026-10-27T00:00:00"):
+                self.assertEqual(cost.load_run_log(self.run_log, until=until), rows[:2])
+                self.assertEqual(len(cost.by_mode(self.rows(), [], until=until)["sessions"]), 2)
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+    def test_until_refused_for_calibrate_and_session(self):
+        for flags in (("--calibrate",), ("--session", "latest"), ("--session", "")):
+            with self.assertRaises(SystemExit) as exc:
+                self.invoke("--until", "2026-11-01", *flags)
+            self.assertIn("--until cannot", str(exc.exception))
+
+    def test_cap_experiment_default_explicit_symlink_period1_shown_period2_held_back(self):
+        import rate
+        self.write(self.session_log, self.rows())
+        link = self.root / "symlink"
+        link.symlink_to(self.session_log)
+        original = rate.attach_items
+        def check_attached(result, *args):
+            self.assertEqual([s["session"] for s in result["sessions"]], ["period1"])
+            return original(result, *args)
+        for flags in ([], ["--session-log", str(self.session_log)], ["--session-log", str(link)]):
+            with mock.patch.object(rate, "attach_items", side_effect=check_attached):
+                payload = json.loads(self.invoke("--by-mode", "--sessions", "--json", *flags))
+            self.assertEqual(payload["early_look"]["held_back"], 2)
+            self.assertEqual(payload["early_look"]["until"], "2026-10-26T17:20:51Z")
+            self.assertEqual(payload["arms"]["orchestrator"]["usd_list_price"], 2)
+            self.assertNotIn("999", json.dumps(payload))
+            text = self.invoke("--by-mode", "--sessions", *flags)
+            self.assertIn("2 drawn sessions held back", text)
+            self.assertNotIn("999", text)
+            self.assertNotIn("confirma", text)
+        payload = json.loads(self.invoke("--by-mode", "--json", "--until", "2026-10-26T17:20:51Z"))
+        self.assertEqual(payload["early_look"]["held_back"], 0)
+        payload = json.loads(self.invoke("--by-mode", "--json", "--until", "2026-10-26T17:20:50Z"))
+        self.assertEqual(payload["sessions"], [])
+        payload = json.loads(self.invoke("--by-mode", "--json", "--since", "2026-10-26T17:20:51Z",
+                                         "--until", "2026-10-31T00:29:58Z"))
+        self.assertEqual(payload["early_look"]["held_back"], 1)
+        self.assertEqual(payload["sessions"], [])
+
+    def test_no_cap_other_log_or_at_freeze_and_xdg_default_is_guarded(self):
+        self.write(self.session_log, self.rows())
+        other = self.root / "copy"
+        other.write_bytes(self.session_log.read_bytes())
+        payload = json.loads(self.invoke("--by-mode", "--session-log", str(other), "--json"))
+        self.assertNotIn("early_look", payload)
+        self.assertEqual(len(payload["sessions"]), 3)
+        payload = json.loads(self.invoke("--by-mode", "--json", now=self.prereg.HARD_CLOSE + self.prereg.FREEZE_DELAY))
+        self.assertNotIn("early_look", payload)
+        self.assertEqual(len(payload["sessions"]), 3)
+        cache_log = self.root / "claude-delegate/sessions.jsonl"
+        cache_log.parent.mkdir()
+        cache_log.write_bytes(self.session_log.read_bytes())
+        with mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": "", "XDG_CACHE_HOME": str(self.root)}):
+            payload = json.loads(self.invoke("--by-mode", "--session-log", str(cache_log), "--json"))
+        self.assertEqual(payload["early_look"]["held_back"], 2)
+
+
 
 if __name__ == "__main__":
     unittest.main()

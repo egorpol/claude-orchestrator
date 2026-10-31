@@ -15,6 +15,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
   - `checks.py`: launch warnings (a `--verify` pipe that masks the exit code, brief paths outside the worktree) and the failure-line check on verify logs that exited 0
   - `cost.py`, `ask.py`, `report.py`: session and run-log cost, read-only questions, field-report skeletons and JSONL rows
   - `rate.py`: `delegate rate`, the blinded item rater (rubric v2), and the item columns of `cost --by-mode`
+  - `prereg.py`: `delegate prereg`, counts-only progress and frozen confirmatory analysis, with the early-look guard
   - `calibrate.py`: `cost --calibrate`, pool points per USD and per token class from pairs of quota readings; `--save` writes the dated rates that `cost --by-mode` estimates Claude pool points with
   - `catalog.py`: load `catalog.json`, merge optional personal `catalog.local.json` (JSON Merge Patch + delegates-by-id)
 - `skills/delegate/scripts/catalog.json`: shipped delegates, pools, task weights, `min_quota_pct`, subagent penalty (personal tuning goes in `catalog.local.json`).

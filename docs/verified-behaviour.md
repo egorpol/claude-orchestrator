@@ -2,6 +2,10 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-10-31
+
+- **The preregistration's early-look guard on the real session log** (`delegate prereg` from run `prereg-analysis`, about 1.5 h after T0). `delegate prereg` printed counts only: 4 drawn sessions in the window, none rated, close provisional at 2026-11-30, freeze 2026-12-07. `delegate prereg --outcomes` exited 1 with "freeze not yet known: the close is provisional" and printed no USD or finished line. `delegate cost --by-mode` showed 138 drawn sessions, the latest starting at 17:05:10 UTC on 10-26, and held back 230 period-2 draws (from 17:20:51 UTC). A local checker with its own code, sharing none with `prereg.py`, matched the CLI on a fake log of 49 window sessions with 0 failures.
+
 ## 2026-10-30
 
 - **Cursor windows on KDE Plasma 6.8.1 / Wayland** (Claude Code extension 2.1.312): all 5 open Cursor windows belonged to one process (`VSCODE_PID`), so a pid can't pick a window. Captions read `<tab> - <workspace folder> - Cursor`. The extension's `claude` process starts with `CURSOR_WORKSPACE_LABEL=<workspace folder>` and `CLAUDE_CODE_ENTRYPOINT=claude-vscode` (`/proc/<pid>/environ`); hooks are its children.
