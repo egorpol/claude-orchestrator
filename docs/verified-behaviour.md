@@ -2,6 +2,13 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-11-02
+
+- **Max-plan pool calibration** (`delegate cost --calibrate --since 2026-10-26T17:01:00Z`, saved 23:37 UTC; quota readings from 10-26 17:01 to 11-02 23:36 UTC, openusage 0.26.3 at the save):
+  - On Max, a Claude pool point costs 4.6–4.9 times as many list-price USD as on Pro (2026-10-20): claude-5h 0.547 points per USD (p5–p95 0.53–0.57), so a full window is about $183, against 2.66 and $37.6; claude-7d 0.078 (0.06–0.10), about $1,276 a week, against 0.36 and $276. A full 5h window is about 14% of the week (Pro 13.5%).
+  - The claude-7d fit rests on 38 points risen over 843 pairs; its RMSE, 0.22, is at the whole-percent rounding floor (0.23). Cache reads and output correlate at r = 0.90, so the split between those classes is weakly identified (claude-7d output 2.3 per million tokens, p5–p95 0.0–4.3).
+  - 618 of the 1,633 Claude readings since 10-26 17:01 UTC lack the `usage_five_hour`/`usage_seven_day` metric in the openusage export, on every day of the span. Each one ends a pair, so they thin the fit rather than bridging gaps. They come more often when the pool is busy: the last complete reading before a missing one shows a median claude-5h use of 24%, against 11% before a complete one, and 17% of timer readings are missing, against 40–50% of those taken at session start, session end, launches and job ends.
+
 ## 2026-10-31
 
 - **A tool rejection with a typed reason** (all 477 local transcripts): Claude Code records it as a `tool_result` block with `is_error: true` in a non-sidechain `user` row, reading "The user doesn't want to proceed with this tool use. …" and then "The user provided the following reason for the rejection:" with the reason. Two such rows exist, in two sessions. Three more `tool_result` blocks contain the sentence only because a file read quoted it (`is_error` false or absent), so `delegate report` requires `is_error: true` and a non-empty reason.
