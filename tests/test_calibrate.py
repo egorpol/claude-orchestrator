@@ -1,7 +1,10 @@
 """Tests for calibrate.py: snapshot pairs, NNLS, Codex rollouts and `cost --calibrate`."""
+import errno
+import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -390,7 +393,7 @@ class TestCalibrate(unittest.TestCase):
     def test_cli_save(self):
         with tempfile.TemporaryDirectory() as tmp:
             log, projects, codex_home, _, _ = _synthetic(tmp)
-            path = Path(tmp) / "calibration.json"
+            path = Path(tmp) / "saved" / "calibration.json"
             env = {"CLAUDE_CONFIG_DIR": str(projects.parent), "CODEX_HOME": str(codex_home)}
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.dict(os.environ, env), redirect_stdout(out), redirect_stderr(err):
@@ -399,11 +402,12 @@ class TestCalibrate(unittest.TestCase):
             self.assertIn(f"saved to {path}: `cost --by-mode` now estimates Claude pool points at claude-5h 2.5,",
                           err.getvalue())
             out = io.StringIO()
+            empty = path.with_name("calibration-empty.json")
             with mock.patch.dict(os.environ, env), redirect_stdout(out):
                 cost.main(["--calibrate", "--quota-log", str(Path(tmp) / "none.jsonl"), "--save",
-                           "--calibration", str(path)])
+                           "--since", T0.isoformat(), "--calibration", str(empty)])
             self.assertIn("no Claude pool rate fitted, so `cost --by-mode` shows no estimates", out.getvalue())
-            self.assertEqual(calibrate.usd_rates(path)["pools"], {})
+            self.assertEqual(calibrate.usd_rates(empty)["pools"], {})
             # Without --calibration the fit lands next to the --quota-log given, not the default log.
             env["CLAUDE_DELEGATE_QUOTA_LOG"] = str(Path(tmp) / "default" / "quota.jsonl")
             with mock.patch.dict(os.environ, env), redirect_stdout(io.StringIO()):
@@ -413,6 +417,226 @@ class TestCalibrate(unittest.TestCase):
             with self.assertRaises(SystemExit) as exc:
                 cost.main(["--by-mode", "--save"])
             self.assertIn("--save needs --calibrate", str(exc.exception))
+
+
+class TestSaveGuards(unittest.TestCase):
+    BOUNDARY = "2026-10-26T17:01:00Z"
+    LATER = "2026-10-26T18:02:00+01:00"
+    SAVED_AT = "2026-10-27T12:00:00Z"
+    NOW = datetime(2026, 11, 3, 0, 30, tzinfo=timezone.utc)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        env = mock.patch.dict(os.environ, {
+            "CLAUDE_DELEGATE_QUOTA_LOG": str(self.root / "quota.jsonl"),
+            "CLAUDE_CONFIG_DIR": str(self.root / "claude"), "CODEX_HOME": str(self.root / "codex")})
+        env.start()
+        self.addCleanup(env.stop)
+        now = self.NOW
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.astimezone().replace(tzinfo=None)
+
+        clock = mock.patch.object(calibrate, "datetime", Clock)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def fit(self, name="calibration.json", since=None, pools=None):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"since": since, "saved_at": self.SAVED_AT, "pools": pools if pools is not None else [
+            {"pool": "claude-5h", "headline": {"unit": "usd", "per_unit": 2.5}}]}))
+        return path
+
+    def args(self, path, since=None, as_json=False):
+        return ["--calibrate", "--save", "--calibration", str(path)] + (
+            ["--since", since] if since is not None else []) + (["--json"] if as_json else [])
+
+    def refused(self, path, since=None, as_json=False, before_fit=True):
+        out, err = io.StringIO(), io.StringIO()
+        result = {"readings": 0, "quota_log": "fake.jsonl", "since": since, "pools": []}
+        with mock.patch.object(calibrate, "calibrate", return_value=result) as fit, \
+                redirect_stdout(out), redirect_stderr(err), self.assertRaises(SystemExit) as exc:
+            cost.main(self.args(path, since, as_json))
+        self.assertNotEqual(exc.exception.code, 0)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), "")  # sys.exit's message is printed by the CLI interpreter.
+        if before_fit:
+            fit.assert_not_called()
+        else:
+            fit.assert_called_once()
+        return str(exc.exception)
+
+    def test_existing_targets_refused_with_provenance_and_fresh_suggestion(self):
+        for kind in ("valid", "invalid", "empty", "directory", "fifo", "symlink", "dangling"):
+            with self.subTest(kind=kind):
+                path = self.root / kind / "calibration.json"
+                path.parent.mkdir()
+                if kind == "valid":
+                    self.fit(str(path.relative_to(self.root)), since=self.BOUNDARY)
+                elif kind in ("invalid", "empty"):
+                    path.write_bytes(b"invalid json" if kind == "invalid" else b"")
+                elif kind == "directory":
+                    path.mkdir()
+                elif kind == "fifo":
+                    os.mkfifo(path)
+                else:
+                    target = path.parent / "target.json"
+                    if kind == "symlink":
+                        self.fit(str(target.relative_to(self.root)), since=self.BOUNDARY)
+                    path.symlink_to(target.name)
+                planted = path.parent / "calibration-2026-11-03.json"
+                planted.write_text("occupied")
+                before = set(path.parent.iterdir())
+                content = path.read_bytes() if path.is_file() else None
+                link = os.readlink(path) if path.is_symlink() else None
+                message = self.refused(path)
+                self.assertIn(str(path), message)
+                if kind in ("valid", "symlink"):
+                    self.assertIn(self.BOUNDARY, message)
+                    self.assertIn(self.SAVED_AT, message)
+                else:
+                    self.assertIn("unreadable", message)
+                if content is not None:
+                    self.assertIn(hashlib.sha256(content).hexdigest(), message)
+                    self.assertEqual(path.read_bytes(), content)
+                if link is not None:
+                    self.assertEqual(os.readlink(path), link)
+                self.assertEqual(set(path.parent.iterdir()), before)
+                suggestion = path.parent / "calibration-2026-11-03-2.json"
+                self.assertFalse(os.path.lexists(suggestion))
+                self.assertIn(f"delegate cost --calibrate --since <D> --save --calibration {suggestion}", message)
+                self.assertIn("delete or rename", message)
+                self.assertIn("discovers every `calibration-*.json`", message)
+                self.assertIn("must be later than the latest", message)
+
+    def test_suggestion_skips_dangling_symlinks_and_preserves_since_argument(self):
+        path = self.fit()
+        (self.root / "calibration-2026-11-03.json").symlink_to("missing")
+        (self.root / "calibration-2026-11-03-2.json").mkdir()
+        message = self.refused(path, since=self.LATER)
+        self.assertIn(f"--since {self.LATER} --save --calibration {self.root / 'calibration-2026-11-03-3.json'}", message)
+
+    def test_none_boundary_blocks_a_second_unbounded_fit_before_fitting(self):
+        old = self.fit()
+        path = self.root / "calibration-new.json"
+        message = self.refused(path)
+        self.assertIn("None (earliest)", message)
+        self.assertIn(str(old), message)
+        self.assertFalse(path.exists())
+        self.assertEqual(list(self.root.glob("*.tmp")), [])
+
+    def test_equal_and_earlier_instants_refused_even_when_latest_has_no_rates(self):
+        self.fit("calibration-old.json")
+        for pools in (None, []):
+            latest = self.fit(since=self.BOUNDARY, pools=pools)
+            for since in (None, "2026-10-26T18:01:00+01:00", "2026-10-26T17:00:59Z"):
+                with self.subTest(pools=pools, since=since):
+                    path = self.root / "calibration-new.json"
+                    before = {p: p.read_bytes() for p in self.root.iterdir()}
+                    message = self.refused(path, since=since)
+                    self.assertIn("2026-10-26T17:01:00+00:00", message)
+                    self.assertIn(str(latest), message)
+                    self.assertEqual({p: p.read_bytes() for p in self.root.iterdir()}, before)
+
+    def test_invalid_files_do_not_block_a_first_unbounded_fit(self):
+        for text in ("invalid json", '[]', '{"pools": {}}', '{"since": "invalid", "pools": []}'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory(dir=self.root) as folder:
+                root = Path(folder)
+                (root / "calibration-broken.json").write_text(text)
+                path = root / "calibration.json"
+                with redirect_stdout(io.StringIO()):
+                    cost.main(self.args(path))
+                self.assertIsNone(json.loads(path.read_text())["since"])
+                fits, notes = calibrate.saved_fits(folder=root)
+                self.assertEqual([f["path"] for f in fits], [str(path)])
+                self.assertEqual(len(notes), 1)
+
+    def test_later_save_adds_a_fit_and_reports_closed_period_on_the_right_stream(self):
+        for as_json in (False, True):
+            with self.subTest(as_json=as_json), tempfile.TemporaryDirectory(dir=self.root) as folder:
+                old = self.fit(str(Path(folder).relative_to(self.root) / "calibration.json"), since=self.BOUNDARY)
+                before = old.read_bytes()
+                fits_before, _ = calibrate.saved_fits(folder=old.parent)
+                path = old.with_name("calibration-new.json")
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    cost.main(self.args(path, since=self.LATER, as_json=as_json))
+                fits, notes = calibrate.saved_fits(folder=path.parent)
+                self.assertEqual(len(fits), len(fits_before) + 1)
+                self.assertEqual(notes, [])
+                self.assertEqual(old.read_bytes(), before)
+                self.assertEqual(fits[0]["until"], fits[1]["from"])
+                stream = err.getvalue() if as_json else out.getvalue()
+                self.assertTrue(stream.endswith(" It ends calibration.json's period at 2026-10-26T17:02:00+00:00.\n"))
+                if as_json:
+                    self.assertEqual(json.loads(out.getvalue())["since"], self.LATER)
+                else:
+                    self.assertEqual(err.getvalue(), "")
+
+    def test_cli_refusal_exit_status_and_stderr_without_fit_output(self):
+        path = self.fit(since=self.BOUNDARY)
+        new = path.with_name("calibration-new.json")
+        for target in (path, new):
+            for as_json in (False, True):
+                with self.subTest(target=target.name, as_json=as_json):
+                    self.refused(target, as_json=as_json)
+                    run = subprocess.run([sys.executable, str(SCRIPTS / "delegate"), "cost",
+                                          *self.args(target, as_json=as_json)], capture_output=True, text=True)
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertEqual(run.stdout, "")
+                    self.assertIn("refusing to save", run.stderr)
+                    self.assertNotIn("readings in", run.stderr)
+
+    def test_racing_target_is_kept_and_temp_removed_for_link_and_fallback(self):
+        winner = json.dumps({"since": self.BOUNDARY, "saved_at": self.SAVED_AT, "pools": []}).encode()
+        for fallback in (False, True):
+            for as_json in (False, True):
+                with self.subTest(fallback=fallback, as_json=as_json):
+                    path = self.root / f"calibration-race-{fallback}-{as_json}.json"
+                    def link(tmp, target):
+                        self.assertTrue(Path(tmp).is_file())
+                        target.write_bytes(winner)
+                        if fallback:
+                            raise OSError(errno.EPERM, "hard links unavailable")
+                        raise FileExistsError(errno.EEXIST, "another save won")
+                    with mock.patch.object(calibrate.os, "link", side_effect=link):
+                        message = self.refused(path, since=self.LATER, as_json=as_json, before_fit=False)
+                    self.assertIn(hashlib.sha256(winner).hexdigest(), message)
+                    self.assertIn(self.BOUNDARY, message)
+                    self.assertIn(self.SAVED_AT, message)
+                    self.assertEqual(path.read_bytes(), winner)
+                    self.assertEqual(list(self.root.glob("*.tmp")), [])
+
+    def test_hard_link_fallback_writes_identical_bytes(self):
+        result = {"since": self.BOUNDARY, "saved_at": "old", "pools": [], "readings": 0}
+        expected = (json.dumps({**result, "saved_at": self.NOW.astimezone().isoformat(timespec="seconds")},
+                               indent=2) + "\n").encode("utf-8")
+        linked = self.root / "linked.json"
+        calibrate.save(result, linked)
+        fallback = self.root / "fallback.json"
+        with mock.patch.object(calibrate.os, "link", side_effect=OSError(errno.EPERM, "no hard links")):
+            calibrate.save(result, fallback)
+        self.assertEqual(linked.read_bytes(), expected)
+        self.assertEqual(fallback.read_bytes(), expected)
+        self.assertEqual(list(self.root.glob("*.tmp")), [])
+
+    def test_other_folder_ignores_default_fits(self):
+        default = self.fit(since=self.BOUNDARY)
+        before = default.read_bytes()
+        path = self.root / "other" / "calibration.json"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cost.main(self.args(path))
+        self.assertIsNone(json.loads(path.read_text())["since"])
+        self.assertEqual(default.read_bytes(), before)
+        self.assertNotIn("It ends", out.getvalue())
+        self.assertEqual([f["path"] for f in calibrate.saved_fits()[0]], [str(default)])
+        self.assertEqual(calibrate.saved_fits(self.root / "quota.jsonl"), calibrate.saved_fits(folder=self.root))
 
 
 if __name__ == "__main__":

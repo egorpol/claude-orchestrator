@@ -8,16 +8,21 @@ a pair is regressed on the tokens of every call made in it (all Claude Code
 transcripts, subagents and scratch projects included; Codex pools on
 `~/.codex` rollouts) with non-negative least squares. Claude pools also get a
 one-column fit on list-price USD, the stable headline; classes with too little
-volume to fit are carried at list price times that fit. `--save` stores the
-fit with its date; `cost --by-mode` estimates each session's Claude pool
-points from its list-price USD with the saved rates.
+volume to fit are carried at list price times that fit. `--save` adds a new
+file without overwriting a saved fit, with a strictly later `since` when
+fits already exist in that folder. `cost --by-mode` estimates each session's
+Claude pool points with the fit in force at its first start; adding a later
+fit ends the preceding fit's period at the new boundary.
 """
 import bisect
+import hashlib
 import json
 import math
 import os
 import random
+import shlex
 import sys
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -436,14 +441,15 @@ def saved_path(path=None, quota_log=None):
     return Path(path).expanduser() if path else quota.log_path(quota_log).parent / "calibration.json"
 
 
-def saved_fits(quota_log=None):
+def saved_fits(quota_log=None, *, folder=None):
     """Discover distinct saved fits, their first-start intervals, and diagnostic lines.
 
     A missing default file is normal. Invalid files define no interval, but a
     valid fit with no usable rates does: its plan must not inherit older rates.
     Byte copies prefer calibration.json; equal boundaries prefer the latest save.
+    `folder` overrides discovery next to the quota log, for saves to another folder.
     """
-    default = saved_path(None, quota_log)
+    default = Path(folder) / "calibration.json" if folder is not None else saved_path(None, quota_log)
     paths = ([default] if default.exists() or default.is_symlink() else [])
     paths += sorted(default.parent.glob("calibration-*.json"))
     seen, periods, notes = set(), {}, []
@@ -483,13 +489,75 @@ def saved_fits(quota_log=None):
     return fits, notes
 
 
-def save(result, path):
-    """Write the fit with its date, atomically; `--by-mode` keeps using it until the next save."""
+def _refuse_save(path, since, reason):
+    """Exit with a fresh filename suggestion, including occupied and dangling symlink names."""
+    stem = "calibration-" + datetime.now(timezone.utc).date().isoformat()
+    suggestion = path.parent / f"{stem}.json"
+    suffix = 2
+    while os.path.lexists(suggestion):
+        suggestion = path.parent / f"{stem}-{suffix}.json"
+        suffix += 1
+    cutoff = shlex.quote(since) if since else "<D>"
+    sys.exit(f"refusing to save calibration to {path}: {reason}\n"
+             f"Save under a new name: delegate cost --calibrate --since {cutoff} "
+             f"--save --calibration {shlex.quote(str(suggestion))}\n"
+             f"`cost --by-mode` discovers every `calibration-*.json` in {path.parent}, "
+             "so the new fit's `since` must be later than the latest one.")
+
+
+def _refuse_existing(path, since):
+    """Describe the file now at the target without changing it, even if it is not a fit."""
+    boundary = saved_at = digest = "unreadable"
+    try:
+        if path.is_file():  # do not block on an existing FIFO or read a device
+            content = path.read_bytes()
+            digest = hashlib.sha256(content).hexdigest()
+            saved = json.loads(content.decode("utf-8"))
+            if isinstance(saved, dict):
+                boundary = saved.get("since", "unreadable")
+                saved_at = saved.get("saved_at", "unreadable")
+    except (OSError, ValueError):
+        pass
+    _refuse_save(path, since, f"target already exists (since: {boundary}; saved_at: {saved_at}; "
+                 f"SHA-256: {digest}). Saved fits are never overwritten; "
+                 "delete or rename the target manually to replace it.")
+
+
+def _check_save(path, since, since_arg):
+    """Check the target and discovered boundaries before reading transcripts; return the last fit."""
+    if os.path.lexists(path):
+        _refuse_existing(path, since_arg)
+    fits, _ = saved_fits(folder=path.parent)
+    latest = fits[-1] if fits else None
+    if latest and (since is None or (latest["from"] is not None and since <= cost._row_ts(latest["from"]))):
+        _refuse_save(path, since_arg, f"--since must be strictly later than the latest boundary "
+                     f"{latest['from'] or 'None (earliest)'} set by {latest['path']}.")
+    return latest
+
+
+def save(result, path, since=None):
+    """Publish dated fit bytes without clobbering any existing target, including a racing save."""
+    if os.path.lexists(path):
+        _refuse_existing(path, since)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # per process: two saves must not share one
-    tmp.write_text(json.dumps({**result, "saved_at": datetime.now().astimezone().isoformat(timespec="seconds")},
-                              indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    content = json.dumps({**result, "saved_at": datetime.now().astimezone().isoformat(timespec="seconds")},
+                         indent=2) + "\n"
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            _refuse_existing(path, since)
+        except OSError:
+            try:
+                with path.open("x", encoding="utf-8") as stream:
+                    stream.write(content)
+            except FileExistsError:
+                _refuse_existing(path, since)
+    finally:
+        os.unlink(tmp)
 
 
 def usd_rates(path):
@@ -628,16 +696,22 @@ def render(result, as_json=False):
 
 
 def cmd_calibrate(a):
+    since = cost._since_dt(a.since)
+    if a.save:
+        path = saved_path(a.calibration, a.quota_log)
+        latest = _check_save(path, since, a.since)
     _, prices = cost.load_catalog_cost()
     codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
     result = calibrate(quota.log_path(a.quota_log), cost._claude_config_dir() / "projects", codex_home,
-                       prices, since=cost._since_dt(a.since))
+                       prices, since=since)
+    if a.save:
+        save(result, path, since=a.since)
     print(render(result, as_json=a.json))
     if a.save:
-        path = saved_path(a.calibration, a.quota_log)
-        save(result, path)
         rates = usd_rates(path)["pools"]
         fitted = ", ".join(f"{pool} {rate['per_usd']:.3g}" for pool, rate in rates.items())
+        closed = (f" It ends {Path(latest['path']).name}'s period at {since.astimezone(timezone.utc).isoformat()}."
+                  if latest else "")
         print(f"saved to {path}: " + (f"`cost --by-mode` now estimates Claude pool points at {fitted} per USD"
-                                      if fitted else "no Claude pool rate fitted, so `cost --by-mode` shows no estimates"),
+                                      if fitted else "no Claude pool rate fitted, so `cost --by-mode` shows no estimates") + closed,
               file=sys.stderr if a.json else sys.stdout)

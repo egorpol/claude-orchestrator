@@ -1009,9 +1009,9 @@ def _add_args(p):
                    help="fit pool points per token class and per list-price USD from quota reading pairs")
     p.add_argument("--quota-log", metavar="PATH", help="quota readings for --calibrate (default: delegate quota's log)")
     p.add_argument("--save", action="store_true",
-                   help="with --calibrate: store the fit with its date for --by-mode's estimated Claude pool points")
+                   help="with --calibrate: add a fit without overwriting; --since must be later than every saved fit in its folder")
     p.add_argument("--calibration", metavar="PATH",
-                   help="saved fit for --save and --by-mode (default: calibration.json next to the quota log)")
+                   help="new file for --save, or pinned fit for --by-mode (default: calibration.json next to the quota log)")
     p.set_defaults(fn=cmd_cost)
 
 

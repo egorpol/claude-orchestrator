@@ -20,6 +20,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- `delegate cost --calibrate --save` never overwrites a saved fit: before fitting, it refuses a target that exists and a `--since` that is missing or not later than every saved fit's in that folder, and suggests a new dated `calibration-*.json` name. It never replaces a file that appears meanwhile, so a racing save cannot clobber it, and the save line says which fit's period the new one ends.
 - `delegate cost --by-mode` estimates each session's Claude pool points with the fit in force at its first start (`calibration.json` and `calibration-*.json` beside it), shows Claude EST and READ per fit when there are several, and leaves out a READ that crosses a fit boundary; `--calibration P` still pins one fit.
 - `delegate report` shows a working-tree review as `review (working-tree): <agent> <model> <verdict>, …` instead of `claude None, 0 round(s)`; older run-log rows without `kind` are recognised by their shape.
 - `delegate ask` tells the agents to cite tracked files or the question, not working notes such as `HANDOFF.md`.
