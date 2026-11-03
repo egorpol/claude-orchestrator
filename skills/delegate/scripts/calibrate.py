@@ -436,6 +436,53 @@ def saved_path(path=None, quota_log=None):
     return Path(path).expanduser() if path else quota.log_path(quota_log).parent / "calibration.json"
 
 
+def saved_fits(quota_log=None):
+    """Discover distinct saved fits, their first-start intervals, and diagnostic lines.
+
+    A missing default file is normal. Invalid files define no interval, but a
+    valid fit with no usable rates does: its plan must not inherit older rates.
+    Byte copies prefer calibration.json; equal boundaries prefer the latest save.
+    """
+    default = saved_path(None, quota_log)
+    paths = ([default] if default.exists() or default.is_symlink() else [])
+    paths += sorted(default.parent.glob("calibration-*.json"))
+    seen, periods, notes = set(), {}, []
+    earliest = datetime.min.replace(tzinfo=timezone.utc)
+    for path in paths:
+        try:
+            content = path.read_bytes()
+            saved = json.loads(content.decode("utf-8"))
+            if not isinstance(saved, dict) or not isinstance(saved.get("pools"), list):
+                raise ValueError("no pools list")
+            fit = _usd_rates(saved, path)
+            boundary = cost._row_ts(fit["since"])
+            if fit["since"] is not None and boundary is None:
+                raise ValueError("invalid since timestamp")
+        except (OSError, ValueError) as exc:
+            notes.append(f"note: skipped calibration fit {path.name}: {exc}")
+            continue
+        if content in seen:
+            continue
+        seen.add(content)
+        if boundary in periods:
+            old = periods[boundary]
+            newer = (cost._row_ts(fit["saved_at"]) or earliest) > (cost._row_ts(old["saved_at"]) or earliest)
+            winner = fit if newer else old
+            notes.append(f"warning: calibration fits {Path(old['path']).name} and {path.name} have the same "
+                         f"since; using {Path(winner['path']).name} (newer saved_at wins)")
+            periods[boundary] = winner
+        else:
+            periods[boundary] = fit
+    ordered = sorted(periods, key=lambda ts: (ts is not None, ts or earliest))
+    fits = []
+    for i, boundary in enumerate(ordered):
+        until = ordered[i + 1] if i + 1 < len(ordered) else None
+        fits.append({**periods[boundary], "label": f"F{i + 1}",
+                     "from": boundary.astimezone(timezone.utc).isoformat() if boundary else None,
+                     "until": until.astimezone(timezone.utc).isoformat() if until else None})
+    return fits, notes
+
+
 def save(result, path):
     """Write the fit with its date, atomically; `--by-mode` keeps using it until the next save."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -447,11 +494,16 @@ def save(result, path):
 
 def usd_rates(path):
     """A saved fit's points per list-price USD by pool, with its date; `pools` is empty when none is usable."""
-    out = {"path": str(path), "saved_at": None, "span": None, "readings": None, "since": None, "pools": {}}
     try:
         saved = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return out
+        saved = None
+    return _usd_rates(saved, path)
+
+
+def _usd_rates(saved, path):
+    """Extract rates from one parsed snapshot, shared by pinned and discovered fits."""
+    out = {"path": str(path), "saved_at": None, "span": None, "readings": None, "since": None, "pools": {}}
     if not isinstance(saved, dict) or not isinstance(saved.get("pools"), list):
         return out
     span = saved.get("span")

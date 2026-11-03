@@ -20,6 +20,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- `delegate cost --by-mode` estimates each session's Claude pool points with the fit in force at its first start (`calibration.json` and `calibration-*.json` beside it), shows Claude EST and READ per fit when there are several, and leaves out a READ that crosses a fit boundary; `--calibration P` still pins one fit.
 - `delegate report` shows a working-tree review as `review (working-tree): <agent> <model> <verdict>, …` instead of `claude None, 0 round(s)`; older run-log rows without `kind` are recognised by their shape.
 - `delegate ask` tells the agents to cite tracked files or the question, not working notes such as `HANDOFF.md`.
 - Rules from four field reports (2026-10-30 to 10-31): the closing picker's field-report options above ~100k (`rules/hygiene.md`); run a gate command before writing it into a handoff, measured numbers carry their non-default parameters, ask whether reading is done before picks, a substring match proves what a source says rather than the fact, picker answers live in `tool_result` blocks (`rules/reference.md`); `/next` flags a handoff found one folder down; SKILL.md's recipe for prose and fact reviews (numbered source dump via `--link`, known doubts in the brief).

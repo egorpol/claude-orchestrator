@@ -440,6 +440,17 @@ class SessionModeTests(unittest.TestCase):
         }, now)
         with mock.patch.dict(os.environ, {"CLAUDE_SESSION_RULES_DIR": str(ROOT / "rules")}):
             text = SESSION_MODE.session_context("orchestrator", None)
+        # Real sessions load rules from the main checkout, whose path sets the byte budget.
+        try:
+            common = subprocess.run(["git", "-C", str(ROOT), "rev-parse",
+                                     "--path-format=absolute", "--git-common-dir"],
+                                    capture_output=True, text=True, check=False)
+        except OSError:
+            pass
+        else:
+            common_dir = Path(common.stdout.strip())
+            if common.returncode == 0 and common_dir.name == ".git":
+                text = text.replace(str(ROOT), str(common_dir.parent))
         self.assertIn("Codex 5h 100% left", spare)
         self.assertLessEqual(len((text + "\n\n" + spare).encode()), 7925)
 

@@ -723,6 +723,275 @@ class TestByMode(unittest.TestCase):
         self.assertNotIn("arms", payload)
 
 
+class TestByModeFits(unittest.TestCase):
+    T = "2026-10-26T17:01:00Z"
+    BEFORE = "2026-10-26T17:00:59Z"
+    AFTER = "2026-10-26T17:02:00Z"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.session_log = self.root / "sessions.jsonl"
+        self.run_log = self.root / "runs.jsonl"
+        self.run_log.write_text("")
+        self.quota_log = self.root / "quota.jsonl"
+        env = mock.patch.dict(os.environ, {"CLAUDE_DELEGATE_QUOTA_LOG": str(self.quota_log)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def fit(self, name="calibration.json", since=None, rates=(2.0, 0.5), **fields):
+        path = self.root / name
+        saved = {"since": since, "saved_at": "2026-10-27T12:00:00Z",
+                 "span": ["2026-10-20T08:00:00Z", "2026-10-27T09:00:00Z"],
+                 "readings": 40, "pools": [
+                     {"pool": pool, "headline": {"unit": "usd", "per_unit": rate}}
+                     for pool, rate in zip(cost.ESTIMATED_POOLS, rates)], **fields}
+        path.write_text(json.dumps(saved))
+        return path
+
+    def two_fits(self, **fields):
+        self.fit("calibration-old.json")
+        self.fit(since=self.T, rates=(0.4, 0.1), **fields)
+
+    def session(self, name, ts, mode="orchestrator", usd=2.0, quota=None, **fields):
+        return [{"event": "start", "session": name, "ts": ts, "mode": mode,
+                 "u": 0.0, "repo": "owner/private-toy", "repo_dir": "toy", **fields},
+                {"event": "summary", "session": name, "transcript": "toy.jsonl",
+                 "calls": 1, "usd_list_price": usd, "quota": quota}]
+
+    def readings(self, start=None, end=None, claude=4.0, codex=3.0):
+        return {"start": start, "end": end, "pools": {
+            "claude-5h": {"delta": claude}, "claude-7d": {"delta": None},
+            "codex-5h": {"delta": codex}}}
+
+    def discover(self):
+        import calibrate
+        return calibrate.saved_fits()
+
+    def result(self, rows, **kwargs):
+        fits, _ = self.discover()
+        before = json.dumps([rows, fits])
+        result = cost.by_mode(rows, [], fits=fits, **kwargs)
+        self.assertEqual(json.dumps([rows, fits]), before)
+        return result
+
+    def cli(self, rows, *flags):
+        self.session_log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cost.main(["--by-mode", "--session-log", str(self.session_log),
+                       "--log", str(self.run_log), *flags])
+        return out.getvalue()
+
+    def test_single_discovered_fit_matches_explicit_text_and_applies_everywhere(self):
+        path = self.fit(since=self.T)
+        rows = self.session("before", self.BEFORE) + self.session("invalid", "bad")
+        for flags in ((), ("--sessions",), ("--since", self.BEFORE),
+                      ("--until", self.T), ("--repo", "toy", "--sessions")):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.cli(rows, *flags), self.cli(rows, *flags, "--calibration", str(path)))
+        result = json.loads(self.cli(rows, "--json"))
+        self.assertNotIn("fits", result)
+        self.assertNotIn("fits", result["arms"]["orchestrator"])
+        self.assertEqual([s["est_pools"]["claude-5h"] for s in result["sessions"]], [4.0, 4.0])
+
+    def test_half_open_periods_compare_instants_and_keep_the_first_start(self):
+        self.two_fits()
+        # Same instant as T, expressed with a non-UTC offset.
+        self.fit(since="2026-10-26T19:01:00+02:00", rates=(0.4, 0.1))
+        rows = (self.session("before", self.BEFORE) + self.session("at", self.T)
+                + self.session("after", self.AFTER) + self.session("missing", None)
+                + self.session("invalid", "bad") + self.session("wrong-type", 42))
+        rows.append({**rows[0], "ts": self.AFTER})  # resumption cannot change its fit
+        result = self.result(rows)
+        self.assertEqual([s["fit"] for s in result["sessions"]], ["F1", "F2", "F2", None, None, None])
+        self.assertEqual([s["est_pools"].get("claude-5h") for s in result["sessions"]],
+                         [4.0, 0.8, 0.8, None, None, None])
+        f1, f2 = result["fits"]
+        self.assertIsNone(f1["from"])
+        self.assertEqual(cost._row_ts(f1["until"]), cost._row_ts(self.T))
+        self.assertEqual(f2["from"], f1["until"])
+        self.assertIsNone(f2["until"])
+        self.assertEqual(f2["since"], "2026-10-26T19:01:00+02:00")
+        text = self.cli(rows, "--sessions")
+        lines = text.splitlines()
+        self.assertTrue(lines[1].startswith("F1 = calibration-old.json: sessions starting before 2026-10-26 17:01 UTC;"))
+        self.assertTrue(lines[2].startswith("F2 = calibration.json: sessions starting from 2026-10-26 17:01 UTC;"))
+        self.assertIn("claude-5h 0.4, claude-7d 0.1; fit saved 2026-10-27, readings 2026-10-20 to 2026-10-27", lines[2])
+        self.assertNotIn("private-toy", text)
+
+    def test_before_earliest_finite_fit_has_no_estimate_or_fit(self):
+        self.fit("calibration-old.json", since=self.T)
+        self.fit(since=self.AFTER, rates=(0.4, 0.1))
+        rows = self.session("early", self.BEFORE) + self.session("covered", self.T)
+        result = self.result(rows)
+        self.assertIsNone(result["sessions"][0]["fit"])
+        self.assertEqual(result["sessions"][0]["est_pools"], {})
+        text = cost.render_by_mode(result, sessions=True)
+        header, early = text.split("sessions:\n")[1].splitlines()[:2]
+        self.assertEqual(header.split()[:4], ["SESSION", "START", "FIT", "MODE"])
+        self.assertEqual(early.split()[2], "-")
+        self.assertIn("F1", result["arms"]["orchestrator"]["fits"])
+        self.assertNotIn("F2", result["arms"]["orchestrator"]["fits"])
+        self.assertIn("F2 = calibration.json:", text)  # loaded fits always have a legend
+
+    def test_identical_copy_is_deduped_and_prefers_default_filename(self):
+        path = self.fit()
+        rows = self.session("one", self.BEFORE)
+        original = self.cli(rows, "--sessions")
+        (self.root / "calibration-copy.json").write_bytes(path.read_bytes())
+        fits, notes = self.discover()
+        self.assertEqual([f["path"] for f in fits], [str(path)])
+        self.assertEqual(notes, [])
+        self.assertEqual(self.cli(rows, "--sessions"), original)
+        self.assertNotIn("fits", json.loads(self.cli(rows, "--json")))
+
+    def test_same_since_uses_newest_saved_at_and_warns_once(self):
+        for since, equivalent in ((None, None), (self.T, "2026-10-26T19:01:00+02:00")):
+            with self.subTest(since=since):
+                self.fit(since=since, saved_at="2026-10-27T13:00:00+02:00")
+                winner = self.fit("calibration-new.json", since=equivalent, rates=(5.0, 1.0),
+                                  saved_at="2026-10-27T12:00:00Z")
+                fits, notes = self.discover()
+                self.assertEqual([f["path"] for f in fits], [str(winner)])
+                self.assertEqual(len(notes), 1)
+                self.assertTrue(notes[0].startswith("warning:"))
+                self.assertIn("calibration.json and calibration-new.json", notes[0])
+                text = self.cli(self.session("one", self.BEFORE))
+                self.assertEqual(text.count("warning:"), 1)
+                self.assertEqual(self.result(self.session("one", self.BEFORE))["sessions"][0]
+                                 ["est_pools"]["claude-5h"], 10.0)
+        # The default can also be the newer save; file iteration order does not win.
+        self.fit(since=self.T, saved_at="2026-10-28T12:00:00Z")
+        self.assertEqual(Path(self.discover()[0][0]["path"]).name, "calibration.json")
+
+    def test_invalid_files_are_not_periods_and_emit_one_note_each(self):
+        self.two_fits()
+        broken = self.root / "calibration-broken.json"
+        for content in ("invalid JSON", '[]', '{"pools": {}}'):
+            with self.subTest(content=content):
+                broken.write_text(content)
+                fits, notes = self.discover()
+                self.assertEqual(len(fits), 2)
+                self.assertEqual(len(notes), 1)
+                self.assertTrue(notes[0].startswith("note:"))
+                self.assertIn("calibration-broken.json", notes[0])
+                text = self.cli(self.session("one", self.BEFORE))
+                self.assertEqual(text.count("note: skipped calibration fit calibration-broken.json:"), 1)
+        # An unreadable candidate is also skipped, without losing the good fits.
+        read_bytes = Path.read_bytes
+        def read(path):
+            if path == broken:
+                raise OSError("unreadable")
+            return read_bytes(path)
+        with mock.patch.object(Path, "read_bytes", read):
+            fits, notes = self.discover()
+        self.assertEqual(len(fits), 2)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("unreadable", notes[0])
+        broken.write_bytes(b'\xff')
+        self.assertEqual(len(self.discover()[0]), 2)
+        self.assertIn("calibration-broken.json", self.discover()[1][0])
+
+    def test_unparseable_fit_boundary_is_skipped_and_cannot_supply_estimates(self):
+        path = self.fit(since="bad timestamp")
+        rows = self.session("one", self.BEFORE)
+        fits, notes = self.discover()
+        self.assertEqual(fits, [])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("invalid since timestamp", notes[0])
+        result = json.loads(self.cli(rows, "--json"))
+        self.assertEqual(result["sessions"][0]["est_pools"], {})
+        # Pinning a single fit still ignores its since, as before.
+        pinned = json.loads(self.cli(rows, "--json", "--calibration", str(path)))
+        self.assertEqual(pinned["sessions"][0]["est_pools"]["claude-5h"], 4.0)
+
+    def test_fit_with_no_usable_rates_keeps_its_period(self):
+        self.two_fits(pools=[{"pool": "claude-5h", "headline": {"unit": "usd", "per_unit": 0}}])
+        result = self.result(self.session("before", self.BEFORE) + self.session("after", self.T))
+        self.assertEqual([s["fit"] for s in result["sessions"]], ["F1", "F2"])
+        self.assertEqual(result["sessions"][1]["est_pools"], {})
+        self.assertEqual(result["arms"]["orchestrator"]["fits"]["F2"]["est_pools"], {})
+        self.assertEqual(len(result["fits"]), 2)
+        text = cost.render_by_mode(result)
+        legend = next(line for line in text.splitlines() if line.startswith("F2 ="))
+        self.assertIn("none usable", legend)
+        self.assertIn("fit saved 2026-10-27, readings 2026-10-20 to 2026-10-27", legend)
+
+    def test_explicit_calibration_pins_one_fit_despite_siblings(self):
+        self.two_fits()
+        rows = self.session("before", self.BEFORE) + self.session("at", self.T)
+        result = json.loads(self.cli(rows, "--calibration", str(self.root / "calibration.json"), "--json"))
+        self.assertNotIn("fits", result)
+        self.assertEqual([s["est_pools"]["claude-5h"] for s in result["sessions"]], [0.8, 0.8])
+        text = self.cli(rows, "--calibration", str(self.root / "calibration-old.json"), "--sessions")
+        self.assertNotIn("FIT", text)
+        self.assertNotIn("F1 =", text)
+        old = json.loads(self.cli(rows, "--calibration", str(self.root / "calibration-old.json"), "--json"))
+        self.assertEqual([s["est_pools"]["claude-5h"] for s in old["sessions"]], [4.0, 4.0])
+
+    def test_per_fit_sums_means_and_other_pools_stay_separate(self):
+        self.two_fits()
+        rows = []
+        for mode, factor in (("orchestrator", 1), ("claude-only", 10)):
+            for label, ts, dollars in (("old-a", self.BEFORE, 1), ("old-b", self.BEFORE, 3),
+                                       ("new-a", self.T, 2), ("new-b", self.AFTER, 6)):
+                rows += self.session(f"{mode}-{label}", ts, mode, usd=dollars * factor,
+                                     quota=self.readings(ts, ts, claude=dollars * factor, codex=2.0))
+        result = self.result(rows)
+        for mode, factor in (("orchestrator", 1), ("claude-only", 10)):
+            arm = result["arms"][mode]
+            self.assertEqual(arm["est_pools"], {})
+            self.assertFalse(set(cost.ESTIMATED_POOLS) & set(arm["pools"]))
+            self.assertEqual(arm["pools"]["codex-5h"], {"sum": 8.0, "n": 4, "mean": 2.0})
+            for label, dollars, rate in (("F1", 4, 2.0), ("F2", 8, 0.4)):
+                entry = arm["fits"][label]
+                self.assertEqual(entry["est_pools"]["claude-5h"],
+                                 {"sum": dollars * factor * rate, "n": 2, "mean": dollars * factor * rate / 2})
+                self.assertEqual(entry["pools"]["claude-5h"],
+                                 {"sum": dollars * factor, "n": 2, "mean": dollars * factor / 2})
+        text = cost.render_by_mode(result)
+        sums = text.split("Claude pool points (sum, n), per fit:\n")[1].split("READ:")[0].splitlines()
+        means = text.split("pool points per measured session (mean):\n")[1].split("other pools")[0].splitlines()
+        self.assertEqual(sums[0].split()[:2], ["MODE", "FIT"])
+        self.assertEqual(means[0].split()[:2], ["MODE", "FIT"])
+        self.assertEqual(sums[1].split(), ["orchestrator", "F1", "8.0", "(2)", "4.0", "(2)", "2.0", "(2)", "-"])
+        self.assertEqual(sums[2].split(), ["orchestrator", "F2", "3.2", "(2)", "8.0", "(2)", "0.8", "(2)", "-"])
+        self.assertEqual(sums[3].split(), ["claude-only", "F1", "80.0", "(2)", "40.0", "(2)", "20.0", "(2)", "-"])
+        self.assertEqual(sums[4].split(), ["claude-only", "F2", "32.0", "(2)", "80.0", "(2)", "8.0", "(2)", "-"])
+        self.assertEqual(means[1].split(), ["orchestrator", "F1", "4.0", "2.0", "1.0", "-"])
+        self.assertEqual(means[2].split(), ["orchestrator", "F2", "1.6", "4.0", "0.4", "-"])
+        self.assertEqual(means[3].split(), ["claude-only", "F1", "40.0", "20.0", "10.0", "-"])
+        self.assertEqual(means[4].split(), ["claude-only", "F2", "16.0", "40.0", "4.0", "-"])
+        other = text.split("other pools, READ:\n")[1].splitlines()
+        self.assertEqual(other[0].split(), ["MODE", "codex-5h"])
+        self.assertEqual(other[1].split(), ["orchestrator", "8.0", "(4)"])
+
+    def test_crossing_read_is_omitted_but_estimate_and_other_pools_remain(self):
+        self.two_fits()
+        rows = (self.session("crossing", self.BEFORE, quota=self.readings(self.BEFORE, self.T, claude=-98.0))
+                + self.session("null", self.BEFORE, quota=self.readings(self.BEFORE, self.T, claude=None))
+                + self.session("missing", self.BEFORE, quota=self.readings(None, self.BEFORE))
+                + self.session("kept", self.BEFORE, quota=self.readings(self.BEFORE, self.BEFORE))
+                + self.session("newbad", self.T, mode="claude-only", quota=self.readings(self.BEFORE, self.AFTER))
+                + self.session("newkept", self.T, quota=self.readings(self.T, self.AFTER)))
+        result = self.result(rows)
+        arm = result["arms"]["orchestrator"]
+        self.assertEqual(arm["fits"]["F1"]["read_crossing"], 2)
+        self.assertEqual(arm["fits"]["F1"]["pools"]["claude-5h"], {"sum": 4.0, "n": 1, "mean": 4.0})
+        self.assertEqual(arm["fits"]["F1"]["est_pools"]["claude-5h"]["sum"], 16.0)
+        self.assertEqual(arm["pools"]["codex-5h"]["sum"], 15.0)
+        self.assertEqual(result["arms"]["claude-only"]["fits"]["F2"]["read_crossing"], 1)
+        self.assertEqual([s["read_crossing"] for s in result["sessions"]], [True, False, True, False, True, False])
+        text = cost.render_by_mode(result, sessions=True)
+        self.assertIn("READ left out for 3 sessions whose quota readings cross a fit boundary", text)
+        table = text.split("sessions:\n")[1].splitlines()
+        self.assertEqual(table[1].split()[2:5], ["F1", "orchestrator", "cross"])
+        self.assertEqual(table[1].split()[7:9], ["4.0", "-98.0"])  # the session still shows raw READ
+        self.assertEqual(table[2].split()[4], "-")
+
+
 class TestListPrice(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

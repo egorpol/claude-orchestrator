@@ -439,7 +439,7 @@ def load_run_log(path, since=None, repo=None, until=None):
 
 
 def _row_ts(value):
-    ts = _parse_ts(value)
+    ts = _parse_ts(value) if isinstance(value, str) else None
     return ts.replace(tzinfo=timezone.utc) if ts is not None and ts.tzinfo is None else ts
 
 
@@ -506,7 +506,13 @@ def _points(values):
     return {"sum": sum(values), "n": len(values), "mean": sum(values) / len(values) if values else None}
 
 
-def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None, until=None):
+def _in_fit(ts, fit):
+    """A timestamp belongs to a fit's half-open interval; missing timestamps do not."""
+    lower, upper = _row_ts(fit.get("from")), _row_ts(fit.get("until"))
+    return ts is not None and (lower is None or ts >= lower) and (upper is None or ts < upper)
+
+
+def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None, until=None, fits=None):
     """Intent-to-treat arm totals and per-session records, without I/O or mutations.
 
     Sessions retain their first start's assignment and last summary/end in file
@@ -516,9 +522,14 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None, unt
     dilute the means.
     `calibration` is `calibrate.usd_rates()`: estimated pool points are a
     session's list-price USD times the saved points per USD.
+    Alternatively, `fits` is the list from `calibrate.saved_fits()`. Multiple
+    fits partition Claude points by the first start, never summing unlike units.
     """
+    multi = fits is not None and len(fits) > 1
+    if fits and not multi:
+        calibration = fits[0]
     rates = {pool: rate["per_usd"] for pool, rate in ((calibration or {}).get("pools") or {}).items()
-             if pool in ESTIMATED_POOLS}
+             if pool in ESTIMATED_POOLS} if not multi else {}
     state = {}
     for row in session_rows:
         session = row.get("session")
@@ -574,6 +585,13 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None, unt
         pools = {pool: reading.get("delta")
                  for pool, reading in ((summary.get("quota") or {}).get("pools") or {}).items()}
         usd = summary.get("usd_list_price")
+        fit = next((fit for fit in fits if _in_fit(ts, fit)), None) if multi else None
+        session_rates = ({pool: rate["per_usd"] for pool, rate in (fit["pools"] if fit else {}).items()
+                          if pool in ESTIMATED_POOLS} if multi else rates)
+        quota_readings = summary.get("quota") or {}
+        crossing = (multi and fit is not None and not ghost
+                    and any(pools.get(pool) is not None for pool in ESTIMATED_POOLS)
+                    and not all(_in_fit(_row_ts(quota_readings.get(key)), fit) for key in ("start", "end")))
         sessions.append({
             "session": session, "start": start.get("ts"),
             "start_date": ts.astimezone().date().isoformat() if ts is not None else None,
@@ -583,11 +601,13 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None, unt
             **{key: summary.get(key) or 0 for key in ("calls", "subagent_calls", "cost_units", "blocked")},
             "usd_list_price": usd,
             "delegate": dict(entry["delegate"]), "pools": pools,
-            "est_pools": {pool: usd * rate for pool, rate in rates.items()} if usd is not None else {},
+            "est_pools": {pool: usd * rate for pool, rate in session_rates.items()} if usd is not None else {},
+            **({"fit": fit["label"] if fit else None, "read_crossing": crossing} if multi else {}),
             **_run_totals(joined[session]),
         })
 
     pool_names = sorted({pool for session in sessions for pool in session["pools"]})
+    used_fits = [fit for fit in fits if any(s["fit"] == fit["label"] for s in sessions)] if multi else []
     arms = {}
     sum_fields = ("calls", "subagent_calls", "cost_units", "blocked", "runs", "applied", "discarded")
     for mode in MODES:
@@ -617,10 +637,25 @@ def by_mode(session_rows, run_rows, since=None, repo=None, calibration=None, unt
                 key: sum(session["delegate_tokens"].get(agent, {}).get(key, 0) for session in live)
                 for key in DELEGATE_TOKENS}
         for pool in pool_names:
+            if multi and pool in ESTIMATED_POOLS:
+                continue
             arm["pools"][pool] = _points([session["pools"][pool] for session in live
                                           if session["pools"].get(pool) is not None])
+        if multi:
+            arm["fits"] = {}
+            for fit in used_fits:
+                fitted = [s for s in live if s["fit"] == fit["label"]]
+                arm["fits"][fit["label"]] = {
+                    "est_pools": {pool: _points([s["est_pools"][pool] for s in fitted if pool in s["est_pools"]])
+                                  for pool in ESTIMATED_POOLS if pool in fit["pools"]},
+                    "pools": {pool: _points([s["pools"][pool] for s in fitted
+                                             if not s["read_crossing"] and s["pools"].get(pool) is not None])
+                              for pool in ESTIMATED_POOLS},
+                    "read_crossing": sum(s["read_crossing"] for s in fitted),
+                }
         arms[mode] = arm
     return {"log": None, "run_log": None, "since": since, **({"until": until} if until is not None else {}), "calibration": calibration, "arms": arms,
+            **({"fits": fits} if multi else {}),
             "not_drawn": not_drawn, "skipped_no_start": skipped,
             "weights": {"configs": [{"weights": dict(config), "sessions": count}
                                     for config, count in sorted(configs.items())], "unknown": unknown},
@@ -645,6 +680,10 @@ def render_by_mode(result, as_json=False, sessions=False):
         lines.append(f"early-look cap: {cap['held_back']} drawn sessions held back; "
                      f"starts strictly before {cap['until']}; freeze {cap['freeze']}"
                      + (" (close provisional)" if cap["close_provisional"] else ""))
+    fits = result.get("fits")
+    if fits:
+        lines.extend(_fit_legend(fit) for fit in fits)
+    lines.extend(result.get("fit_notes", []))
     table = [("MODE", "SESS", "GHOST", "REROLL", "PEND", "CALLS", "SUB", "UNITS", "USD", "USD/S",
               "LAUNCH", "RUNS", "APPLIED", "ASK", "BLOCKED")]
     money = lambda value: f"{value:.2f}" if value is not None else "-"
@@ -662,12 +701,16 @@ def render_by_mode(result, as_json=False, sessions=False):
                      "counted in SESS only, left out of every other column and mean")
     calibration = result.get("calibration") or {}
     read = sorted({pool for arm in arms.values() for pool in arm["pools"]})
-    claude = [pool for pool in ESTIMATED_POOLS if pool in read or pool in (calibration.get("pools") or {})]
+    claude = [pool for pool in ESTIMATED_POOLS if fits or pool in read or pool in (calibration.get("pools") or {})]
     others = [pool for pool in read if pool not in claude]
     if claude or others:
-        lines.append("Claude pool points (sum, n): " + _estimate_note(calibration) if claude
+        lines.append("Claude pool points (sum, n), per fit:" if fits else
+                     "Claude pool points (sum, n): " + _estimate_note(calibration) if claude
                      else "pool points used, READ (sum, n):")
-        lines.extend(_pool_lines(arms, claude, others, "sum", footnote=bool(claude)))
+        lines.extend(_pool_lines(arms, claude, others, "sum", footnote=bool(claude), fits=fits))
+        crossing = sum(entry["read_crossing"] for arm in arms.values() for entry in arm.get("fits", {}).values())
+        if crossing:
+            lines.append(f"READ left out for {crossing} sessions whose quota readings cross a fit boundary")
     else:
         lines.append("pool points used: no quota readings in the summaries yet")
     if result.get("calibration") is not None and not claude:  # estimates need no readings, only a fit
@@ -690,7 +733,7 @@ def render_by_mode(result, as_json=False, sessions=False):
     lines.extend(_table_lines(table))
     if claude or others:
         lines.append("pool points per measured session (mean):")
-        lines.extend(_pool_lines(arms, claude, others, "mean"))
+        lines.extend(_pool_lines(arms, claude, others, "mean", fits=fits))
     if any(arm["delegate_tokens"] for arm in arms.values()):
         lines.append("delegate tokens by agent (rounds and reviews):")
         table = [("MODE", "AGENT", "IN", "CACHED", "OUT")]
@@ -703,12 +746,16 @@ def render_by_mode(result, as_json=False, sessions=False):
     if sessions:
         lines.append("sessions:")
         points = lambda value: f"{value:.1f}" if value is not None else "-"
-        table = [("SESSION", "START", "MODE", "FLAGS", "CALLS", "USD",  # no REPO: repo names can be private
+        table = [("SESSION", "START", *(("FIT",) if fits else ()),
+                  "MODE", "FLAGS", "CALLS", "USD",  # no REPO: repo names can be private
                   *(label for pool in ESTIMATED_POOLS for label in (f"{pool.upper()} EST", "READ")),
                   "LAUNCH", "APPLIED", "FIN/ITEMS")]
         for session in result["sessions"]:
-            flags = "/".join(key for key in ("reroll", "pending", "ghost") if session[key]) or "-"
-            table.append((session["session"][:8], session["start_date"] or "-", session["mode"], flags,
+            flags = "/".join(key for key in ("reroll", "pending", "ghost") if session[key])
+            if fits and session.get("read_crossing"):
+                flags = "/".join(filter(None, (flags, "cross")))
+            table.append((session["session"][:8], session["start_date"] or "-",
+                          *((session["fit"] or "-",) if fits else ()), session["mode"], flags or "-",
                           _fmt_int(session["calls"]) if session["summarised"] else "-",
                           money(session["usd_list_price"]),
                           *(points(source.get(pool)) for pool in ESTIMATED_POOLS
@@ -719,19 +766,31 @@ def render_by_mode(result, as_json=False, sessions=False):
     return "\n".join(lines)
 
 
-def _estimate_note(calibration):
+def _estimate_note(calibration, metadata=False):
     rates = calibration.get("pools") or {}
-    if not rates:
-        where = f" (none usable at {calibration['path']})" if calibration.get("path") else ""
-        return f"EST needs a saved fit: run `delegate cost --calibrate --save`{where}"
     local = lambda value: _row_ts(value).astimezone().date().isoformat() if _row_ts(value) else "?"
     span = calibration.get("span") or [None, None]
+    dates = (f"fit saved {local(calibration.get('saved_at'))}, "
+             f"readings {local(span[0])} to {local(span[1])}")
+    if not rates:
+        where = f" (none usable at {calibration['path']})" if calibration.get("path") else ""
+        return f"EST needs a saved fit: run `delegate cost --calibrate --save`{where}" + (f" ({dates})" if metadata else "")
     fitted = ", ".join(f"{pool} {rates[pool]['per_usd']:.3g}" for pool in ESTIMATED_POOLS if pool in rates)
-    return (f"EST = list-price USD x points per USD ({fitted}; fit saved "
-            f"{local(calibration.get('saved_at'))}, readings {local(span[0])} to {local(span[1])})")
+    return f"EST = list-price USD x points per USD ({fitted}; {dates})"
 
 
-def _pool_lines(arms, claude, others, stat, footnote=False):
+def _fit_legend(fit):
+    def utc(value):
+        ts = _row_ts(value).astimezone(timezone.utc)
+        return ts.strftime("%Y-%m-%d %H:%M:%S" if ts.second or ts.microsecond else "%Y-%m-%d %H:%M") + " UTC"
+    lower, upper = fit["from"], fit["until"]
+    interval = f"from {utc(lower)}" if lower else "from the beginning"
+    if upper:
+        interval = (interval + " to before " if lower else "before ") + utc(upper)
+    return f"{fit['label']} = {Path(fit['path']).name}: sessions starting {interval}; " + _estimate_note(fit, metadata=True)
+
+
+def _pool_lines(arms, claude, others, stat, footnote=False, fits=None):
     """Claude pools as EST beside READ, then the other pools' reading deltas."""
     def cell(agg):
         if not agg or not agg["n"]:
@@ -739,10 +798,16 @@ def _pool_lines(arms, claude, others, stat, footnote=False):
         return f"{agg['sum']:.1f} ({agg['n']})" if stat == "sum" else f"{agg['mean']:.1f}"
     lines = []
     if claude:
-        lines.extend(_table_lines([("MODE", *(label for pool in claude for label in (f"{pool} EST", "READ")))] + [
-            (mode, *(cell(source.get(pool)) for pool in claude
-                     for source in (arms[mode]["est_pools"], arms[mode]["pools"])))
-            for mode in MODES]))
+        table = [("MODE", *(("FIT",) if fits else ()),
+                  *(label for pool in claude for label in (f"{pool} EST", "READ")))]
+        for mode in MODES:
+            entries = [(fit["label"], arms[mode]["fits"][fit["label"]])
+                       for fit in fits if fit["label"] in arms[mode]["fits"]] if fits else [(None, arms[mode])]
+            for label, entry in entries:
+                table.append((mode, *((label,) if fits else ()),
+                              *(cell(source.get(pool)) for pool in claude
+                                for source in (entry["est_pools"], entry["pools"]))))
+        lines.extend(_table_lines(table))
         if footnote:
             lines.append("READ: the SessionStart-to-SessionEnd delta in one reset window; it also counts other "
                          "sessions' use and the hours a session stays open")
@@ -898,9 +963,16 @@ def cmd_cost(a):
                 cap = {"held_back": held, "until": prereg.iso(upper), "freeze": info["freeze"],
                        "close_provisional": info["close_provisional"]}
         import calibrate  # here, not at the top: calibrate imports cost
+        fits, notes = calibrate.saved_fits(a.quota_log) if not a.calibration else ([], [])
+        calibration = None if fits else calibrate.usd_rates(calibrate.saved_path(a.calibration, a.quota_log))
+        if not fits and not a.calibration:
+            # Discovery rejected every candidate: none may supply estimates.
+            calibration["pools"] = {}
         result = by_mode(rows, load_jsonl(run_log), since=a.since, repo=a.repo, until=until,
-                         calibration=calibrate.usd_rates(calibrate.saved_path(a.calibration, a.quota_log)))
+                         calibration=calibration, fits=fits)
         result.update(log=str(log), run_log=str(run_log))
+        if notes:
+            result["fit_notes"] = notes
         if cap is not None:
             result["early_look"] = cap
         import rate  # here, not at the top: rate imports cost

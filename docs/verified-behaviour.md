@@ -2,6 +2,10 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-11-03
+
+- **Claude pool estimates split by fit** (`by_mode_fit_split.py`, real cache and session log, capped view): the cache holds `calibration-pro-2026-10-20.json` (`since` null) and `calibration.json` (`since` 2026-10-26T17:01:00Z, the Max fit). `delegate cost --by-mode` put 134 sessions on F1 (Pro) and 4 on F2 (Max); those 4 start between 17:01 UTC and the period-2 start, 17:20:51 UTC, and remain in the capped view. One F1 session's claude-7d READ crossed the fit boundary and was left out; none on F2. `--calibration` on either file printed text byte-identical to the code before the change. Before the split, every session was estimated at the Max rate, giving 4.6–4.9 times too few Claude points for Pro-period sessions (claude-5h 2.66 vs 0.547 points per USD, claude-7d 0.361 vs 0.078; see the 2026-11-02 section).
+
 ## 2026-11-02
 
 - **Max-plan pool calibration** (`delegate cost --calibrate --since 2026-10-26T17:01:00Z`, saved 23:37 UTC; quota readings from 10-26 17:01 to 11-02 23:36 UTC, openusage 0.26.3 at the save):
