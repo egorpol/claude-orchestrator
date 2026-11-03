@@ -10,6 +10,11 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - **`/clear` as a closing sentence** was passed over four times while one session ran on to 223k; as a picker option it is taken.
 - **Boundaries:** a handoff that ends the item at "gate green" fell short twice: the live check and the review each added a fix round. A step with a large dump read plus a large write ends at "review done, before rewrite", with the findings in the handoff. A running delegate round is a natural handoff point: the next session runs `delegate wait`.
 - **Skill loads:** above ~100k, check that the step a large skill (~10k) is loaded for will run in this session; once the launch it was loaded for moved to the next session.
+- **Ask-only steps** need no skill load: the rules give the `ask` command, and SKILL.md costs ~16k tokens (measured 2026-11-03 for a launch-and-collect; another session loaded it for a single `ask`). Load it before `launch`, `review` or `followup`.
+- **Inline instead of delegated:** a step planned for a delegate that runs inline (control session, low quota) puts its reads, code and tests into the main context. One such build reached 161k before its first `cost` reading, and its review moved to the next session. Move the handoff boundary one deliverable earlier and read `cost --session latest` after each deliverable over ~20 KB.
+- **Reads before a decision:** above ~90k, with a decision picker as the next boundary, don't read code that only the next step's brief needs; put its file:line in the handoff.
+- **Memory files** hold the resume pointer and binding facts, not history: three resumes (2026-11-01 to 11-03) read 9–10 KB of memory, one file a single running paragraph. Cut a file to that when it passes ~4 KB; the handoff carries the state.
+- **Session id** for the closing picker's `--session`: the first line of `cost --session latest`.
 - **Waits:** six sessions (2026-10-13 to 10-20) paid 10–18% of their cost units for one rebuild after a 61–281 min wait, three of them on `/field-report`. Half of all rebuild cost came from runs that finished after an hour. Over 14 logged sessions such rebuilds were 12.7% of orchestrator cost.
 - **Sweeps:** one "check everything" request ran from 110k to 240k within a single prompt, with about 30 image reads.
 - **Hand-paste loops:** a user posting prepared texts one by one is a new item. Make "`/clear`, then `/next`" an option in the picker that closes the first answer.
@@ -30,12 +35,17 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - When the user names the consumer of the output (a bot, a person, a tool), offer an option where that consumer does the work. A picker that asks for a user-side test result offers "not set up yet: help set it up" and says what in pasted output would decide it.
 - **Reading first:** when the next step is "the user reads X", ask whether the reading is done before content picks or git approval; a push picker came back "still reading".
 - **Vague reports:** when the first check shows nothing wrong, show it and ask what is missing before widening the test matrix. Ten calls across browsers, widths and themes once failed to reproduce a complaint that was about taste.
+- **Pickers answered with a question:** answer it as Q&A; after the second such answer in one item, refresh the handoff before asking again. Two of three pickers in one session (2026-11-02) came back as new questions, and context grew ~95k → ~135k inside the item.
+- **All lasting decisions at once:** before sending asks, list every lasting decision of the step, including which data files get committed. One ask sent after the first three returned cost 4 calls and another wait.
+- **Verdict pickers:** for a listening or visual check, open the page (`xdg-open URL`) before the picker that asks for the verdict; otherwise the answer is "open it" and the picker repeats.
 
 ## Delegation evidence
 
 - **Spare quota:** Launches fell from 16 (2026-10-13 to 10-20) to 2 in ~30 orchestrator sessions (10-21 to 10-26). A six-line CSS fix took ~8 calls through `delegate` against ~3 inline; one session sat idle for 12.5 min of review. Codex 7d peaked at 17/30/51/32/4/7/28/14% used over its eight weekly windows to 2026-10-26; Cursor Auto used 54% of the month before. Claude 7d ran at 97–99% used in both Pro weeks; on Max (since 2026-10-26) Claude may no longer be the scarcest pool. Codex 5h can be full from the user's own Codex Desktop use while 7d looks spare, so check 5h at dispatch.
 - **Second opinions:** in uses through 2026-10-20 the two models mostly picked the same option, and most rounds added a risk or corrected a fact in the question. One risk note contradicted a fact measured minutes later, hence the cheap checks first. Answers took 20 s to about 5 min, and about 6 min for a review at `--effort high`. One session (2026-10-21 to 10-26) deferred a public-API second opinion "because of context size". Context size is no reason to skip one: the question is a file and the answer is short. Read numbers from the config before writing them into a question: one question said 6 followed links where the config had 4.
 - **Web facts:** Cursor's ask mode has no web tools, and Codex's web tool in `ask` reads only a cache; live search needs `delegate launch codex --web-search`.
+- **Asks as confirmation:** when your own probes already list every doubt, the ask mostly confirms and words the fixes (one fact-check, 2026-11-02: both vendors, 0 doubts beyond the list, under 3 min). Say so in the record, and still ask for doubts beyond the list: that is its only blind part.
+- **Visual builds** tuned by eye with live network input stay inline until the first good render (one ~100-line figure script took 3 calls); delegate later regeneration and variants.
 
 ## Data checks
 
@@ -60,6 +70,9 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - **Layout fit:** probe the changed block's own line count, with a variant known to change it as the positive control.
 - Tally categorical values by exact match: a substring test (`'eu' in flag`) counted 252 where the source said 65.
 - An editable dependency's version: `git -C <lib> log -3`, not `importlib.metadata`.
+- **Thresholds:** a pass/fail bar taken from a facts file is a number entering a claim: re-derive its setting (grid, N, options) or measure a floor in the same run. A 0.7 dB bar measured on another grid failed a correct build.
+- **Checker self-tests:** each control feeds bad input to the same check and must FAIL; never wrap a control in `not`. The self-test passes only when exactly the controls fail; two of four controls written the other way round reported 2/4.
+- Print `inspect.signature(f)` before a library function's first call in a probe; a guessed keyword (`window=` for `windows`) cost one.
 
 ## Shell (zsh in the Bash tool)
 
@@ -70,6 +83,7 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - Write scratch scripts to files rather than nesting heredocs. Python's `tempfile` writes to `/tmp` (TMPDIR is unset), not the session scratchpad: pass `dir=`.
 - Don't `cd` away from the project root: the new directory sticks, and later relative paths, `git add` and tools' config lookups run there. `(cd sub && make)` leaves the shell where it was.
 - `pkill -f PATTERN` and `pgrep -f PATTERN | kill` can match their own shell's command line and kill it; stop a server with `fuser -k PORT/tcp` or a saved PID. With `run_in_background`, run the server in that command's foreground (no trailing `&`), so the task ends when the server does.
+- External fetches get a timeout (`curl --max-time 30`); probe a host that project notes call flaky once before a loop. One fetch loop hung ~3 min and took 4 calls to stop.
 - Run each long command as its own background task. Killing the child of an `a && b` chain lets the chain go on to `b`. Join independent probes with `;`: in an `&&` chain, a grep with no match silently skips the rest. Gate a long consumer on its generator (`test -f OUT || exit 1`), never with `;`: a missing file hung a CLI for 300 s.
 - **Background waits:** run one iteration of a wait loop in the foreground first, and make every exit branch (success, failure, timeout) print what the waiter matches: one broken loop cost ~10 min. For CI, use `gh run watch <id> --exit-status`.
 - **Output size:** one log grep printed over 64 MB. Print one PASS/FAIL line per case plus the first error and grep for those rather than `tail -N`, which cut results and kept whole tracebacks (~3k tokens per failed run). Send a third-party tool's stderr to a file and print its line count when the check is about that output (6 KB of warnings once). Keep stderr (no `2>/dev/null`) when a check is about warnings or logs: hidden renderer warnings took 4 calls to reproduce.
@@ -93,4 +107,5 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - Generated reports with wide tables: grep the `##` outline and read one section through `cut -c1-300`; a 240-line read of a 121 KB report cost ~25k. Send whole reads to `delegate ask`. For a diff that moves a large block, read `git diff --stat`, then the new functions by line range.
 - Dump catalogues with only the fields you need; read vendor PDFs by grepping for the section. To compare long headers with a peer file, tally with `grep -c` first.
 - **Transcripts:** picker answers and rejection reasons live in `tool_result` blocks, not typed prompts. `grep -c` counts lines, so on a one-line page count with `grep -o … | wc -l`.
+- Notebooks are JSON: `grep -F 'window="boxcar"'` on an `.ipynb` finds nothing, because quotes there are `\"`. Grep with escaped quotes or read cells through `nbformat`.
 - A file over ~1.5k lines can also go to a subagent that returns findings: one 2.8k-line read carried ~40k tokens through 70 later calls, ~14% of that session's cache reads.

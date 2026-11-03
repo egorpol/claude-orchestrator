@@ -2019,6 +2019,11 @@ def _cwd_deny_reason(command, rel):
             body += f"Wrap as:\n{wrap}\n"
         else:
             body += f"Wrap as: {wrap}. "
+    elif command:
+        body += (
+            "Too long to quote back: resend the whole command inside ( … ), "
+            "with the parentheses on lines of their own if it has a heredoc or #. "
+        )
     body += "Alternatives: git -C DIR, a tool's own directory flag, or absolute paths."
     return body
 

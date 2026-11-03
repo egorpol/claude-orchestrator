@@ -1834,6 +1834,12 @@ class CwdGuardTests(_SecretGuardHarness, unittest.TestCase):
                 self.assertEqual(r.returncode, 0, r.stderr)
         reason = self._deny("cd sub && ls  # look")
         self.assertIn("(\ncd sub && ls  # look\n)", reason)
+        self.assertNotIn("Too long to quote back", reason)
+        # Over 300 chars: no quoted wrap, but the instruction to wrap it whole.
+        body = "x" * 400
+        reason = self._deny("cd sub && cat <<'EOF'\n" + body + "\nEOF")
+        self.assertIn("Too long to quote back: resend the whole command inside ( … )", reason)
+        self.assertNotIn(body, reason)
 
     def test_gates_event_tool_project_agent_disable(self):
         # Wrong / missing / empty event or tool: cwd check no-op (exact match only).

@@ -4,13 +4,21 @@
 <!-- Goal and intent (what must be true when done), not the mechanism.
      If you do prescribe a mechanism, add the invariant it serves and one adversarial case it must survive
      ("two adjacent declarations of different licences both survive"). Two prescribed fixes handled the
-     reported example and failed the case next to it (2026-10-11). -->
+     reported example and failed the case next to it (2026-10-11).
+     When a requirement adds a free/dispose/release path, also state the hot-path invariant it must keep
+     ("Play after a work switch no slower than the old build") and the check that measures it: a memory bound
+     alone led Codex to free every decoded sound on each switch, ~400 ms slower per Play (2026-11-02). -->
 <task>
 
 </task>
 
 ## `<context>`
-<!-- Files this run owns; files not to touch. Cite the target repo's AGENTS.md; list only deltas from it. -->
+<!-- Files this run owns; files not to touch. Cite the target repo's AGENTS.md; list only deltas from it.
+     Before launch, list the brief's factual claims and the probe behind each. A claim made for every item
+     (layout, field meaning, file naming) is probed on every item, outliers first: "staves 4–5", stated for
+     17 works, did not hold for one and was probed 41 s after launch (2026-11-03). Provenance ("both agents agreed",
+     "the user chose") cites the ask or answer file by path; one such sentence reached a public plan
+     though only 2 of 3 picks had been asked. -->
 <context>
 
 </context>

@@ -8,7 +8,7 @@ argument-hint: "[topic] [--session <id>]"
 
 A field report records what one orchestrator session did and what it cost, so that lessons can be folded into the claude-orchestrator rules, `delegate` SKILL.md, CLI and hook later. Reports go to `feedback/` in the claude-orchestrator checkout. That folder is gitignored and stays local.
 
-1. **Topic:** use `$ARGUMENTS` as a kebab-case slug of 2–5 words. If it is empty, derive one from the session's main item. If it holds `--session <id>`, take the slug from the rest and report on that session (see "An earlier session" below); the closing picker offers this after `/clear`, so the report doesn't resume a large context.
+1. **Topic:** use `$ARGUMENTS` as a kebab-case slug of 2–5 words. If it is empty, derive one from the session's main item. If it holds `--session <id>`, take the slug from the rest and report on that session (see "An earlier session" below); the closing picker offers this after `/clear`, so the report doesn't resume a large context. Without `--session`, if step 2's numbers end the session's context above ~100k, say in one line that each call of the report re-reads that context and that `/clear`, then `/field-report --session <id>` is cheaper; then go on.
 2. **Numbers:** from the project root, run
 
    ```bash

@@ -17,6 +17,8 @@
 <check_against>
 - original brief, and whether its acceptance criteria are right for the domain and the repo's conventions
 - each invariant the brief states, against the adjacent cases, not only the example it names
+- each new free/dispose/release call: what the next use costs, measured old vs new (a work-switch
+  regression passed every gate and an APPROVE, 2026-11-02)
 - `verify.log` / verify exit code
 - dry-run output vs expected outcomes
 </check_against>
