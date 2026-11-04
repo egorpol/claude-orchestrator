@@ -209,7 +209,7 @@ def build_cmd(agent, model, effort, wt, job, read_only, unsandboxed=False, resum
         # Headless with --sandbox enabled, shell commands auto-run confined to
         # the workspace (writes elsewhere get EPERM, no network). --force
         # ("Run Everything") silently bypasses that sandbox (verified
-        # 2026-10-09), so it is opt-in only. --mode ask cannot run shell at all.
+        # 2026-10-09), so it is opt-in only. --mode ask runs only simple commands such as ls.
         cmd = ["cursor-agent", "-p", "--output-format", "stream-json", "--model", model,
                "--trust", "--workspace", str(wt)]
         cmd += ["--sandbox", "disabled", "--force"] if unsandboxed else ["--sandbox", "enabled"]

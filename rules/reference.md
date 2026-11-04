@@ -15,14 +15,21 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - **Reads before a decision:** above ~90k, with a decision picker as the next boundary, don't read code that only the next step's brief needs; put its file:line in the handoff.
 - **Memory files** hold the resume pointer and binding facts, not history: three resumes (2026-11-01 to 11-03) read 9–10 KB of memory, one file a single running paragraph. Cut a file to that when it passes ~4 KB; the handoff carries the state.
 - **Session id** for the closing picker's `--session`: the first line of `cost --session latest`.
+- **Closing picker above ~100k:** list "`/clear`, then `/field-report --session <id>`" before plain `/field-report`, with the re-read cost in its description. Listed third without one, it was passed over and the report ran at ~125k.
+- **Git picker above ~100k:** also offer "commit at the start of the next session, after `/clear`", recommended when the handoff already carries the commit step. One commit picker answered after 331 min paid for a whole rebuild; the handoff had been refreshed, so the next session could have committed for less.
 - **Waits:** six sessions (2026-10-13 to 10-20) paid 10–18% of their cost units for one rebuild after a 61–281 min wait, three of them on `/field-report`. Half of all rebuild cost came from runs that finished after an hour. Over 14 logged sessions such rebuilds were 12.7% of orchestrator cost.
 - **Sweeps:** one "check everything" request ran from 110k to 240k within a single prompt, with about 30 image reads.
 - **Hand-paste loops:** a user posting prepared texts one by one is a new item. Make "`/clear`, then `/next`" an option in the picker that closes the first answer.
 - **Handoff size:** two 29–31 KB handoffs, mostly done-item history, cost ~8k tokens per resume.
 - **Gates in handoffs:** list each gate with its interpreter and env, plus a one-line scratch-venv recipe; a file regenerated with provenance names the env that produced it (two sessions lost 6 calls and a 5 min rerun between them). A full `pytest -x` once stopped at test 188 of 531 on a known failure, so give the ready `--deselect` flag. `delegate` is on PATH only after `install.sh --bin`, so write its full path. Run each gate command once before writing it in: a `--dump` gate broke when its data moved.
+- **Gates outside the project venv:** a gate that needs a package the venv lacks (Playwright, a browser) names the interpreter's path, or the next session spends calls finding it. Past ones are in the `verify` field of `~/.cache/claude-delegate/runs/<repo>/*/meta.json`.
+- **Steps that need another vendor:** a handoff that names a review or followup gives the inline fallback beside it (which modules to read whole, which outputs to check against each other), so a session without delegation doesn't improvise.
+- **Review pages:** a page built during a delegate wait and checked in a browser took one session from 45k to 159k, well above the ~10–15k per step the rules assume. The handoff's next step stops at "page built and handed to the user" and lists applying the picks separately.
 - **Cross-repo notes** go into the target repo's `HANDOFF.md`. Before editing another repo's handoff, check its mtime, re-read the anchor and replace one line.
 - **Handoff steps as hypotheses:** mark a step taken from an external audit "from audit, unverified against neighbouring rules". A handoff's "watch for X" is a hypothesis: run the generic check, not only X.
 - **Facts in handoffs:** each later item names its source (file:line, or date and who asked); a number names the command that measured it, with any non-default parameter (difflib `autojunk=False`) (an unmeasured "158 buys, EUR 45.2k" cost 4 calls); a user-side prerequisite (bot, account, connector) says whether it exists yet, not only the plan to use it.
+- **Later-list requests:** quote the user's words in one line, with the session id. "The author's request" alone cost ~9 calls of transcript mining and found nothing.
+- **Changelog sections in handoffs** are guesses: check whether the feature has been released and follow the latest precedent. A handoff's "Fixed" line was wrong for a feature that was itself unreleased.
 - **No handoff:** a "continue from the handoff" that finds no file costs the next session several calls of transcript digging.
 - **Status lines:** all 9 harness status requests in three sessions (2026-10-13/14) came at the points the session rules name: runs of calls without text, unexpected results, calls that may run over a minute.
 - **Destructive git steps** run in their own Bash call: bundled with other edits, the auto-mode classifier denied the whole call.
@@ -38,14 +45,17 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - **Pickers answered with a question:** answer it as Q&A; after the second such answer in one item, refresh the handoff before asking again. Two of three pickers in one session (2026-11-02) came back as new questions, and context grew ~95k → ~135k inside the item.
 - **All lasting decisions at once:** before sending asks, list every lasting decision of the step, including which data files get committed. One ask sent after the first three returned cost 4 calls and another wait.
 - **Verdict pickers:** for a listening or visual check, open the page (`xdg-open URL`) before the picker that asks for the verdict; otherwise the answer is "open it" and the picker repeats.
+- **Parts that add up to a target** (word cuts, a budget): offer single-select combinations that each meet the target, plus "raise the target". A multiselect left the sum to the user: the pick covered 20 of 63 words and needed another picker.
 
 ## Delegation evidence
 
 - **Spare quota:** Launches fell from 16 (2026-10-13 to 10-20) to 2 in ~30 orchestrator sessions (10-21 to 10-26). A six-line CSS fix took ~8 calls through `delegate` against ~3 inline; one session sat idle for 12.5 min of review. Codex 7d peaked at 17/30/51/32/4/7/28/14% used over its eight weekly windows to 2026-10-26; Cursor Auto used 54% of the month before. Claude 7d ran at 97–99% used in both Pro weeks; on Max (since 2026-10-26) Claude may no longer be the scarcest pool. Codex 5h can be full from the user's own Codex Desktop use while 7d looks spare, so check 5h at dispatch.
 - **Second opinions:** in uses through 2026-10-20 the two models mostly picked the same option, and most rounds added a risk or corrected a fact in the question. One risk note contradicted a fact measured minutes later, hence the cheap checks first. Answers took 20 s to about 5 min, and about 6 min for a review at `--effort high`. One session (2026-10-21 to 10-26) deferred a public-API second opinion "because of context size". Context size is no reason to skip one: the question is a file and the answer is short. Read numbers from the config before writing them into a question: one question said 6 followed links where the config had 4.
 - **Web facts:** Cursor's ask mode has no web tools, and Codex's web tool in `ask` reads only a cache; live search needs `delegate launch codex --web-search`.
+- **Evidence at a commit:** Cursor's ask mode ran `ls -1` but rejected `git show` and compound commands (2026-11-04), so it read the working tree instead; that only matched because the tree was at the commit. Paste what the question needs, or have the tree at that commit.
 - **Asks as confirmation:** when your own probes already list every doubt, the ask mostly confirms and words the fixes (one fact-check, 2026-11-02: both vendors, 0 doubts beyond the list, under 3 min). Say so in the record, and still ask for doubts beyond the list: that is its only blind part.
 - **Visual builds** tuned by eye with live network input stay inline until the first good render (one ~100-line figure script took 3 calls); delegate later regeneration and variants.
+- **Mixed builders:** when a builder's content is judgement (per-item prose and analysis) beside near-copy code, split it: delegate the code from a spec stub and write the content inline. Written whole inline, one 20 KB builder was carried through ~25 later calls.
 
 ## Data checks
 
@@ -104,6 +114,7 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 ## Reads
 
 - Trim (`magick -trim`) and downscale renders and crops to ≤1000 px wide before reading them.
+- **Rendered pages:** screenshot the element or region that answers the question (one render row, one table), not the whole card.
 - Generated reports with wide tables: grep the `##` outline and read one section through `cut -c1-300`; a 240-line read of a 121 KB report cost ~25k. Send whole reads to `delegate ask`. For a diff that moves a large block, read `git diff --stat`, then the new functions by line range.
 - Dump catalogues with only the fields you need; read vendor PDFs by grepping for the section. To compare long headers with a peer file, tally with `grep -c` first.
 - **Transcripts:** picker answers and rejection reasons live in `tool_result` blocks, not typed prompts. `grep -c` counts lines, so on a one-line page count with `grep -o … | wc -l`.

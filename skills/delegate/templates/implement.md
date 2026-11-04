@@ -36,6 +36,8 @@
 ## `<verification_loop>`
 <!-- Tests to run, plus a real-data dry run with expected outcomes (exit code, key counts, sample rows).
      Compute the expected counts yourself by a different code path; ask for any difference with its cause, not a tuned rule.
+     A smoke run reports one sanity count per output (rows, tracks, events, RMS) and flags degenerate ones (0-1 tracks,
+     near-silent): "completed on all three excerpts" hid a 1-track render that every gate passed (2026-11-04).
      Network code: besides injected-response tests, one test through the real adapter with a fake session
      (mixed-case headers, a body that must not be read). Three rounds of injected tests missed a header-case bug. -->
 <verification_loop>

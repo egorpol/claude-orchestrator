@@ -20,6 +20,8 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- Rules from four field reports (2026-11-03 to 11-04): above ~100k the closing picker lists the `/clear` variant of `/field-report` first (`rules/hygiene.md`). Reference tips cover the git picker, gates outside the project venv, vendor fallbacks in handoffs, review-page steps, later-list requests, changelog sections, pickers whose parts add up to a target, mixed builders and rendered-page screenshots. The implement template asks a smoke run for one sanity count per output.
+- SKILL.md and the docs now agree on Cursor's ask mode: it runs simple commands such as `ls` and rejects `git show` and compound commands (tested 2026-11-04).
 - `delegate cost --calibrate --save` never overwrites a saved fit: before fitting, it refuses a target that exists and a `--since` that is missing or not later than every saved fit's in that folder, and suggests a new dated `calibration-*.json` name. It never replaces a file that appears meanwhile, so a racing save cannot clobber it, and the save line says which fit's period the new one ends.
 - `delegate cost --by-mode` estimates each session's Claude pool points with the fit in force at its first start (`calibration.json` and `calibration-*.json` beside it), shows Claude EST and READ per fit when there are several, and leaves out a READ that crosses a fit boundary; `--calibration P` still pins one fit.
 - `delegate report` shows a working-tree review as `review (working-tree): <agent> <model> <verdict>, …` instead of `claude None, 0 round(s)`; older run-log rows without `kind` are recognised by their shape.
@@ -30,6 +32,10 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - Briefs and reviews: the implement template asks for the hot-path invariant of a new free/dispose/release path and a list of the brief's factual claims with the probe behind each; the review template asks what the next use costs after each new release call; SKILL.md's fix rounds read a prescribed helper's docstring first. `rules/reference.md` adds tips on ask-only steps, memory files, pickers answered with questions, checker thresholds and self-tests, fetch timeouts and notebook greps (fold-in of seven field reports, 2026-11-01 to 11-03).
 - Rules from four field reports (2026-10-30 to 10-31): the closing picker's field-report options above ~100k (`rules/hygiene.md`); run a gate command before writing it into a handoff, measured numbers carry their non-default parameters, ask whether reading is done before picks, a substring match proves what a source says rather than the fact, picker answers live in `tool_result` blocks (`rules/reference.md`); `/next` flags a handoff found one folder down; SKILL.md's recipe for prose and fact reviews (numbered source dump via `--link`, known doubts in the brief).
 - The survey's last two roadmap ideas are closed (`docs/related-projects.md`): loop cost scoring as covered by the measured per-round pool costs in `delegate quota` and `route`, and pre-launch approval policies by the hook's unsandboxed check.
+
+### Fixed
+
+- `hooks/session-mode.py` reads heredocs as a shell does: a quoted delimiter's body is data, an unquoted one's is scanned for substitutions only, and a body fed to a shell stays commands. Prose in a heredoc no longer blocks a Bash call, and an apostrophe in a body no longer hides the command after it.
 
 ## [0.2.0] - 2026-10-30
 

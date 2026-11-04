@@ -430,6 +430,8 @@ def spawn_summary(path, session, args):
         pass
 
 
+# Keep these generic scanners in sync with secret-guard.py. Heredoc handling
+# below is session-mode-specific; ordinary shell text uses this shared path.
 def _substitution_end(text, start, backtick=False):
     """Find a substitution's close, retaining quote state across nested $(...)."""
     quote, stack, i = None, [None], start
@@ -496,6 +498,235 @@ def _shell_segments(text):
         buffer.append(char)
         i += 1
     parts.append("".join(buffer))
+    return parts
+
+
+def _heredoc_info(text, i):
+    """Read one << word, removing quotes and remembering whether it was quoted."""
+    i += 2
+    strip_tabs = i < len(text) and text[i] == "-"
+    if strip_tabs:
+        i += 1
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    delimiter, quote, quoted, started = [], None, False, False
+    while i < len(text):
+        char = text[i]
+        if quote is None and (char.isspace() or char in ";&|<>()"):
+            break
+        if char == "\\" and quote != "'":
+            if i + 1 >= len(text):
+                return None
+            following = text[i + 1]
+            if quote == '"' and following not in '$`\\\n"':
+                delimiter.append(char)
+                i += 1
+                continue
+            if following != "\n":
+                delimiter.append(following)
+                quoted, started = True, True
+            i += 2
+            continue
+        started = True
+        if char in ("'", '"'):
+            if quote is None:
+                quote, quoted = char, True
+                i += 1
+                continue
+            if quote == char:
+                quote = None
+                i += 1
+                continue
+        # Expansion-like delimiter syntax is outside this small parser. Keep scanning.
+        if quote is None and char in "$`":
+            return None
+        delimiter.append(char)
+        i += 1
+    if not started or quote is not None:
+        return None
+    return "".join(delimiter), strip_tabs, quoted, i
+
+
+def _skip_heredoc_body(text, i, delimiter, strip_tabs):
+    """Return the terminator's bounds, or None: missing terminators must not hide code."""
+    while i < len(text):
+        end = text.find("\n", i)
+        line = text[i:] if end < 0 else text[i:end]
+        following = len(text) if end < 0 else end + 1
+        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+            return i, following
+        i = following
+    return None
+
+
+def _heredoc_bodies(text, start, infos):
+    """Locate consecutive bodies; uncertain openers leave the whole text visible."""
+    bodies, i = [], start
+    for delimiter, strip_tabs, quoted, _ in infos:
+        end = _skip_heredoc_body(text, i, delimiter, strip_tabs)
+        if end is None:
+            return [], start
+        bodies.append((text[i:end[0]], quoted))
+        i = end[1]
+    return bodies, i
+
+
+def _heredoc_substitution_end(text, start, backtick=False):
+    """Find a substitution's close without reading heredoc data as shell syntax."""
+    if "<<" not in text[start:]:
+        return _substitution_end(text, start, backtick)
+    quote, stack, pending, i = None, [(None, [])], [], start
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and quote != "'":
+            i += 2
+            continue
+        if backtick and char == "`":
+            return i
+        if quote is None:
+            if char == "#" and (i == start or text[i - 1].isspace()):
+                end = text.find("\n", i)
+                i = len(text) if end < 0 else end
+                continue
+            if text.startswith("<<<", i):
+                i += 3
+                continue
+            if text.startswith("<<", i):
+                info = _heredoc_info(text, i)
+                if info is not None:
+                    pending.append(info)
+                    i = info[3]
+                    continue
+            if char == "\n":
+                _, i = _heredoc_bodies(text, i + 1, pending)
+                pending = []
+                continue
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif not backtick and quote != "'" and text.startswith("$(", i):
+            stack.append((quote, pending))
+            quote = None
+            pending = []
+            i += 1
+        elif not backtick and quote is None:
+            if char == "(":
+                stack.append((None, pending))
+                pending = []
+            elif char == ")":
+                quote, pending = stack.pop()
+                if not stack:
+                    return i
+        i += 1
+    return len(text)
+
+
+def _heredoc_substitutions(text):
+    """Unquoted heredocs expand substitutions even after literal apostrophes/quotes."""
+    parts, i = [], 0
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text.startswith("$(", i) or text[i] == "`":
+            backtick = text[i] == "`"
+            start = i + (1 if backtick else 2)
+            end = _heredoc_substitution_end(text, start, backtick)
+            parts.extend(_heredoc_shell_segments(text[start:end]))
+            i = end + 1
+            continue
+        i += 1
+    return parts
+
+
+def _heredoc_shell_segments(text, shell_reader=False):
+    """Split executable shell text, preserving only executable heredoc contents."""
+    if "<<" not in text:
+        return _shell_segments(text)
+    parts, buffer, quote, i = [], [], None, 0
+    line, substitutions, pending = [], [], []
+    command_output = False
+
+    def finish_line():
+        # Include the whole feeding line, including a pipeline's reader and the
+        # caller around a substitution. Matching shell names in arguments is safe:
+        # an uncertain reader must keep the body executable for this guard.
+        reader = shell_reader or command_output or re.search(
+            r"(?<![\w-])(?:bash|sh|zsh|dash|ksh|fish|eval|source)(?![\w-])"
+            r"|(?:^|[\s;&|()])\.(?=$|[\s;&|()])",
+            " ".join(_tokens("".join(line)))) is not None
+        for substitution in substitutions:
+            parts.extend(_heredoc_shell_segments(substitution, reader))
+        return reader
+
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and quote != "'" and i + 1 < len(text):
+            # A continued line is removed by the shell, rather than being a word break.
+            if text[i + 1] != "\n":
+                buffer.extend(text[i:i + 2])
+                line.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote is None and char == "#" and (not buffer or buffer[-1].isspace()):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            continue
+        if quote != "'" and (text.startswith("$(", i) or char == "`"):
+            backtick = char == "`"
+            start = i + (1 if backtick else 2)
+            end = _heredoc_substitution_end(text, start, backtick)
+            # In command position, the shell runs the substitution's output.
+            command_output = command_output or "".join(buffer).strip() in ("", '"')
+            substitutions.append(text[start:end])
+            buffer.append(" __substitution__ ")
+            line.append(" __substitution__ ")
+            i = end + 1
+            continue
+        if quote is None and text.startswith("<<<", i):
+            buffer.append("<<<")
+            line.append("<<<")
+            i += 3
+            continue
+        if quote is None and text.startswith("<<", i):
+            info = _heredoc_info(text, i)
+            if info is not None:
+                pending.append(info)
+                buffer.append(text[i:info[3]])
+                line.append(text[i:info[3]])
+                i = info[3]
+                continue
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif quote is None and char in ";&|\n()":
+            parts.append("".join(buffer))
+            buffer = []
+            i += 1
+            if char == "\n":
+                reader = finish_line()
+                bodies, i = _heredoc_bodies(text, i, pending)
+                for body, quoted in bodies:
+                    if reader:
+                        # An unquoted body loses one level of escapes before its reader runs it.
+                        text_for_reader = body if quoted else re.sub(r"\\([$`\\])", r"\1", body)
+                        parts.extend(_heredoc_shell_segments(text_for_reader, True))
+                    if not quoted:
+                        parts.extend(_heredoc_substitutions(body))
+                line, substitutions, pending = [], [], []
+                command_output = False
+            else:
+                line.append(char)
+            continue
+        buffer.append(char)
+        line.append(char)
+        i += 1
+    parts.append("".join(buffer))
+    finish_line()
     return parts
 
 
@@ -578,7 +809,7 @@ def _runs_delegate(words, depth):
 def bash_delegates(command, depth=0):
     if depth > 32:  # malformed/deeply nested input must not exhaust the hook stack
         return False
-    return any(_runs_delegate(_tokens(segment), depth) for segment in _shell_segments(command))
+    return any(_runs_delegate(_tokens(segment), depth) for segment in _heredoc_shell_segments(command))
 
 
 def blocked_detail(data):

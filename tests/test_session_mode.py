@@ -618,6 +618,61 @@ class SessionModeTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(SESSION_MODE.bash_delegates(command))
 
+    def test_bash_heredoc_data_substitutions_and_shell_readers(self):
+        deny = (
+            "cat > r.md <<EOF\n`delegate ask x`\nEOF\n",
+            "cat > r.md <<EOF\n$(codex exec hi)\nEOF\n",
+            "cat > r.md <<EOF\nit's $(delegate ask x)\nEOF\n",
+            "bash <<'EOF'\ndelegate ask x\nEOF\n",
+            "sh -s <<EOF\ncodex exec hi\nEOF\n",
+            "cat <<'EOF' | sh\ndelegate ask x\nEOF\n",
+            "eval \"$(cat <<'EOF'\ndelegate ask x\nEOF\n)\"",
+            "sh -c \"$(cat <<'EOF'\ndelegate ask x\nEOF\n)\"",
+            "echo \"$(cat <<'EOF'\ndelegate ask x\nEOF\n)\" | sh",
+            "cat <<'EOF' > f && delegate ask x\nprose\nEOF\n",
+            "cat > r.md <<'EOF'\nprose\nEOF\ndelegate ask x\n",
+            "cat > r.md <<'EOF'\nit's prose\nEOF\ndelegate ask x\n",
+            "git commit -m \"$(cat <<'EOF'\nit's (a\nEOF\n)\" && delegate ask x",
+            "x=\"$(cat <<'EOF'\n)\nEOF\n)\" && delegate ask x",
+            "( cat <<'EOF'\nprose\nEOF\n) && delegate ask x",
+            "cat <<'EOF'\ndelegate ask x\n",
+            "echo $((1<<2))\ndelegate ask x\n",
+            "# cat <<EOF\ndelegate ask x\n",
+            "echo \"<<EOF\"\ndelegate ask x\n",
+            "cat <<'A' <<'B'\none\nA\ntwo\nB\ndelegate ask x\n",
+            "sh <<EOF\n\\`delegate ask x\\`\nEOF\n",
+            "$(cat <<'EOF'\ndelegate ask x\nEOF\n)\n",
+            "true && \"$(cat <<'EOF'\ncodex exec hi\nEOF\n)\"\n",
+            "`cat <<'EOF'\ndelegate ask x\nEOF\n`\n",
+            "cat <<EOF | sh\n\\`codex exec hi\\`\nEOF\n",
+        )
+        allow = (
+            "cat > r.md <<'EOF'\ndelegate review NAME\nEOF\n",
+            "cat > r.md <<'EOF'\n- `delegate review` was skipped\nEOF\n",
+            "cat > r.md <<'EOF'\ncodex was not used\nEOF\n",
+            "cat > r.md <<-'EOF'\n\tcodex notes\n\tEOF\n",
+            "cat > r.md <<EOF\ncodex was not used\nEOF\n",
+            "cat > r.md <<\"EOF\"\ncodex notes\nEOF\n",
+            "cat > r.md <<\\EOF\ncodex notes\nEOF\n",
+            "cat > r.md << 'EOF'\ncodex notes\nEOF\n",
+            "git commit -m \"$(cat <<'EOF'\ndelegate review notes\nEOF\n)\"",
+            "cat <<'A' <<'B'\ncodex one\nA\ncodex two\nB\n",
+            "python3 - <<'EOF'\ndelegate ask x\nEOF\n",
+            "mkdir x && cat > x/r.md <<'EOF'\ndelegate review x\nEOF\n",
+            "cat <<EOF\n\\$(codex exec hi)\nEOF\n",
+            "cat <<EOF\n\\`delegate ask x\\`\nEOF\n",
+            "cat <<'EOF'\nEOF \ndelegate ask x\nEOF\n",
+            "cat <<'EOF'\n\tEOF\ndelegate ask x\nEOF\n",
+            "cat <<< 'delegate review x'",
+            "echo $((1<<2))",
+        )
+        for command in deny:
+            with self.subTest(command=command):
+                self.assertTrue(SESSION_MODE.bash_delegates(command))
+        for command in allow:
+            with self.subTest(command=command):
+                self.assertFalse(SESSION_MODE.bash_delegates(command))
+
     def test_orchestrator_and_unknown_mode_deny_nothing(self):
         for session in ("known", "unknown"):
             if session == "known":
