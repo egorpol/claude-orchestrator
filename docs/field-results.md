@@ -395,7 +395,7 @@ Each closed with `/field-report`; folded in on 2026-11-04. All four started insi
 
 ## 2026-11-04: field numbers moved out of the delegate reference files
 
-The delegate topic files now carry rules and reasons. These measurements were only told there.
+The delegate topic files and brief templates now carry rules and reasons. These measurements were only told there.
 
 - `briefs.md`: When a new query or source changes what the input attracts, check that the verifier's candidate rule still separates targets from the new noise: a licence query pulled in CC-licensed mirrors and papers, and candidates rose from 3 to 35.
 - `briefs.md`: Compute expected dry-run numbers yourself by a different code path, and ask for any difference with its cause rather than a tuned rule; Cursor then matched them exactly in both rounds.
@@ -415,6 +415,9 @@ The delegate topic files now carry rules and reasons. These measurements were on
 - `sessions.md`: Field result: one reply settled four design questions.
 - `sessions.md`: Four sessions in a row (2026-10-10) ran 3–10 items each up to ~280k; clearing at those boundaries would have saved about 18–33% of each.
 - `sessions.md`: Three sessions on 2026-10-11 started from a handoff and stopped at the next decision point: 18–21k cost units per call, against 24–29k for the sprawling ones and 67k for the 13-hour marathon.
+- `templates/implement.md`: Three rounds of injected tests missed a header-case bug.
+- `templates/research.md`: Scratch outside `.delegate/` flooded the exit packet once: 1016 files, +18.3M lines.
+- `templates/research.md`: A 40 KB fact sheet for a 1,000-word note was read in full (~10k tokens); ~15 KB with more sections on request would have done. For public writing, a second count per headline number and a privacy-flags section let the note go out in one pass (2026-10-12).
 
 ## 2026-11-04: one session, one project
 

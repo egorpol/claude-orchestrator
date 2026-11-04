@@ -23,7 +23,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 - Claude-only control sessions, when the prompt or the handoff's next step asks for delegated work, must say so in a text message before the first tool call, ask in a picker whether to work alone or with Claude subagents (any Claude model), and repeat the reason at the close: one session's notice stayed in a thinking block.
 - Session rules: a status line is a text message, and a claim needs its whole line. Topic tips cover verification-heavy items and truncated lines.
-- Trimmed the delegate topic files to rules and reasons; measurements told nowhere else moved to `docs/field-results.md`.
+- Trimmed the delegate topic files and brief templates to rules and reasons; measurements told nowhere else moved to `docs/field-results.md`.
 - `launch` and `followup --help` now say a `--link` path need not be gitignored; other paths warn and stay hidden from git status until cleanup.
 - Split the delegate skill into a short core and seven topics under `reference/`, read on demand; exit packets point to the review workflow when applicable and space permits.
 - Rules from four field reports (2026-11-03 to 11-04): above ~100k the closing picker lists the `/clear` variant of `/field-report` first (`rules/hygiene.md`). Reference tips cover the git picker, gates outside the project venv, vendor fallbacks in handoffs, review-page steps, later-list requests, changelog sections, pickers whose parts add up to a target, mixed builders and rendered-page screenshots. The implement template asks a smoke run for one sanity count per output.

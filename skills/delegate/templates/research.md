@@ -17,12 +17,12 @@
 
 ## `<scratch>`
 <!-- Keep scratch output (notebook copies, extracted cells, temp scripts) under `.delegate/` in the worktree.
-     It is git-excluded; scratch elsewhere floods the exit packet (once: 1016 files, +18.3M lines). -->
+     It is git-excluded; scratch elsewhere floods the exit packet. -->
 
 ## `<output_contract>`
 <!-- Word cap, required tables/sections, citation style. Every number comes from a script.
-     A 40 KB fact sheet for a 1,000-word note was read in full (~10k tokens); ~15 KB with more sections on request would have done.
-     For public writing, a second count per headline number and a privacy-flags section let the note go out in one pass (2026-10-12). -->
+     A fact sheet is read in full (40 KB is ~10k tokens), so cap it and offer more sections on request.
+     For public writing, the second count and the privacy flags below let a note go out in one pass. -->
 <output_contract>
 - word cap (about 15 KB for a short piece of writing; more sections on request):
 - tables:
