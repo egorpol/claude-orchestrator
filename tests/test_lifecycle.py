@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -319,6 +320,9 @@ class LifecycleTests(unittest.TestCase):
         wt = root / "wt"
         packet = self.last_packet(output)
         self.assertIn("round 1 | done", packet)
+        self.assertEqual(packet.splitlines()[-2],
+                         f"next: read {SCRIPTS.parent / 'reference' / 'review.md'} "
+                         "(cross-review, own review, fix rounds, merge, cleanup)")
         self.assertIn("exit 0 | verify pass", packet)
         self.assertIn(f"new-{agent}.txt: +1/-0", packet)  # new file, intent-to-add since finalize
         self.assertIn("files: 2 | +2/-0 total", packet)
@@ -378,6 +382,7 @@ class LifecycleTests(unittest.TestCase):
         output = self.cli("review", name)
         review_packet = self.last_packet(output)
         self.assertIn("review 1 | done", review_packet)
+        self.assertEqual(review_packet.splitlines()[-2], packet.splitlines()[-2])
         rv = root / "review-1"
         rv_meta = runs.load_meta(rv)
         verdict = "CHANGES REQUESTED" if agent == "codex" else "APPROVE"
@@ -1091,6 +1096,50 @@ class LifecycleTests(unittest.TestCase):
         self.launch("codex", "clean-warn")
         self.assertFalse((self.root("clean-warn") / "warnings").exists())
 
+    def test_read_only_round_omits_review_hint(self):
+        output = self.launch("codex", "read-only-hint", "--read-only")
+        self.assertNotIn("next: read ", self.last_packet(output))
+
+    def test_packet_hint_uses_copied_install_location(self):
+        self.launch("codex", "copied-hint")
+        copied = self.tmp / "copied-skill"
+        shutil.copytree(SCRIPTS.parent, copied)
+        result = subprocess.run(
+            [sys.executable, str(copied / "scripts" / "delegate"), "status", "copied-hint"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        packet = self.last_packet(result.stdout)
+        self.assertEqual(packet.splitlines()[-2],
+                         f"next: read {copied / 'reference' / 'review.md'} "
+                         "(cross-review, own review, fix rounds, merge, cleanup)")
+        (copied / "reference" / "review.md").unlink()
+        result = subprocess.run(
+            [sys.executable, str(copied / "scripts" / "delegate"), "status", "copied-hint"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("next: read ", self.last_packet(result.stdout))
+
+    def test_packet_drops_hint_first_when_fixed_lines_fill_budget(self):
+        self.launch("codex", "full-fixed")
+        root = self.root("full-fixed")
+        warnings = [f"warning: warning {i}" for i in range(3)]
+        (root / "warnings").write_text("\n".join(warnings) + "\n")
+        # Header, usage, file summary, three warnings, concerns and artifacts
+        # fill the packet before any file rows or optional hint can fit.
+        count = runs.PACKET_MAX_LINES - 7
+        for excess in (0, 1, 10):
+            concerns = [f"risks: concern {i}" for i in range(count + excess)]
+            with self.subTest(excess=excess), \
+                 patch.object(runs, "_concerns", return_value=concerns):
+                lines = runs.packet(root)
+            self.assertEqual(len(lines), runs.PACKET_MAX_LINES, lines)
+            self.assertTrue(lines[-1].startswith("artifacts:"))
+            self.assertFalse(any(line.startswith("next:") for line in lines))
+            for warning in warnings:
+                self.assertIn("WARNING: " + warning[len("warning: "):], lines)
+            self.assertEqual([line for line in lines if line.startswith("risks:")],
+                             concerns[:count])
+
     def test_packet_never_exceeds_20_lines_under_load(self):
         """Fixed lines are reserved first; file rows fill the remaining budget (≤20)."""
         self.launch("codex", "pkt-bound", "--verify", "printf 'FAILED (failures=1)\\n'")
@@ -1126,6 +1175,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("conflicts: alpha", text)
         self.assertIn("risks: beta", text)
         self.assertIn("conflicts/risks: gamma", text)
+        self.assertTrue(lines[-2].startswith("next: read "))
 
     def test_multiline_verify_echo_prefixes_each_line(self):
         """Every physical echoed command line gets `$ `, so comment patterns stay quiet."""

@@ -20,6 +20,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- Split the delegate skill into a short core and seven topics under `reference/`, read on demand; exit packets point to the review workflow when applicable and space permits.
 - Rules from four field reports (2026-11-03 to 11-04): above ~100k the closing picker lists the `/clear` variant of `/field-report` first (`rules/hygiene.md`). Reference tips cover the git picker, gates outside the project venv, vendor fallbacks in handoffs, review-page steps, later-list requests, changelog sections, pickers whose parts add up to a target, mixed builders and rendered-page screenshots. The implement template asks a smoke run for one sanity count per output.
 - SKILL.md and the docs now agree on Cursor's ask mode: it runs simple commands such as `ls` and rejects `git show` and compound commands (tested 2026-11-04).
 - `delegate cost --calibrate --save` never overwrites a saved fit: before fitting, it refuses a target that exists and a `--since` that is missing or not later than every saved fit's in that folder, and suggests a new dated `calibration-*.json` name. It never replaces a file that appears meanwhile, so a racing save cannot clobber it, and the save line says which fit's period the new one ends.

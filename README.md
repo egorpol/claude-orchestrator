@@ -35,7 +35,7 @@ The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysi
 | [`hooks/secret-guard.py`](hooks/secret-guard.py) | PreToolUse (Bash) and optional git pre-commit/pre-push: catches API tokens, private keys, home paths, key/env files, private names and added working files (`HANDOFF.md`, direct `feedback/*.md` or `*.jsonl`); also denies a sticking `cd`/`pushd` into a project subdirectory and notices a drifted shell `cwd`. Private literals go in `${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/private-names.txt`, one per line (blanks and `#` comments ignored); output masks names. Per-repo opt-outs: `git config secretGuard.homePaths false`, `git config secretGuard.privateNames false`, `git config secretGuard.workingFiles false`. |
 | [`rules/orchestrator.md`](rules/orchestrator.md) | Short rules for every session, including sessions that never load a skill. It imports [`hygiene.md`](rules/hygiene.md) (handoffs, pickers, data checks, shell) and [`delegation.md`](rules/delegation.md) (when to delegate, second opinions). Narrow tips by topic are in [`reference.md`](rules/reference.md), read on demand, so the injected text stays inline. |
 
-The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands `quota`, `ratings`, `route`, `catalog`, `launch`, `review`, `followup`, `verify`, `status`, `wait`, `diff`, `apply`, `cleanup`, `ask`, `cost`, `rate` and `report`. It is stdlib-only Python 3.9+. Tunables (models, pools, task weights, `prefer`) ship in [`catalog.json`](skills/delegate/scripts/catalog.json); personal overrides go in `catalog.local.json` (see SKILL.md Tuning; `delegate catalog` shows the merge). Brief templates are in [`templates/`](skills/delegate/templates/).
+The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands `quota`, `ratings`, `route`, `catalog`, `launch`, `review`, `followup`, `verify`, `status`, `wait`, `diff`, `apply`, `cleanup`, `ask`, `cost`, `rate` and `report`. It is stdlib-only Python 3.9+. Tunables (models, pools, task weights, `prefer`) ship in [`catalog.json`](skills/delegate/scripts/catalog.json); personal overrides go in `catalog.local.json` (see Tuning in `skills/delegate/reference/quota.md`; `delegate catalog` shows the merge). Brief templates are in [`templates/`](skills/delegate/templates/).
 
 **How this differs.** The [full orchestrators in the survey](docs/related-projects.md#full-orchestrators-alternatives-heavier) are supervisors a person watches: tmux panes, boards or a desktop app over many agents. Here, Claude Code stays the orchestrator inside one session. The official Codex plugin also delegates from Claude Code, but it works in the current checkout and only with Codex.
 
@@ -109,7 +109,8 @@ hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; h
 hooks/secret-guard.py              PreToolUse (Bash), git pre-commit/pre-push, --check: secrets, private names, working files; cwd stick/drift guard; asks before unsandboxed delegate runs
 hooks/session-mode.py              SessionStart/PreToolUse/SessionEnd: control-session draw, rules, summary rows
 rules/orchestrator.md              user-level rules for every session (install.sh --rules, or the session-mode hook)
-skills/delegate/SKILL.md           instructions Claude loads
+skills/delegate/SKILL.md           short core: always-needed rules, commands and workflow pointers
+skills/delegate/reference/         commands, sessions, briefs, quota, launch, review and agents; read on demand
 skills/delegate/templates/         brief templates (implement, mechanical, review, research)
 skills/delegate/scripts/           delegate CLI + catalog.json
 skills/field-report/SKILL.md       /field-report: write a field report from any project

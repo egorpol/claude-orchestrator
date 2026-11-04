@@ -1772,8 +1772,9 @@ def packet(job):
     """Rebuild a bounded notification packet entirely from existing artifacts.
 
     Never returns more than PACKET_MAX_LINES lines: fixed lines (header, usage,
-    summary, review, warnings, failure line, concerns, artifacts) are reserved
-    first; per-file rows fill whatever budget remains.
+    summary, review, warnings, failure line, concerns, next-step hint, artifacts)
+    are reserved first; per-file rows fill whatever budget remains. The hint is
+    the first fixed line omitted when space runs out.
     """
     root, meta, review_meta = _context(job)
     jm = review_meta or meta
@@ -1837,6 +1838,16 @@ def packet(job):
         paths += f" | {root / 'changes.patch'}"
     tail.append(paths)
     budget = PACKET_MAX_LINES - len(prefix) - len(mid) - len(tail)
+    review_guide = Path(__file__).resolve().parents[1] / "reference" / "review.md"
+    if (budget > 0 and review_guide.is_file()
+            and (review_meta is not None or meta.get("kind") == "working-tree"
+                 or not meta.get("read_only"))):
+        tail.insert(-1, f"next: read {review_guide} (cross-review, own review, fix rounds, merge, cleanup)")
+        budget -= 1
+    if budget < 0:
+        # Even fixed content must fit; preserve artifacts as the final line.
+        tail = tail[:max(0, PACKET_MAX_LINES - len(prefix) - len(mid) - 1)] + [paths]
+        budget = 0
     return prefix + _fit_file_rows(file_row_lines, budget) + mid + tail
 
 

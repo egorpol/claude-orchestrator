@@ -6,6 +6,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
 
 ## Layout
 
+- `skills/delegate/reference/`: workflow topics read on demand from the short `skills/delegate/SKILL.md` core (commands, sessions, briefs, quota, launch, review and agents).
 - `skills/delegate/scripts/delegate`: argparse entry point (no `.py` extension), dispatching to:
   - `quota.py`: pools from `openusage export`
   - `monitor.py`: closed-window unused share (`quota --unused`) and per-job pool costs / rounds left
@@ -51,7 +52,7 @@ bash -n install.sh
 - **Keep TMPDIR outside this checkout.** Nextcloud syncs `.delegate/tmp/` and flagged 912 test files there as having invalid modification times (2026-10-13).
 - **Real agent runs spend quota.** Use a throwaway repo in the scratchpad.
 - **Installer:** test it against `CLAUDE_CONFIG_DIR=<scratch>`, never the real `~/.claude`.
-- **Docs:** after a behaviour change, update SKILL.md, plus `docs/verified-behaviour.md` with the date when the fact was tested live, plus a line under `[Unreleased]` in CHANGELOG.md.
+- **Docs:** after a behaviour change, update the matching topic in `skills/delegate/reference/` (or the SKILL.md core for always-needed rules), plus `docs/verified-behaviour.md` with the date when the fact was tested live, plus a line under `[Unreleased]` in CHANGELOG.md.
 
 ## Rules that must not regress
 
@@ -72,7 +73,7 @@ bash -n install.sh
 
 - **Folding in field reports:** list `feedback/*.md` newer than the last "fold in" commit. For each lesson:
   - a rule for every session goes into `rules/hygiene.md`, or into `rules/delegation.md` if it is about delegating;
-  - delegate workflow goes into SKILL.md or `templates/`;
+  - delegate workflow goes into the matching topic file in `skills/delegate/reference/` or `templates/`;
   - a CLI or hook bug becomes a fix plus a test.
 
   Append a dated section with the sessions' numbers to `docs/field-results.md`, with `delegate cost --session <id>` as the source, and refresh the overview table there. If a headline number in README changes, re-check it against that table. Reports name other projects' private details; carry lessons over, not quotes.
