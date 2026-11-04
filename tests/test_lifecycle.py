@@ -839,6 +839,48 @@ class LifecycleTests(unittest.TestCase):
                     self.assertNotIn(warning, r.stderr)
                 self.cli("cleanup", name, "--force", "--purge")
 
+    def test_launch_dry_run_previews_only_non_gitignored_link_warnings(self):
+        for link in ("loose-input", "data/cache"):
+            with self.subTest(link=link):
+                (self.repo / link).mkdir(parents=True)
+                before = self.snapshot(self.tmp)
+                r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "dry-link-warning",
+                                 "--link", link, "--dry-run")
+                warning = (f"WARNING: --link {link} is not gitignored in the main checkout; "
+                           "the real command would hide it from git status via .git/info/exclude until cleanup")
+                if link == "loose-input":
+                    self.assertIn(warning, r.stderr.splitlines())
+                else:
+                    self.assertNotIn("WARNING: --link", r.stderr)
+                self.assertNotIn("WARNING: --link", r.stdout)
+                self.assertNotIn("hides it from git status there too", r.stderr)
+                self.assertEqual(self.snapshot(self.tmp), before)
+                self.assertFalse(self.root("dry-link-warning").exists())
+                self.assertEqual(self.git("branch", "--list", "delegate/*"), "")
+                self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+
+    def test_followup_dry_run_previews_only_new_non_gitignored_link_warnings(self):
+        self.launch("codex", "follow-dry-warning", "--read-only")
+        root = self.root("follow-dry-warning")
+        for link in ("loose-input", "data/cache"):
+            with self.subTest(link=link):
+                (self.repo / link).mkdir(parents=True)
+                before = self.snapshot(self.tmp)
+                r = self.cli_raw("followup", "follow-dry-warning", "--brief", self.follow_brief,
+                                 "--link", link, "--dry-run")
+                warning = (f"WARNING: --link {link} is not gitignored in the main checkout; "
+                           "the real command would hide it from git status via .git/info/exclude until cleanup")
+                if link == "loose-input":
+                    self.assertIn(warning, r.stderr.splitlines())
+                else:
+                    self.assertNotIn("WARNING: --link", r.stderr)
+                self.assertNotIn("WARNING: --link", r.stdout)
+                self.assertNotIn("hides it from git status there too", r.stderr)
+                self.assertEqual(self.snapshot(self.tmp), before)
+                self.assertFalse((root / "wt" / link).exists())
+                self.assertFalse((root / "round-1").exists())
+                self.assertFalse((root / "warnings").exists())
+
     def test_launch_dry_run_checks_link_destination_at_selected_base(self):
         base = self.git("rev-parse", "HEAD")
         (self.repo / "later-input").write_text("added after base\n")

@@ -7,9 +7,9 @@ Read before step 1, bulk labelling, long runs or catalog tuning; paths such as `
 ## Long runs and bulk labelling
 
 - **Read-only is not blind.** Codex read-only and Cursor ask mode can still read reference labels in the repo. Run labelling or eval calls from an empty temp dir (`cursor-agent` then needs `--trust`).
-- **Gate each chunk on quota** (`delegate quota --json --source direct`): pause at the codex-5h floor, stop at the 7d or Auto floor, and log quota per chunk. Gauges are whole percents, and a 300-label pilot overestimated the per-label cost about 2×.
-- **Pools differ a lot for bulk work.** For 6.5k labels (2026-10-10), grok-4.7-low used about 2.7 points of Cursor Auto, while gpt-6.1-sol@low used about 15 points of Codex 7d and drained the 5h pool once.
-- **Detached drivers write their own PID file** (`os.getpid()`). `pgrep` after `setsid nohup` found the launcher's PID instead.
+- **Gate each chunk on quota** (`delegate quota --json --source direct`): pause at the codex-5h floor, stop at the 7d or Auto floor, and log quota per chunk. Gauges are whole percents, so small pilots can misestimate per-label cost.
+- **Pools differ a lot for bulk work.** For 6.5k labels, grok-4.7-low used about 2.7 points of Cursor Auto, while gpt-6.1-sol@low used about 15 points of Codex 7d and drained the 5h pool once.
+- **Detached drivers write their own PID file** (`os.getpid()`). `pgrep` after `setsid nohup` can return the launcher's PID.
 - **Triage verdicts that drive fixes:** when a fix changes timing or structure, re-run the checks on neighbouring elements before review; a "false positive" verdict can turn true once the fix next to it lands.
 
 ## Tuning

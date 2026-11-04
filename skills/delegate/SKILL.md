@@ -43,7 +43,8 @@ Read `~/.claude/skills/delegate/reference/commands.md` for the full command tabl
 0. Read `~/.claude/skills/delegate/reference/briefs.md` first; fetch inputs, inspect real data and prepare acceptance checks before briefing. Before putting a decision to the user, also read `~/.claude/skills/delegate/reference/sessions.md`.
 1. Read `~/.claude/skills/delegate/reference/quota.md` first; check quota, pick a delegate and tell the user why.
 2. Read `~/.claude/skills/delegate/reference/briefs.md` first; write a brief for one job per run. State intent, not mechanism; explain the reason behind each constraint and name owned and off-limits files.
-   Put a real-data dry run with expected outcomes in `--verify`, computing expectations by a different code path; prove the checker fails on a planted failure, and run `--preflight` when the checker is new or reads `--link`ed inputs.
+   Scale the checker to the job as described under Acceptance scripts in `briefs.md`.
+   Put a real-data dry run with expected outcomes in `--verify`, computing expectations by a different code path; for new modules, parsers, guards and data checks, prove the checker fails on a planted failure, and run `--preflight` when the checker is new or reads `--link`ed inputs.
 3. Read `~/.claude/skills/delegate/reference/launch.md` first; launch in the background and build your independent checker while the run works.
 4. Read `~/.claude/skills/delegate/reference/review.md` first; arrange cross-vendor review for non-trivial changes after your first pass.
 5. Read `~/.claude/skills/delegate/reference/review.md` first; review the patch yourself and rerun tests and real-data checks.

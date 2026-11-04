@@ -20,6 +20,8 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- Trimmed the delegate topic files to rules and reasons; measurements told nowhere else moved to `docs/field-results.md`.
+- `launch` and `followup --help` now say a `--link` path need not be gitignored; other paths warn and stay hidden from git status until cleanup.
 - Split the delegate skill into a short core and seven topics under `reference/`, read on demand; exit packets point to the review workflow when applicable and space permits.
 - Rules from four field reports (2026-11-03 to 11-04): above ~100k the closing picker lists the `/clear` variant of `/field-report` first (`rules/hygiene.md`). Reference tips cover the git picker, gates outside the project venv, vendor fallbacks in handoffs, review-page steps, later-list requests, changelog sections, pickers whose parts add up to a target, mixed builders and rendered-page screenshots. The implement template asks a smoke run for one sanity count per output.
 - SKILL.md and the docs now agree on Cursor's ask mode: it runs simple commands such as `ls` and rejects `git show` and compound commands (tested 2026-11-04).
@@ -36,6 +38,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Fixed
 
+- `launch --dry-run` and `followup --dry-run` now print the `--link` not-gitignored warning as a preview on stderr.
 - `delegate ask --agent both` finds a Cursor `Pick:` glued to a status line that ends in a colon (`…re-saving:**Pick: B**`); the `## picks` block printed "no Pick line found" for these.
 - `hooks/secret-guard.py` reads heredocs as a shell does for commit/push analysis: a body is data unless a shell reads it (so prose that only mentions commit-then-push is no longer denied), and an apostrophe in a body no longer hides a real commit-then-push after it.
 - `hooks/session-mode.py` reads heredocs as a shell does: a quoted delimiter's body is data, an unquoted one's is scanned for substitutions only, and a body fed to a shell stays commands. Prose in a heredoc no longer blocks a Bash call, and an apostrophe in a body no longer hides the command after it.

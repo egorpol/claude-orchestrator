@@ -393,6 +393,29 @@ Each closed with `/field-report`; folded in on 2026-11-04. All four started insi
 - **Delegation worked where probes came first.** A probe proven on the unfixed tree and on an independent scratch fix before the run returned checked the result in one call. A brief with invariants, adversarial cases and exact public sentences gave a one-round build. A checker with a planted defect made re-verifying one call. Two second opinions each named a different risk.
 - **Not adopted.** Auto-running the cwd guard's wrapped form (two more reports; it would still need an `allow`, which skips the permission prompt), `delegate history --verify-grep` (a grep over `meta.json` covers it), an `ask` warning on `git show` (one report; the docs cover it) and a `--region` flag for screenshot helpers (project tooling, not this repo). The repeat-session quickref one report asks for belongs to the SKILL.md split, still the next candidate item.
 
+## 2026-11-04: field numbers moved out of the delegate reference files
+
+The delegate topic files now carry rules and reasons. These measurements were only told there.
+
+- `briefs.md`: When a new query or source changes what the input attracts, check that the verifier's candidate rule still separates targets from the new noise: a licence query pulled in CC-licensed mirrors and papers, and candidates rose from 3 to 35.
+- `briefs.md`: Compute expected dry-run numbers yourself by a different code path, and ask for any difference with its cause rather than a tuned rule; Cursor then matched them exactly in both rounds.
+- `briefs.md`: Files the brief names outside the worktree, such as another session's scratchpad, may be unreadable in the delegate's sandbox: Cursor's couldn't read 72 screenshots under `/tmp`, so its visual claims were guesses (2026-10-13).
+- `launch.md`: In the field it was ready when the notification came, and its planted failure gave 17 FAILs and exit 1.
+- `launch.md`: **Duration:** Codex @xhigh built a well-specified 1.6k-line module with 48 tests in 16 min (2026-10-12), against a "30–90 minutes" estimate. (1.6k counts the tests: the module itself was 887 lines, as in the 2026-10-12 section.)
+- `launch.md`: On this repo (2026-10-13) the base suite took 32 s and a missing checker failed in under a second.
+- `review.md`: A Codex xhigh review costs ~15 points of codex-5h: start it after your own first pass with those findings listed that way (run blind, 4 of its 4 findings repeated the own list, 2026-10-28).
+- `quota.md`: Gauges are whole percents, and a 300-label pilot overestimated the per-label cost about 2×.
+- `review.md`: Put known issues into `--focus` as "already handled: …, ignore"; listed as things to check, they come back as findings (2 of 4 on 2026-10-13).
+- `review.md`: For heuristic code (parsers, scanners, warnings), give real-data frequencies and a stopping rule ("forms that never occur in real input are low"): two reviews of a shell parser each listed 5–6 rarer forms.
+- `review.md`: In the field this found two gaps the review did not list.
+- `review.md`: Before a fix brief prescribes a helper or option, read its docstring for defaults and clipping, and let the delegate quote the value it prints: a prescribed sentence called a helper's -120 dB floor the resampler's (2026-11-01).
+- `review.md`: Field incident: docs said ≤1 request/s while code paced 0.1 s apart.
+- `review.md`: For data releases, diff old and new output and check every changed headline value against a source: gates passed on two builds that each carried two false-PD flips.
+- `sessions.md`: From 2026-10-13 to 10-26 Codex 7d and Cursor Auto mostly reset unused while Claude 7d ran at 97–99% used on Pro; on Max (since 2026-10-26) Claude may no longer be the scarcest pool.
+- `sessions.md`: Field result: one reply settled four design questions.
+- `sessions.md`: Four sessions in a row (2026-10-10) ran 3–10 items each up to ~280k; clearing at those boundaries would have saved about 18–33% of each.
+- `sessions.md`: Three sessions on 2026-10-11 started from a handoff and stopped at the next decision point: 18–21k cost units per call, against 24–29k for the sprawling ones and 67k for the 13-hour marathon.
+
 ## Still open
 
 - Control sessions: USD per finished item needs many more items per arm before the arms can be compared. Re-read `delegate cost --by-mode` as sessions accumulate.

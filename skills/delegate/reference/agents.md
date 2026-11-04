@@ -17,10 +17,10 @@ Read before selecting per-agent flags, handling environment gotchas or inspectin
 
 - The launcher strips Cursor AppImage variables (`LD_LIBRARY_PATH`, `/tmp/.mount_*` PATH entries), `VSCODE_*`, `CURSOR_*`, `CLAUDE_CODE_*` (including the messaging token), and virtualenvs that belong to another repo.
 - Python editable installs: inside the worktree, `import pkg` can resolve to the main checkout. Check with `python -c "import pkg; print(pkg.__file__)"` or use `PYTHONPATH=.`.
-- A gitignore rule `dir/` does not match a symlink; `--link` writes exact paths (and `/.delegate`) to `.git/info/exclude`. Paths not independently gitignored (including ones only hidden by a tool `/path` exclude line) are warned at launch; newly appended lines are owned in `meta.excluded` and removed or transferred on cleanup. Only real link symlinks are left out of `changes.patch` and the cleanup dirty check.
+- A gitignore rule `dir/` does not match a symlink; `--link` writes exact paths (and `/.delegate`) to `.git/info/exclude`. Paths not independently gitignored (including tool `/path` excludes) warn at launch; newly appended lines are owned in `meta.excluded` and removed or transferred on cleanup. Only real link symlinks are left out of `changes.patch` and the cleanup dirty check.
 - **Codex's sandbox blocks Jupyter kernel sockets** (`nbclient` fails with `PermissionError`). Run extracted cells with the venv's `ipython`, or run notebooks in `--verify`, which runs outside the sandbox.
 - **`--link`ed paths are read-only inside Codex's sandbox:** the symlink resolves outside the worktree (`Read-only file system`, tested 2026-10-30). Have the delegate write output under the worktree, and leave writes to linked folders to `--verify`.
-- **Clean up only what the session created.** Build into the scratchpad (`--outdir`) instead of deleting the repo's `build/` afterwards.
+- **Clean up only what the session created.** Use scratchpad `--outdir` for builds, leaving the repo's `build/` intact.
 - **Bash runs zsh:** an unquoted `$var` does not split into words. Loop over a file list with `while read`.
 - Untracked files count as changes. `run.sh` exports `PYTHONDONTWRITEBYTECODE=1`, so test runs leave no `.pyc`; other build output (`node_modules`, `dist`) needs a `.gitignore` in the target repo, or it lands in the patch.
 

@@ -230,7 +230,8 @@ def main():
     s.add_argument("--base", help="commit-ish to branch from (default HEAD)")
     s.add_argument("--root", help=f"run directory (default {runs.RUNS_ROOT}/<repo>/<name>)")
     s.add_argument("--link", action="append", default=[],
-                   help="repo-relative gitignored path to symlink into the worktree (repeatable), e.g. data/cache")
+                   help="repo-relative path to symlink into the worktree (repeatable), e.g. data/cache; "
+                        "best gitignored: any other path warns and stays hidden from git status until cleanup")
     s.add_argument("--include-uncommitted", action="store_true",
                    help="snapshot the main checkout's dirty tree (tracked + non-ignored untracked) as "
                         "the run's base; incompatible with --base; refuses >100 untracked files or "
@@ -265,7 +266,8 @@ def main():
     s.add_argument("--effort")
     s.add_argument("--verify", metavar="CMD", help="override the run's verify command")
     s.add_argument("--link", action="append", default=[],
-                   help="repo-relative gitignored path to symlink into the worktree (repeatable)")
+                   help="repo-relative path to symlink into the worktree (repeatable); "
+                        "best gitignored: any other path warns and stays hidden from git status until cleanup")
     s.add_argument("--detach", action="store_true")
     s.add_argument("--dry-run", action="store_true", help="show what would run; archive nothing")
     s.set_defaults(fn=runs.followup)

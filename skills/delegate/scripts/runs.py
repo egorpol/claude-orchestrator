@@ -571,6 +571,16 @@ def validate_link(repo, link, wt=None, existing=(), base=None):
         sys.exit(f"--link {link}: {dst} already exists in the worktree (tracked path?)")
 
 
+def _print_link_warning(repo, link, dry_run=False):
+    """Warn on stderr only; return whether the path needs a warning."""
+    if not _needs_link_warning(repo, link):
+        return False
+    action = ("the real command would hide it from git status via .git/info/exclude until cleanup"
+              if dry_run else "until cleanup, .git/info/exclude hides it from git status there too")
+    print(f"WARNING: --link {link} is not gitignored in the main checkout; {action}", file=sys.stderr)
+    return True
+
+
 def add_links(repo, wt, paths, existing=()):
     """Validate links first, then install them and share launch/followup exclusions.
 
@@ -582,9 +592,7 @@ def add_links(repo, wt, paths, existing=()):
     recordable = []
     for link in paths:
         pattern = "/" + link.strip("/")
-        if _needs_link_warning(repo, link):
-            print(f"WARNING: --link {link} is not gitignored in the main checkout; until cleanup, "
-                  f".git/info/exclude hides it from git status there too", file=sys.stderr)
+        if _print_link_warning(repo, link):
             recordable.append(pattern)
     for link in paths:
         dst = wt / link
@@ -736,6 +744,8 @@ def launch(a):
         for link in links:
             validate_link(repo, link, wt=wt, base=base_sha)
     if a.dry_run:
+        for link in links:
+            _print_link_warning(repo, link, dry_run=True)
         if will_snapshot:
             print(f"[dry run] would snapshot uncommitted work on top of {head_sha[:9]}")
             snapshot_txt = _snapshot_contract_bullet("SNAPSHOT", head_sha[:9])
@@ -880,6 +890,8 @@ def followup(a):
         validate_link(Path(meta["repo"]), link, wt=wt, existing=meta.get("links", []))
     archive = root / f"round-{k}"
     if a.dry_run:
+        for link in new_links:
+            _print_link_warning(Path(meta["repo"]), link, dry_run=True)
         print(f"[dry run] round {k + 1}: {meta['agent']} {model}"
               + (f", resuming session {sid}" if sid else ", fresh session") + f"\n---- brief ----\n{text}")
         return

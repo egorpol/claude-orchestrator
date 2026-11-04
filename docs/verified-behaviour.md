@@ -10,6 +10,9 @@ Facts tested live, dated, so a reader can tell what may have changed since.
 - **The split skill's read-first pointers worked in one trial.** A Claude subagent got a core of under 5 KB and a small delegation task, with `launch --dry-run` as its limit. Its prompt named no topic file. Its transcript shows it read `reference/briefs.md`, `quota.md`, `launch.md` and `agents.md` before it wrote the brief. This is one run with a clean prompt, so it doesn't show what busy sessions do.
 - **The exit packet hint on real records:** `delegate status` printed `next: read <absolute path>/reference/review.md (...)` directly before `artifacts:` on a finished run, and no hint on a `--read-only` record. A sweep of 0 to 25 concerns on a test run never passed 20 lines, kept `artifacts:` last, and dropped the hint only when no line was free.
 - **`launch --preflight --dry-run` exits 1** ("a preflight is always a foreground check"), and `route` accepts only `review`, `refactor`, `implement`, `research` or `bulk-label`: free text exits 1.
+- `delegate launch --brief <path in a Claude scratchpad>` prints no warning and exits 0: the file is read at launch and copied to the run's `brief.md`. A `/tmp/claude-*/` path written in the brief's text does warn, on `--dry-run` too.
+- An untracked `check.py` is not in the worktree: `--verify 'python3 check.py' --preflight` fails with rc 2 and `can't open file`. With `--link check.py` it passes, and the not-gitignored warning prints.
+- `launch --link <path that isn't gitignored>` is accepted with a warning and exit 0. Before this date `--dry-run` printed no such warning, while `--preflight` did.
 
 ## 2026-11-03
 
