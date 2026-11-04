@@ -123,7 +123,274 @@ def _tokens(segment):
         return segment.split()
 
 
+def _heredoc_info(text, i):
+    """Read one << word, removing quotes and remembering whether it was quoted."""
+    i += 2
+    strip_tabs = i < len(text) and text[i] == "-"
+    if strip_tabs:
+        i += 1
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    delimiter, quote, quoted, started = [], None, False, False
+    while i < len(text):
+        char = text[i]
+        if quote is None and (char.isspace() or char in ";&|<>()"):
+            break
+        if char == "\\" and quote != "'":
+            if i + 1 >= len(text):
+                return None
+            following = text[i + 1]
+            if quote == '"' and following not in '$`\\\n"':
+                delimiter.append(char)
+                i += 1
+                continue
+            if following != "\n":
+                delimiter.append(following)
+                quoted, started = True, True
+            i += 2
+            continue
+        started = True
+        if char in ("'", '"'):
+            if quote is None:
+                quote, quoted = char, True
+                i += 1
+                continue
+            if quote == char:
+                quote = None
+                i += 1
+                continue
+        # Expansion-like delimiter syntax is outside this small parser. Keep scanning.
+        if quote is None and char in "$`":
+            return None
+        delimiter.append(char)
+        i += 1
+    if not started or quote is not None:
+        return None
+    return "".join(delimiter), strip_tabs, quoted, i
+
+
+# Renamed from session-mode's ``_skip_heredoc_body`` (that name already means
+# "advance past the body; return the next index" in this file).
+def _heredoc_terminator(text, i, delimiter, strip_tabs):
+    """Return the terminator's bounds, or None: missing terminators must not hide code."""
+    while i < len(text):
+        end = text.find("\n", i)
+        line = text[i:] if end < 0 else text[i:end]
+        following = len(text) if end < 0 else end + 1
+        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+            return i, following
+        i = following
+    return None
+
+
+def _heredoc_bodies(text, start, infos):
+    """Locate consecutive bodies; uncertain openers leave the whole text visible."""
+    bodies, i = [], start
+    for delimiter, strip_tabs, quoted, _ in infos:
+        end = _heredoc_terminator(text, i, delimiter, strip_tabs)
+        if end is None:
+            return [], start
+        bodies.append((text[i:end[0]], quoted))
+        i = end[1]
+    return bodies, i
+
+
+def _heredoc_substitution_end(text, start, backtick=False):
+    """Find a substitution's close without reading heredoc data as shell syntax."""
+    if "<<" not in text[start:]:
+        return _substitution_end(text, start, backtick)
+    quote, stack, pending, i = None, [(None, [])], [], start
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and quote != "'":
+            i += 2
+            continue
+        if backtick and char == "`":
+            return i
+        if quote is None:
+            if char == "#" and (i == start or text[i - 1].isspace()):
+                end = text.find("\n", i)
+                i = len(text) if end < 0 else end
+                continue
+            if text.startswith("<<<", i):
+                i += 3
+                continue
+            if text.startswith("<<", i):
+                info = _heredoc_info(text, i)
+                if info is not None:
+                    pending.append(info)
+                    i = info[3]
+                    continue
+            if char == "\n":
+                _, i = _heredoc_bodies(text, i + 1, pending)
+                pending = []
+                continue
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif not backtick and quote != "'" and text.startswith("$(", i):
+            stack.append((quote, pending))
+            quote = None
+            pending = []
+            i += 1
+        elif not backtick and quote is None:
+            if char == "(":
+                stack.append((None, pending))
+                pending = []
+            elif char == ")":
+                quote, pending = stack.pop()
+                if not stack:
+                    return i
+        i += 1
+    return len(text)
+
+
 # --- end copied parsers ---
+
+# Same reader rule as session-mode's ``_heredoc_shell_segments`` (per-line shell
+# words plus command-position substitutions).
+_HEREDOC_READER_RE = re.compile(
+    r"(?<![\w-])(?:bash|sh|zsh|dash|ksh|fish|eval|source)(?![\w-])"
+    r"|(?:^|[\s;&|()])\.(?=$|[\s;&|()])"
+)
+
+
+# Not a copy of session-mode's splitter: this hook needs order and cwd, so the
+# rewrite keeps ``( )`` / ``$( )`` / operators and lets ``_walk_shell`` apply
+# them. Limit: ``cat > s <<'EOF' … EOF`` followed by ``bash s`` is not denied
+# when the file name lacks ``.sh``. session-mode lists the same limit. Measured
+# over 1,837 real heredoc file writes: 5 are run later in the same call, all 5
+# have ``.sh`` names, and none has git commands in the body.
+# The reader rule is per line, so these are read as data too: ``cat <<'EOF' |``
+# with ``sh`` after the body, a multi-line loop or ``{ }`` whose reader sits
+# above ``done <<'EOF'``, a function fed a body, ``X=1`` or a wrapper such as
+# ``exec`` before ``$(cat <<'EOF' …)``.
+# None of the 7,165 real heredoc commands has one of these with git in it.
+def _rewrite_heredocs(text, shell_reader=False):
+    """Copy shell text, dropping data heredoc bodies and inlining kept ones."""
+    if "<<" not in text:
+        return text
+    out, line, quote, i = [], [], None, 0
+    pending, subst_slots, command_output = [], [], False
+    command_start = 0  # where the current command begins in ``line``
+
+    def finish_line():
+        nonlocal command_output
+        # Include the whole feeding line, including a pipeline's reader and the
+        # caller around a substitution. Matching shell names in arguments is safe:
+        # an uncertain reader must keep the body executable for this guard.
+        reader = shell_reader or command_output or (
+            _HEREDOC_READER_RE.search(" ".join(_tokens("".join(line)))) is not None)
+        for slot, inner, backtick in subst_slots:
+            rewritten = _rewrite_heredocs(inner, reader)
+            out[slot] = (
+                f"`{rewritten}`" if backtick else f"$({rewritten})"
+            )
+        subst_slots.clear()
+        command_output = False
+        return reader
+
+    def emit_unquoted_substitutions(body):
+        j = 0
+        while j < len(body):
+            if body[j] == "\\":
+                j += 2
+                continue
+            if body.startswith("$(", j) or body[j] == "`":
+                backtick = body[j] == "`"
+                start = j + (1 if backtick else 2)
+                end = _heredoc_substitution_end(body, start, backtick)
+                rewritten = _rewrite_heredocs(body[start:end], False)
+                if backtick:
+                    out.append(f": `{rewritten}`\n")
+                else:
+                    out.append(f": $({rewritten})\n")
+                j = end + 1
+                continue
+            j += 1
+
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and quote != "'" and i + 1 < len(text):
+            # A continued line is removed by the shell, rather than being a word break.
+            if text[i + 1] != "\n":
+                out.append(text[i:i + 2])
+                line.append(text[i:i + 2])
+            i += 2
+            continue
+        if (quote is None and char == "#"
+                and (len(line) == command_start or line[-1].isspace())):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            continue
+        if quote != "'" and (text.startswith("$(", i) or char == "`"):
+            backtick = char == "`"
+            start = i + (1 if backtick else 2)
+            end = _heredoc_substitution_end(text, start, backtick)
+            # In command position, the shell runs the substitution's output.
+            before = "".join(line[command_start:]).strip().rstrip('"')
+            command_output = command_output or all(
+                word in SHELL_KEYWORDS for word in before.split())
+            subst_slots.append((len(out), text[start:end], backtick))
+            out.append(None)
+            line.append(" __substitution__ ")
+            i = end + 1
+            continue
+        if quote is None and text.startswith("<<<", i):
+            out.append("<<<")
+            line.append("<<<")
+            i += 3
+            continue
+        if quote is None and text.startswith("<<", i):
+            info = _heredoc_info(text, i)
+            if info is not None:
+                pending.append(info)
+                out.append(text[i:info[3]])
+                line.append(text[i:info[3]])
+                i = info[3]
+                continue
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif quote is None and char in ";&|\n()":
+            out.append(char)
+            i += 1
+            if char == "\n":
+                infos, pending = pending, []
+                reader = finish_line()
+                if infos:
+                    bodies, after = _heredoc_bodies(text, i, infos)
+                    if not bodies:
+                        # Uncertain opener/terminator: keep today's visibility.
+                        line, command_start = [], 0
+                        continue
+                    for body, quoted in bodies:
+                        if reader:
+                            # An unquoted body loses one level of escapes before its reader runs it.
+                            text_for_reader = (
+                                body if quoted else re.sub(r"\\([$`\\])", r"\1", body)
+                            )
+                            # eval so handle_one re-enters on the body alone; quotes stay inside
+                            # the word and the line stays inside any enclosing ( ).
+                            out.append("eval " + shlex.quote(text_for_reader) + "\n")
+                        if not quoted:
+                            emit_unquoted_substitutions(body)
+                    i = after
+                line = []
+            else:
+                line.append(char)
+            command_start = len(line)
+            continue
+        out.append(char)
+        line.append(char)
+        i += 1
+    finish_line()
+    return "".join(out)
+
 
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 ZERO_SHA = "0" * 40
@@ -1544,8 +1811,11 @@ def _walk_shell(text, work, handle_one, depth=0, *, skip_heredocs=False,
                 cwd_control=False):
     """Walk shell text like analyze_command: (…)/$(…)/`…` isolate cwd changes.
 
-    ``handle_one(segment, work, depth) -> new_work``. When ``skip_heredocs``,
-    heredoc bodies after the line that opened them are data, not commands.
+    ``handle_one(segment, work, depth) -> new_work``. When ``skip_heredocs``
+    and ``cwd_control``, heredoc bodies after the line that opened them are
+    data, not commands (cd / sandbox checks). Push/commit analysis does not
+    use ``skip_heredocs`` here: ``_walk_push_commit`` rewrites heredocs first,
+    then calls this so order and cwd isolation stay intact.
     ``cwd_control`` (cd check only) recognises ``&&``/``||``, isolates
     background and non-last pipeline segments, and skips ``||`` alternatives
     under an every-command-succeeds model. Leave it False for push/commit
@@ -1658,6 +1928,17 @@ def _walk_shell(text, work, handle_one, depth=0, *, skip_heredocs=False,
     return work
 
 
+def _walk_push_commit(text, work, handle_one, depth=0):
+    """Walk shell text for push/commit analysis, reading heredocs as a shell does.
+
+    No ``<<``: same path as before. With heredocs: rewrite bodies in place, then
+    one ``_walk_shell`` pass so ``( )`` / ``$( )`` / order and cwd stay intact.
+    """
+    if "<<" not in text:
+        return _walk_shell(text, work, handle_one, depth)
+    return _walk_shell(_rewrite_heredocs(text), work, handle_one, depth)
+
+
 def analyze_command(command, cwd, guard, commits=None):
     """Return (pushes, commit_before_push).
 
@@ -1666,6 +1947,7 @@ def analyze_command(command, cwd, guard, commits=None):
     eval cd changes propagate to the caller (like a real shell).
     A cd inside ( … ), $( … ) or backticks does not change later parent segments.
     env -C / --chdir applies only to the child command (and its nested walk).
+    Heredoc bodies are data unless a shell on the opening line reads them.
     """
     state = {"seen_commit": False, "commit_before_push": False, "pushes": [],
              "other_before": False}
@@ -1684,9 +1966,9 @@ def analyze_command(command, cwd, guard, commits=None):
                 if kind == "env_s":
                     combined = list(_tokens(text)) + list(rest)
                     text = " ".join(shlex.quote(w) for w in combined)
-                _walk_shell(text, child, handle_one, depth + 1)
+                _walk_push_commit(text, child, handle_one, depth + 1)
                 return work
-            nested_work = _walk_shell(text, child, handle_one, depth + 1)
+            nested_work = _walk_push_commit(text, child, handle_one, depth + 1)
             if kind == "eval":
                 return nested_work
             return work
@@ -1699,7 +1981,7 @@ def analyze_command(command, cwd, guard, commits=None):
                 text = " ".join(shlex.quote(w) for w in combined)
             else:
                 text = " ".join(shlex.quote(w) for w in words)
-            _walk_shell(text, child, handle_one, depth + 1)
+            _walk_push_commit(text, child, handle_one, depth + 1)
             return work
         if not words:
             return work
@@ -1734,7 +2016,7 @@ def analyze_command(command, cwd, guard, commits=None):
             state["pushes"].append(push)
         return work
 
-    _walk_shell(command, cwd, handle_one, 0)
+    _walk_push_commit(command, cwd, handle_one, 0)
     return state["pushes"], state["commit_before_push"]
 
 

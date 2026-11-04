@@ -329,16 +329,44 @@ class SecretGuardTests(_SecretGuardHarness, unittest.TestCase):
         self.assertNotIn(token, r.stdout)
 
     def test_copied_shell_functions_match_session_mode(self):
-        def funcs(path):
+        # secret-guard local name -> session-mode name (identity except the rename).
+        # _rewrite_heredocs is not a copy (needs order/cwd); omit it and the old splitters.
+        names = {
+            "_substitution_end": "_substitution_end",
+            "_shell_segments": "_shell_segments",
+            "_tokens": "_tokens",
+            "_heredoc_info": "_heredoc_info",
+            "_heredoc_terminator": "_skip_heredoc_body",
+            "_heredoc_bodies": "_heredoc_bodies",
+            "_heredoc_substitution_end": "_heredoc_substitution_end",
+        }
+
+        def funcs(path, local_to_canonical):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             out = {}
+
+            class Renamer(ast.NodeTransformer):
+                def visit_FunctionDef(self, node):
+                    self.generic_visit(node)
+                    if node.name in local_to_canonical:
+                        node.name = local_to_canonical[node.name]
+                    return node
+
+                def visit_Name(self, node):
+                    if node.id in local_to_canonical:
+                        node.id = local_to_canonical[node.id]
+                    return node
+
+            renamer = Renamer()
             for node in tree.body:
-                if isinstance(node, ast.FunctionDef) and node.name in (
-                        "_substitution_end", "_shell_segments", "_tokens"):
-                    out[node.name] = ast.unparse(node)
+                if isinstance(node, ast.FunctionDef) and node.name in local_to_canonical:
+                    canonical = local_to_canonical[node.name]
+                    out[canonical] = ast.unparse(renamer.visit(node))
             return out
-        a, b = funcs(HOOK), funcs(SESSION)
-        self.assertEqual(set(a), {"_substitution_end", "_shell_segments", "_tokens"})
+
+        a = funcs(HOOK, names)
+        b = funcs(SESSION, {v: v for v in names.values()})
+        self.assertEqual(set(a), set(names.values()))
         for name in a:
             self.assertEqual(a[name], b[name], name)
 
@@ -353,6 +381,172 @@ class SecretGuardTests(_SecretGuardHarness, unittest.TestCase):
         times.sort()
         self.fast_path_ms = times[len(times) // 2] * 1000
         self.assertLess(self.fast_path_ms, 500)
+
+    def test_heredoc_push_commit_matches_shell(self):
+        """Heredoc bodies are data unless a shell reads them; apostrophes can't hide a tail."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sg", HOOK)
+        sg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sg)
+
+        class StubGuard:
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        def view(command):
+            commits = []
+            pushes, before = sg.analyze_command(
+                command, "/tmp", StubGuard(), commits=commits)
+            return bool(pushes), bool(before), bool(commits)
+
+        c, p = "git commit -m x", "git push origin main"
+        # (command, expect_push, expect_deny, expect_commit)
+        silent_data = [
+            f"cat > n.txt <<'EOF'\n{c} && {p}\nEOF\n",
+            f"tee f <<'EOF' >/dev/null\n{c}\n{p}\nEOF\n",
+            f"python3 - <<'EOF'\n{c}\n{p}\nEOF\n",
+            f"grep -c x <<'EOF'\n{c} && {p}\nEOF\n",
+            f"wc -l <<'EOF'\n{c} && {p}\nEOF\n",
+            f"git commit -F - <<'EOF'\n{c} && {p}\nEOF\n",
+            f"bash -c \"cat > n <<'EOF'\n{c} && {p}\nEOF\"\n",
+            f"cat <<EOF\n\\$({p})\nEOF\n",
+        ]
+        deny_shell = [
+            f"bash <<'EOF'\n{c}\n{p}\nEOF\n",
+            f"sh -s <<EOF\n{c}\n{p}\nEOF\n",
+            f"cat <<'EOF' | sh\n{c}\n{p}\nEOF\n",
+            f"source /dev/stdin <<'EOF'\n{c}\n{p}\nEOF\n",
+            f"eval \"$(cat <<'EOF'\n{c}\n{p}\nEOF\n)\"\n",
+            f"sh -c \"$(cat <<'EOF'\n{c}\n{p}\nEOF\n)\"\n",
+            f"echo \"$(cat <<'EOF'\n{c}\n{p}\nEOF\n)\" | sh\n",
+            f"$(cat <<'EOF'\n{c} && {p}\nEOF\n)\n",
+            f"bash <<'EOF'\nit's\nEOF\n{c} && {p}\n",
+            f"cat > r <<EOF\n$({c})\n$({p})\nEOF\n",
+            f"sh <<EOF\n\\$({c})\n\\$({p})\nEOF\n",
+            f"git commit -F - <<'EOF'\nit's done\nEOF\n{p}\n",
+            f"git commit -m \"$(cat <<'EOF'\nit's (a\nEOF\n)\" && {p}\n",
+            f"cat > r.md <<'EOF'\nit's prose\nEOF\n{c} && {p}\n",
+            f"cat <<'EOF'\n{c}\n{p}\n",  # no terminator: keep visible
+        ]
+        for command in silent_data:
+            with self.subTest(silent=command[:60]):
+                pushed, before, committed = view(command)
+                self.assertFalse(before, command)
+                self.assertFalse(pushed, command)
+                # git commit -F - itself is a real commit; others must not see body commits.
+                if "git commit -F -" in command:
+                    self.assertTrue(committed, command)
+                else:
+                    self.assertFalse(committed, command)
+        for command in deny_shell:
+            with self.subTest(deny=command[:60]):
+                pushed, before, committed = view(command)
+                self.assertTrue(before, command)
+                self.assertTrue(pushed, command)
+                self.assertTrue(committed, command)
+
+        # Invariant 7: no-heredoc path unchanged (and still the fast preprocess skip).
+        self.assertEqual(view(f"{c} && {p}"), (True, True, True))
+        self.assertEqual(view(p), (True, False, False))
+        self.assertEqual(view("ls"), (False, False, False))
+
+        # Through the real hook process (deny wording + silent data body).
+        local, _ = self.make_pair()
+        for command in (
+            f"bash <<'EOF'\n{c}\n{p}\nEOF\n",
+            f"git commit -m \"$(cat <<'EOF'\nit's (a\nEOF\n)\" && {p}\n",
+            f"cat > r <<'EOF'\nit's prose\nEOF\n{c} && {p}\n",
+        ):
+            with self.subTest(hook_deny=command[:50]):
+                r = self.claude(command, cwd=local)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                out = json.loads(r.stdout)["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("creates a commit and then pushes",
+                              out["permissionDecisionReason"])
+        for command in (
+            f"cat > n.txt <<'EOF'\n{c} && {p}\nEOF\n",
+            f"python3 - <<'EOF'\n{c}\n{p}\nEOF\n",
+        ):
+            with self.subTest(hook_silent=command[:50]):
+                r = self.claude(command, cwd=local)
+                self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    def test_heredoc_keeps_shell_structure(self):
+        """Order and cwd around heredocs stay with _walk_shell, not a flat split."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sg", HOOK)
+        sg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sg)
+        import os as _os
+        sg.resolve_cwd = lambda p, w: _os.path.normpath(_os.path.join(str(w), p))
+
+        class StubGuard:
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        def run(command):
+            commits = []
+            pushes, before = sg.analyze_command(
+                command, "/start/dir", StubGuard(), commits=commits)
+            cwds = sorted(
+                str(p.get("cwd") if isinstance(p, dict) else getattr(p, "cwd", p))
+                for p in pushes)
+            verdict = "deny" if before else "scan" if pushes else "none"
+            return verdict, cwds
+
+        doc = "cat > n <<'EOF'\nit's data\nEOF\n"
+        fed = "$(cat <<'EOF'\ngit commit -m x\nEOF\n)"
+        p = "git push origin main"
+        start, sub = ["/start/dir"], ["/start/dir", "/start/dir/sub"]
+        rows = [
+            ("cd in ( )", "(cd sub && true)\n" + doc + p, "scan", start),
+            ("cd in $( )", "x=$(cd sub && pwd)\n" + doc + p, "scan", start),
+            ("cd in backticks", "x=`cd sub && pwd`\n" + doc + p, "scan", start),
+            ("heredoc inside ( )", "(\ncd sub\n" + doc + p + "\n)\n" + p,
+             "scan", sub),
+            ("kept body inside ( )", "(cd sub\nbash <<'EOF'\n" + p + "\nEOF\n)\n" + p,
+             "scan", sub),
+            ("top-level cd after", doc + "cd sub && " + p, "scan", ["/start/dir/sub"]),
+            ("top-level cd before", "cd sub\n" + doc + p, "scan", ["/start/dir/sub"]),
+            ("commit in $( )", 'echo "$(git commit -m x)"; ' + p + "\n" + doc,
+             "deny", start),
+            ("commit in backticks", "echo `git commit -m x`; " + p + "\n" + doc,
+             "deny", start),
+            ("commit in ( )", "(git commit -m x); " + p + "\n" + doc, "deny", start),
+            ("push arg commits first",
+             "git push origin \"$(git commit -m x <<'EOF'\nEOF\n)\"", "deny", start),
+            ("push before commit in $( )",
+             p + '; echo "$(git commit -m x)"\n' + doc, "scan", start),
+            ("2>&1 on subshell", "(cd sub && true) 2>&1\n" + doc + p, "scan", start),
+            ("<<- with tabs", "(cd sub && true)\ncat <<-'EOF'\n\tit's\n\tEOF\n" + p,
+             "scan", start),
+            ("comment with apostrophe",
+             "# it's a note\n(cd sub && true)\n" + doc + p, "scan", start),
+            ("continuation to reader",
+             "cat <<'EOF' \\\n | sh\ngit commit -m x\nEOF\n" + p, "deny", start),
+            ("<<< not a heredoc", "git commit -m x <<< \"it's\" && " + p, "deny", start),
+            ("literal << in quotes", "grep '<<' f; (cd sub && true); " + p,
+             "scan", start),
+            ("unquoted body cd stays in",
+             "(cat > r <<EOF\n$(cd sub && " + p + ")\nEOF\n)\n" + p, "scan", sub),
+            ("command position after ;", "echo hi; " + fed + "\n" + p, "deny", start),
+            ("command position after &&", "true && " + fed + "\n" + p, "deny", start),
+            ("command position in ( )", "( " + fed + " )\n" + p, "deny", start),
+            ("command position after if", "if " + fed + "; then " + p + "; fi",
+             "deny", start),
+            ("assignment value is data", "x=" + fed + "\n" + p, "scan", start),
+            ("argument after ; is data", "true; echo " + fed + "\n" + p, "scan", start),
+            ("comment after ;", "true;# it's\n" + doc + "git commit -m x && " + p,
+             "deny", start),
+            ("comment after (", "(# it's\ntrue)\n" + doc + "git commit -m x && " + p,
+             "deny", start),
+        ]
+        for name, command, verdict, cwds in rows:
+            with self.subTest(name=name):
+                got_verdict, got_cwds = run(command)
+                self.assertEqual(got_verdict, verdict, command)
+                self.assertEqual(got_cwds, sorted(cwds), command)
 
 
 class SecretGuardRound2Tests(_SecretGuardHarness, unittest.TestCase):
