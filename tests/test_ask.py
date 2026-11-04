@@ -253,6 +253,10 @@ class TestAsk(unittest.TestCase):
         self.assertEqual(ask.extract_pick("I'll read the doc first.**Pick: A**\n\n**Why:** x"), "A")
         self.assertEqual(ask.extract_pick("what's already decided in-repo.Pick: C  \nWhy: y"), "C")
         self.assertIsNone(ask.extract_pick("the best pick: none of them"))
+        # A status message that ends in a colon glues the same way.
+        self.assertEqual(ask.extract_pick("and what the docs say about re-saving:**Pick: B**\n\nWhy: z"), "B")
+        self.assertEqual(ask.extract_pick("for the intended cases:Pick: A\nWhy: y"), "A")
+        self.assertIsNone(ask.extract_pick("two options: pick: whichever works"))
 
     def _fallback_report(self, catalog, default_codex):
         def rating(name, intelligence, cost, creator="OpenAI"):
