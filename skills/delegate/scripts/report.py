@@ -351,8 +351,37 @@ def _rejection_prompts(rows):
                 break
 
 
+def _picker_prompts(rows):
+    """Yield answered AskUserQuestion tool results (not rejections or sidechains)."""
+    ask_ids = set()
+    for row in rows:
+        if row.get("isSidechain"):
+            continue
+        message = row.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(blocks, list):
+            continue
+        if row.get("type") == "assistant":
+            for block in blocks:
+                if (isinstance(block, dict) and block.get("type") == "tool_use"
+                        and block.get("name") == "AskUserQuestion"
+                        and isinstance(block.get("id"), str)):
+                    ask_ids.add(block["id"])
+            continue
+        if row.get("type") != "user":
+            continue
+        for block in blocks:
+            if (not isinstance(block, dict) or block.get("type") != "tool_result"
+                    or block.get("tool_use_id") not in ask_ids
+                    or block.get("is_error") is True):
+                continue
+            ask_ids.discard(block["tool_use_id"])
+            yield {"timestamp": row.get("timestamp"), "picker": True}
+            break
+
+
 def prompt_contexts(path, calls=None):
-    """Context answering typed prompts and rejection reasons, plus typed-prompt guard events."""
+    """Context answering typed prompts, rejection reasons and picker answers, plus typed-prompt guard events."""
     rows = rate.json_rows(path)
     prompt_rows = list(rate._typed_prompt_rows(rows))
     prompts = [prompt for _, prompt in prompt_rows]
@@ -365,9 +394,10 @@ def prompt_contexts(path, calls=None):
     call_times = [ts for ts, _ in timed_calls]
     prompt_times = [_aware(p["timestamp"]) for p in prompts]
     rejections = list(_rejection_prompts(rows))
+    pickers = list(_picker_prompts(rows))
     entries = []
-    # Keep typed prompts first so guard indices cannot refer to a rejection.
-    for prompt in prompts + rejections:
+    # Keep typed prompts first so guard indices cannot refer to a rejection or picker.
+    for prompt in prompts + rejections + pickers:
         ts = _aware(prompt["timestamp"])
         # Legacy untimed prompts remain visible, using the first available call.
         index = bisect_left(call_times, ts) if ts is not None else 0
@@ -378,6 +408,8 @@ def prompt_contexts(path, calls=None):
                         if call else 0, "guard": None})
         if prompt.get("rejection"):
             entries[-1]["rejection"] = True
+        if prompt.get("picker"):
+            entries[-1]["picker"] = True
     for row_index, row in enumerate(rows):
         if row.get("isSidechain"):
             continue
@@ -418,7 +450,7 @@ def prompt_contexts(path, calls=None):
                           if ts is not None and ts >= event_time), None)
         if index is not None and entries[index]["guard"] != "idle_hold":
             entries[index]["guard"] = guard
-    if rejections:
+    if rejections or pickers:
         entries.sort(key=lambda p: _aware(p["timestamp"]) or datetime.min.replace(tzinfo=timezone.utc))
     return entries
 
@@ -426,7 +458,8 @@ def prompt_contexts(path, calls=None):
 def render_prompt_contexts(prompts):
     tags = {None: "", "nudge": " (guard)", "idle_hold": " (idle hold)"}
     contexts = ", ".join(cost._fmt_k(p["context"])
-                         + (" (rejection)" if p.get("rejection") else tags[p["guard"]])
+                         + (" (rejection)" if p.get("rejection") else
+                            " (picker)" if p.get("picker") else tags[p["guard"]])
                          for p in prompts)
     return f"Context at typed prompts: {contexts or 'none'}."
 

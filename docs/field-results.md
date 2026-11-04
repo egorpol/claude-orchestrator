@@ -416,6 +416,16 @@ The delegate topic files now carry rules and reasons. These measurements were on
 - `sessions.md`: Four sessions in a row (2026-10-10) ran 3–10 items each up to ~280k; clearing at those boundaries would have saved about 18–33% of each.
 - `sessions.md`: Three sessions on 2026-10-11 started from a handoff and stopped at the next decision point: 18–21k cost units per call, against 24–29k for the sprawling ones and 67k for the 13-hour marathon.
 
+## 2026-11-04: one session, one project
+
+Closed with `/field-report`; folded in on 2026-11-04. It started inside the preregistration's confirmatory window, so this section carries its lessons only; its numbers wait for the freeze.
+
+- **A control session's notice never reached the user.** The hook asked for one line saying delegation was off, and that line stayed in a thinking block, so a user who had asked for a review by outside models learned it had not run only when the findings arrived. `CONTROL_LINE` now asks for a text message before the first tool call that names what won't run, a picker between working alone and Claude subagents on any Claude model, and the reason again at the close. Neither agent picked a notice alone. Codex also wanted a "stop and run it in another session" option and Cursor didn't; the user left it out, since `/clear` redraws at 70/15/15 and so can't promise delegation, and the option would draw work out of the control arm selectively. `DENY_REASON` stays as it was, because vanilla sessions read it too. The session rules now say a status line is a text message.
+- **A truncated line became a finding.** `cut -c` dropped the end of a long line, which held the qualifier, and the finding built on it stood until a memory file contradicted it. The session rules now say a claim needs its whole line, and `rules/reference.md` has the tip.
+- **Source checks piled up in the main context.** `rules/reference.md` now sends probes and fetches to a subagent past ~120k in a verification-heavy item.
+- **`delegate report` hid late input.** Picker answers were missing from "Context at typed prompts", so a session answered near its end read as if the user last spoke at its start. They now appear tagged `(picker)`.
+- **Not adopted.** Auto-running the cwd guard's wrapped form (a third report; it would still need an `allow`, which skips the permission prompt).
+
 ## Still open
 
 - Control sessions: USD per finished item needs many more items per arm before the arms can be compared. Re-read `delegate cost --by-mode` as sessions accumulate.

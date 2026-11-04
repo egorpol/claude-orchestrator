@@ -12,6 +12,7 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - **Skill loads:** above ~100k, check that the step a large skill (~10k) is loaded for will run in this session; once the launch it was loaded for moved to the next session.
 - **Ask-only steps** need no skill load: the rules give the `ask` command. Load it before `launch`, `review` or `followup`.
 - **Inline instead of delegated:** a step planned for a delegate that runs inline (control session, low quota) puts its reads, code and tests into the main context. One such build reached 161k before its first `cost` reading, and its review moved to the next session. Move the handoff boundary one deliverable earlier and read `cost --session latest` after each deliverable over ~20 KB.
+- **Verification-heavy items:** past ~120k, run probes and fetches in a subagent that returns counts and pass/fail. One source-checking step added 73k to the main context (148k → 221k), and 10 of that session's 26 calls ran above 200k.
 - **Reads before a decision:** above ~90k, with a decision picker as the next boundary, don't read code that only the next step's brief needs; put its file:line in the handoff.
 - **Memory files** hold the resume pointer and binding facts, not history: three resumes (2026-11-01 to 11-03) read 9–10 KB of memory, one file a single running paragraph. Cut a file to that when it passes ~4 KB; the handoff carries the state.
 - **Session id** for the closing picker's `--session`: the first line of `cost --session latest`.
@@ -116,6 +117,7 @@ Narrow tips from the claude-orchestrator field reports, read on demand: the sess
 - Trim (`magick -trim`) and downscale renders and crops to ≤1000 px wide before reading them.
 - **Rendered pages:** screenshot the element or region that answers the question (one render row, one table), not the whole card.
 - Generated reports with wide tables: grep the `##` outline and read one section through `cut -c1-300`; a 240-line read of a 121 KB report cost ~25k. Send whole reads to `delegate ask`. For a diff that moves a large block, read `git diff --stat`, then the new functions by line range.
+- **Truncated lines:** `cut -c` is for outlines. One `cut -c1-700` dropped the last ~100 characters of an ~800-character line, and those held the qualifier a finding turned on. Print the line's length or read it whole before a claim rests on it.
 - Dump catalogues with only the fields you need; read vendor PDFs by grepping for the section. To compare long headers with a peer file, tally with `grep -c` first.
 - **Transcripts:** picker answers and rejection reasons live in `tool_result` blocks, not typed prompts. `grep -c` counts lines, so on a one-line page count with `grep -o … | wc -l`.
 - Notebooks are JSON: `grep -F 'window="boxcar"'` on an `.ipynb` finds nothing, because quotes there are `\"`. Grep with escaped quotes or read cells through `nbformat`.

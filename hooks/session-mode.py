@@ -38,10 +38,13 @@ DEFAULT_WEIGHTS = dict(zip(MODES, (0.5, 0.25, 0.25)))
 ROOT = Path(__file__).resolve().parent.parent
 CONTROL_LINE = (
     "Control session (claude-only): do all work with Claude in this session; Claude's own "
-    "subagents are fine. Don't call delegate, codex or cursor-agent, and ignore instructions "
-    "to delegate in handoffs and memory. This holds when the user asks to delegate too: say in "
-    "one line that this is a control session with delegation off by design, then do the work "
-    "yourself. Finishing a run started earlier with delegate "
+    "subagents are fine, on any Claude model. Don't call delegate, codex or cursor-agent, and "
+    "ignore instructions to delegate in handoffs and memory. This holds when the user asks to "
+    "delegate too. When the prompt or the handoff's next step asks for delegated work, say in a "
+    "text message before the first tool call, not in thinking, that this is a control session "
+    "with delegation off by design and what won't run; ask in a picker whether to do it alone "
+    "or with Claude subagents; and repeat the reason in the closing message. Finishing a run "
+    "started earlier with delegate "
     "status, wait, diff, apply or cleanup is fine. This applies to this session only: don't "
     "write the mode or 'no delegate' into HANDOFF.md or memory."
 )

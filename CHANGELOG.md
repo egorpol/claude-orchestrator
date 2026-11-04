@@ -15,11 +15,14 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - `hooks/secret-guard.py` asks before `delegate launch --unsandboxed` and before a `followup` of a run launched that way, since followups reuse the stored flag; it also asks for subagents and in vanilla sessions. `SANDBOX_GUARD_DISABLE=1` turns this check off.
 
 - `delegate report` lists tool rejections that carry a typed reason in "Context at typed prompts", tagged `(rejection)`: such replies are `tool_result` blocks, not typed prompts.
+- `delegate report` lists picker answers in "Context at typed prompts", tagged `(picker)`: a session answered near its end otherwise reads as if the user last spoke at its start.
 - `/field-report --session <id>` reports on an earlier session; the closing picker offers it after `/clear` above ~100k context.
 - Run-log rows carry `kind` (`working-tree` for `review --working-tree`).
 
 ### Changed
 
+- Claude-only control sessions, when the prompt or the handoff's next step asks for delegated work, must say so in a text message before the first tool call, ask in a picker whether to work alone or with Claude subagents (any Claude model), and repeat the reason at the close: one session's notice stayed in a thinking block.
+- Session rules: a status line is a text message, and a claim needs its whole line. Topic tips cover verification-heavy items and truncated lines.
 - Trimmed the delegate topic files to rules and reasons; measurements told nowhere else moved to `docs/field-results.md`.
 - `launch` and `followup --help` now say a `--link` path need not be gitignored; other paths warn and stay hidden from git status until cleanup.
 - Split the delegate skill into a short core and seven topics under `reference/`, read on demand; exit packets point to the review workflow when applicable and space permits.

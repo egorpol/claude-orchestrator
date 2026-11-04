@@ -40,6 +40,18 @@ def tool_rejection(timestamp, content, **overrides):
                                      "content": content}], **overrides)
 
 
+def ask_user_question(timestamp, tool_id="ask-1", **overrides):
+    return {"type": "assistant", "timestamp": timestamp,
+            "message": {"content": [{"type": "tool_use", "name": "AskUserQuestion",
+                                     "id": tool_id}]}, **overrides}
+
+
+def picker_answer(timestamp, tool_id="ask-1", content="Your questions have been answered: yes",
+                  **overrides):
+    return typed_prompt(timestamp, [{"type": "tool_result", "tool_use_id": tool_id,
+                                     "content": content}], **overrides)
+
+
 def queued_prompt(timestamp, kind="human", mode="prompt"):
     return {"type": "attachment", "timestamp": timestamp, "isSidechain": False,
             "attachment": {"type": "queued_command", "prompt": "queued work", "commandMode": mode,
@@ -271,6 +283,100 @@ class TestReport(unittest.TestCase):
         self.assertEqual(report.render_prompt_contexts(prompts),
                          "Context at typed prompts: 1201k, 2.1k (rejection), 7.0k (idle hold).")
         self.assertEqual(len(report.rate.typed_prompts(report.rate.json_rows(self.transcript))), 2)
+
+    def test_picker_contexts_in_timestamp_order_with_typed_and_rejection(self):
+        marker = "The user provided the following reason for the rejection:"
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+            ask_user_question("2026-10-10T21:00:00Z", "ask-a"),
+            picker_answer("2026-10-10T22:00:00Z", "ask-a", [
+                {"type": "text", "text": "Your questions have been answered: "},
+                {"type": "text", "text": "ship it"},
+            ]),
+            tool_rejection("2026-10-10T21:30:00Z", marker + "\nRead the brief."),
+            *self.calls[1:],
+        ])
+        prompts = report.prompt_contexts(self.transcript)
+        self.assertEqual(prompts, [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+            {"timestamp": "2026-10-10T21:30:00Z", "context": 2055, "guard": None, "rejection": True},
+            {"timestamp": "2026-10-10T22:00:00Z", "context": 7007, "guard": None, "picker": True},
+        ])
+        self.assertEqual(report.render_prompt_contexts(prompts),
+                         "Context at typed prompts: 1201k, 2.1k (rejection), 7.0k (picker).")
+        self.assertEqual(len(report.rate.typed_prompts(report.rate.json_rows(self.transcript))), 1)
+
+    def test_picker_does_not_take_guard_tags(self):
+        # Guard nudge after a picker must still land on the later typed prompt.
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+            ask_user_question("2026-10-10T21:00:00Z", "ask-g"),
+            picker_answer("2026-10-10T21:01:00Z", "ask-g"),
+            guard_event("2026-10-10T21:01:00.030Z", "nudge"),
+            guard_event("2026-10-10T21:30:00Z", "idle_hold"), self.calls[1],
+            typed_prompt("2026-10-10T22:59:00Z"),
+            guard_event("2026-10-10T22:59:00.030Z", "nudge"), self.calls[2],
+        ])
+        prompts = report.prompt_contexts(self.transcript)
+        self.assertEqual(prompts, [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+            {"timestamp": "2026-10-10T21:01:00Z", "context": 2055, "guard": None, "picker": True},
+            {"timestamp": "2026-10-10T22:59:00Z", "context": 7007, "guard": "idle_hold"},
+        ])
+        self.assertEqual(report.render_prompt_contexts(prompts),
+                         "Context at typed prompts: 1201k, 2.1k (picker), 7.0k (idle hold).")
+
+    def test_rejected_picker_is_rejection_not_picker(self):
+        marker = "The user provided the following reason for the rejection:"
+        rejected = picker_answer(
+            "2026-10-10T21:01:00Z", "ask-r", marker + "\ninspect first")
+        rejected["message"]["content"][0]["is_error"] = True
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+            ask_user_question("2026-10-10T21:00:00Z", "ask-r"),
+            rejected, *self.calls[1:],
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+            {"timestamp": "2026-10-10T21:01:00Z", "context": 2055, "guard": None, "rejection": True},
+        ])
+
+    def test_bash_text_matching_picker_prefix_is_ignored(self):
+        # Text alone must not count; only a tool_result for AskUserQuestion.
+        bash_result = typed_prompt("2026-10-10T21:01:00Z", [{
+            "type": "tool_result", "tool_use_id": "bash-1",
+            "content": "Your questions have been answered: quoted in a transcript",
+        }])
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+            {"type": "assistant", "timestamp": "2026-10-10T21:00:00Z",
+             "message": {"content": [{"type": "tool_use", "name": "Bash", "id": "bash-1"}]}},
+            bash_result, *self.calls[1:],
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+        ])
+
+    def test_sidechain_picker_is_ignored(self):
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+            ask_user_question("2026-10-10T21:00:00Z", "ask-s", isSidechain=True),
+            picker_answer("2026-10-10T21:01:00Z", "ask-s", isSidechain=True),
+            *self.calls[1:],
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+        ])
+
+    def test_unanswered_ask_user_question_adds_nothing(self):
+        self.write_log(self.transcript, [
+            typed_prompt("2026-10-10T20:59:00Z"), self.calls[0],
+            ask_user_question("2026-10-10T21:00:00Z", "ask-open"),
+            *self.calls[1:],
+        ])
+        self.assertEqual(report.prompt_contexts(self.transcript), [
+            {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
+        ])
 
     def test_sidechain_guard_events_are_ignored(self):
         self.write_log(self.transcript, [

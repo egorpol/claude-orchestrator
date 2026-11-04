@@ -13,6 +13,7 @@ Facts tested live, dated, so a reader can tell what may have changed since.
 - `delegate launch --brief <path in a Claude scratchpad>` prints no warning and exits 0: the file is read at launch and copied to the run's `brief.md`. A `/tmp/claude-*/` path written in the brief's text does warn, on `--dry-run` too.
 - An untracked `check.py` is not in the worktree: `--verify 'python3 check.py' --preflight` fails with rc 2 and `can't open file`. With `--link check.py` it passes, and the not-gitignored warning prints.
 - `launch --link <path that isn't gitignored>` is accepted with a warning and exit 0. Before this date `--dry-run` printed no such warning, while `--preflight` did.
+- **`delegate report` counts picker answers** (this repo's 108 local transcripts, old code against new): 179 `(picker)` entries, equal to a separate walk of the same files by `tool_use_id`; non-picker entries changed in 0 sessions, and all 5 sessions without a picker print the same line.
 
 ## 2026-11-03
 
