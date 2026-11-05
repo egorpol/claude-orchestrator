@@ -8,6 +8,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Added
 
+- `install.sh --timer` also installs an hourly default `delegate rate` user timer for drawn experiment sessions, with no overlap, timeout or wake backlog; stdout item counts are discarded before the freeze and stderr failures stay visible in `systemctl --user status claude-delegate-rate.service`.
 - `delegate prereg`: counts-only experiment progress and the registered confirmatory analysis, with strict eligibility, seeded bootstrap intervals, sensitivities, hashed projects and calibration provenance. Outcomes on the experiment’s log are held until the freeze.
 - `delegate cost --until D`: exclusive upper bound for run timestamps and first session starts. Before the freeze, `cost --by-mode` on the experiment’s log holds back period-2 sessions and reports their count; explicit paths and symlinks keep the guard.
 - `docs/preregistration.md`: the preregistration of the control-session experiment's Max period (window, primary outcome, freeze, bootstrap, sensitivity analyses). Its first commit opens the confirmatory window. Dated amendments correct the registration date, record how `delegate prereg` reads the rules (including that a session whose transcript is gone at the freeze leaves the analysis set), and record the Max-plan calibration that the pool-points measure uses: its SHA-256 and claude-7d rate.

@@ -28,9 +28,12 @@
 #                           excluded from the draw: ~/.config/claude-orchestrator/session-mode.json.
 #                           Undo: delete the session-mode.py entries from settings.json, then --rules
 #   ./install.sh --timer    install an activity-gated quota timer (every 10 minutes)
+#                           and an hourly timer for default delegate rate (no backlog on systemd 257+)
 #                           remove: systemctl --user disable --now claude-delegate-quota.timer
 #                           then delete claude-delegate-quota.{service,timer} from
 #                           ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/
+#                           also: systemctl --user disable --now claude-delegate-rate.timer
+#                           then delete claude-delegate-rate.{service,timer} from the same folder
 #   ./install.sh --check    only check prerequisites and the private-name deny list
 #   ./install.sh --force    replace an existing non-symlinked skill dir or command file (it is
 #                           moved to ~/.claude/skill-backups/, never deleted)
@@ -179,21 +182,24 @@ backup_file() {
 }
 
 check_timer() {
-  if command -v systemctl >/dev/null; then
-    if systemctl --user is-enabled claude-delegate-quota.timer >/dev/null 2>&1; then
-      ok "quota timer enabled"
+  local kind
+  for kind in quota rate; do
+    if command -v systemctl >/dev/null; then
+      if systemctl --user is-enabled "claude-delegate-$kind.timer" >/dev/null 2>&1; then
+        ok "$kind timer enabled"
+      else
+        warn "optional: $kind timer not enabled (./install.sh --timer)"
+      fi
+    elif [ -f "$UNIT_DIR/claude-delegate-$kind.timer" ]; then
+      ok "$kind timer unit exists (systemctl unavailable)"
     else
-      warn "optional: quota timer not enabled (./install.sh --timer)"
+      warn "optional: $kind timer unit not installed (./install.sh --timer)"
     fi
-  elif [ -f "$UNIT_DIR/claude-delegate-quota.timer" ]; then
-    ok "quota timer unit exists (systemctl unavailable)"
-  else
-    warn "optional: quota timer unit not installed (./install.sh --timer)"
-  fi
+  done
 }
 
 install_timer() {
-  local python provider_bin unit_path
+  local python provider_bin unit_path agent_bin rate_path
   python="$(python3 -c 'import os, sys; print(os.path.abspath(sys.executable))')"
   unit_path="/usr/local/bin:/usr/bin:/bin"
   if provider_bin="$(command -v openusage)"; then
@@ -201,14 +207,24 @@ install_timer() {
   else
     warn "openusage not found; quota timer PATH uses system directories only"
   fi
+  rate_path="$unit_path"
+  if agent_bin="$(command -v cursor-agent)"; then
+    agent_bin="$(cd "$(dirname "$agent_bin")" && pwd -P)"
+    case ":$rate_path:" in
+      *":$agent_bin:"*) ;;
+      *) rate_path="$agent_bin:$rate_path" ;;
+    esac
+  else
+    warn "cursor-agent not found; rate timer needs it installed on its PATH"
+  fi
   mkdir -p "$UNIT_DIR"
   # Quote and escape systemd arguments, including paths containing spaces or %.
-  python3 - "$UNIT_DIR" "$python" "$SKILLS_DIR/delegate/scripts/delegate" "$unit_path" <<'PY_TIMER'
+  python3 - "$UNIT_DIR" "$python" "$SKILLS_DIR/delegate/scripts/delegate" "$unit_path" "$rate_path" <<'PY_TIMER'
 from pathlib import Path
 import os
 import sys
 
-directory, python, delegate, path = sys.argv[1:]
+directory, python, delegate, path, rate_path = sys.argv[1:]
 def quoted(value):
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
 # The timer must watch the same transcripts and write the same log as the session hook.
@@ -224,14 +240,34 @@ Path(directory, "claude-delegate-quota.timer").write_text(
     "[Unit]\nDescription=Poll quota while Claude Code is active\n\n"
     "[Timer]\nOnCalendar=*:0/10\nAccuracySec=1min\nPersistent=false\n\n"
     "[Install]\nWantedBy=timers.target\n", encoding="utf-8")
+# A oneshot prevents overlap; DeferReactivation (systemd 257+) skips overdue fires after a long catch-up.
+# Discard stdout's per-session item counts so the journal cannot expose by-arm outcomes before the freeze.
+# Keep stderr in the journal so failures remain visible through systemctl --user status.
+rate_assignments = ["PATH=" + rate_path] + [
+    f"{key}={os.path.abspath(os.path.expanduser(os.environ[key]))}"
+    for key in ("CLAUDE_CONFIG_DIR", "XDG_CACHE_HOME", "CLAUDE_SESSION_LOG") if os.environ.get(key)]
+Path(directory, "claude-delegate-rate.service").write_text(
+    "[Unit]\nDescription=Claude delegate session ratings\n\n"
+    "[Service]\nType=oneshot\nNice=10\nTimeoutStartSec=infinity\n"
+    "StandardOutput=null\nStandardError=journal\n"
+    f"ExecStart={quoted(python)} {quoted(str(Path(delegate).absolute()))} rate\n"
+    f"Environment={' '.join(quoted(a) for a in rate_assignments)}\n", encoding="utf-8")
+Path(directory, "claude-delegate-rate.timer").write_text(
+    "[Unit]\nDescription=Rate finished Claude experiment sessions hourly\n\n"
+    "[Timer]\nOnCalendar=hourly\nAccuracySec=1min\nPersistent=false\nDeferReactivation=true\n\n"
+    "[Install]\nWantedBy=timers.target\n", encoding="utf-8")
 PY_TIMER
   ok "quota timer units written to $UNIT_DIR"
+  ok "rate timer units written to $UNIT_DIR"
   if command -v systemctl >/dev/null; then
     systemctl --user daemon-reload
     systemctl --user enable --now claude-delegate-quota.timer
     ok "quota timer enabled"
+    systemctl --user enable --now claude-delegate-rate.timer
+    ok "rate timer enabled"
   else
     warn "systemctl not found; quota timer units written but not enabled"
+    warn "systemctl not found; rate timer units written but not enabled"
   fi
 }
 

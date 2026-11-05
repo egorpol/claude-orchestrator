@@ -51,7 +51,7 @@ cd claude-orchestrator
 ./install.sh --git-hook=.   # optional: link secret-guard.py as this repo's pre-commit and pre-push hooks
 ./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
 ./install.sh --experiment   # opt-in: randomised control sessions via hooks/session-mode.py (see below)
-./install.sh --timer        # optional: systemd user timer logging pool readings every 10 min while Claude Code is active
+./install.sh --timer        # optional: systemd user timers log pool readings every 10 min while Claude Code is active; hourly, send only finished experiment sessions drawn by --experiment to Cursor Auto for rating (typed prompts, start/end HANDOFF.md copies and commit summaries, with only the experiment's mode words removed)
 ```
 
 `--experiment` is for measuring whether delegation pays off. Each new session draws `orchestrator` (50%), `claude-only` or `vanilla` (25% each; delegation blocked), gets that mode's rules from the hook and logs one summary row to `~/.cache/claude-delegate/sessions.jsonl` (local only). The hook replaces the `--rules` import, so `--experiment` removes it. `delegate rate` has Cursor Auto split each finished session into items from your prompts, HANDOFF.md and commits, without seeing the mode, and `delegate cost --by-mode` compares the arms: cost per finished item, by size and type. Weights go in `~/.config/claude-orchestrator/session-mode.json`; to stop, delete the `session-mode.py` entries from `~/.claude/settings.json` and run `--rules` again.
