@@ -26,6 +26,7 @@ SIZE_WEIGHTS = {"S": 1, "M": 3, "L": 8, "XL": 20}
 LONG_SESSION = timedelta(hours=8)
 CALIBRATION_SINCE = datetime(2026, 10, 26, 17, 1, tzinfo=timezone.utc)
 CALIBRATION_AFTER = datetime(2026, 11, 2, tzinfo=timezone.utc)
+CALIBRATION_SHA256 = "af55a932fe98043d5f263651597cdb49eb10716ff051b1fc02a6cf193a9020bb"
 ARMS = tuple(sorted(cost.MODES))
 EXCLUSIONS = ("pending", "ghost", "unpriced", "unrated", "transcript_gone", "stale")
 
@@ -344,6 +345,8 @@ def read_calibration(path):
     rate = rates["pools"].get("claude-7d", {}).get("per_usd")
     if rate is None:
         return {**out, "reason": "no usable claude-7d rate"}
+    if out["sha256"] != CALIBRATION_SHA256:
+        return {**out, "reason": "SHA-256 must equal " + CALIBRATION_SHA256}
     return {**out, "available": True, "per_usd": rate}
 
 

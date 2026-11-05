@@ -5,6 +5,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -380,9 +381,39 @@ class PreregTests(unittest.TestCase):
         for changed in ({}, {"since": "2026-10-26T17:01:01Z"}, {"saved_at": "2026-11-01T23:59:59Z"},
                         {"pools": []}, {"pools": [{"pool": "claude-7d", "headline": {"unit": "usd", "per_unit": 0}}]}):
             path.write_text(json.dumps({**data, **changed}) + "\n")
-            result = p.read_calibration(path)
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            with mock.patch.object(p, "CALIBRATION_SHA256", digest):
+                result = p.read_calibration(path)
             self.assertEqual(result["available"], not changed)
-            self.assertEqual(result["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertEqual(result["sha256"], digest)
+
+    def test_calibration_other_than_the_amended_file_leaves_only_pool_points_unavailable(self):
+        write(self.log, self.dry_rows())
+        path = self.root / "calibration.json"
+        path.write_text(json.dumps({
+            "saved_at": "2026-11-02T01:00:00+01:00", "since": "2026-10-26T18:01:00+01:00",
+            "pools": [{"pool": "claude-7d", "headline": {"unit": "usd", "per_unit": .5}}]}) + "\n")
+        args = ("--outcomes", "--session-log", str(self.log), "--calibration", str(path))
+        code, out, err = self.invoke(*args, "--json")
+        self.assertEqual(code, 0, err)
+        outcomes = json.loads(out)["outcomes"]
+        pool = outcomes["pool_points"]
+        self.assertFalse(pool["available"])
+        self.assertNotIn("per_usd", pool)
+        self.assertEqual(pool["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(outcomes["primary"]["h1"]["observed"], .5)
+        code, out, err = self.invoke(*args)
+        self.assertEqual(code, 0, err)
+        self.assertIn("unavailable: SHA-256 must equal " + p.CALIBRATION_SHA256, out)
+        with mock.patch.object(p, "CALIBRATION_SHA256", pool["sha256"]):
+            code, out, err = self.invoke(*args, "--json")
+        self.assertTrue(json.loads(out)["outcomes"]["pool_points"]["available"])
+
+    def test_pinned_calibration_hash_is_the_one_the_amendment_records(self):
+        text = (Path(__file__).resolve().parents[1] / "docs/preregistration.md").read_text(encoding="utf-8")
+        line = next(row for row in text.splitlines() if row.startswith("- **2026-11-03, Max calibration.**"))
+        recorded = re.search(r"`calibration\.json` with SHA-256 `([0-9a-f]{64})`", line)
+        self.assertEqual(recorded.group(1), p.CALIBRATION_SHA256)
 
     def test_allocation_unknown_weights_apart_and_tokens_join_zero_sessions(self):
         rows = self.dry_rows()
