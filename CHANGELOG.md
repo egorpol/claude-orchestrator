@@ -22,6 +22,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- The `delegate` skill description gives spare Codex and Cursor quota as the reason for unprompted use, and the README puts "Claude's quota ran out first" on the Pro plan: on Max the first full 7-day window peaked at 65% used.
 - Claude-only control sessions, when the prompt or the handoff's next step asks for delegated work, must say so in a text message before the first tool call, ask in a picker whether to work alone or with Claude subagents (any Claude model), and repeat the reason at the close: one session's notice stayed in a thinking block.
 - Session rules: a status line is a text message, and a claim needs its whole line. Topic tips cover verification-heavy items and truncated lines.
 - Trimmed the delegate topic files and brief templates to rules and reasons; measurements told nowhere else moved to `docs/field-results.md`.

@@ -19,10 +19,10 @@ class SkillSplitTests(unittest.TestCase):
         self.assertLessEqual(len(CORE.read_bytes()), 12_288)
 
     def test_trigger_frontmatter_is_unchanged(self):
-        # The first four lines as shipped on 2026-11-04, including line endings.
+        # The first four lines as shipped on 2026-11-06, including line endings.
         frontmatter = b"".join(CORE.read_bytes().splitlines(keepends=True)[:4])
         self.assertEqual(hashlib.sha256(frontmatter).hexdigest(),
-                         "e325081b213d123b317ff21bfd0274d2e215d43d377348e6818eb204d6166190")
+                         "e7b87cce787513206c106a57d68053116b9fd4430e069b5a186eca68a138bb17")
 
     def test_reference_files_and_core_pointers_match(self):
         named = set(re.findall(r"reference/([\w./-]+\.md)", CORE.read_text(encoding="utf-8")))

@@ -4,7 +4,7 @@ Claude Code as orchestrator, Codex CLI and Cursor's headless agent as workers. T
 
 ## Why this exists
 
-This is my own workflow, tuned to my setup. Cursor is my IDE, Claude Code runs inside it as the main agent, and Codex CLI and Cursor's agent run on their own subscriptions. Claude's quota runs out first. So Claude orchestrates: it keeps design, data checks and review, and hands mechanical work to whichever pool has quota to spare. The rest of the repo cuts what Claude's own sessions cost, mostly by keeping them short.
+This is my own workflow, tuned to my setup. Cursor is my IDE, Claude Code runs inside it as the main agent, and Codex CLI and Cursor's agent run on their own subscriptions. On Claude Pro, Claude's quota ran out first. So Claude orchestrates: it keeps design, data checks and review, and hands mechanical work to whichever pool has quota to spare. The rest of the repo cuts what Claude's own sessions cost, mostly by keeping them short.
 
 It is a snapshot, published in case parts of it are useful to someone else. It is not a general-purpose tool. It assumes Linux, [openusage](https://github.com/janekbaraniewski/openusage) for quota data, and Codex and Cursor subscriptions, and it changes whenever my workflow does. Versions are in the [CHANGELOG](CHANGELOG.md).
 
