@@ -8,7 +8,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
 
 - `skills/delegate/reference/`: workflow topics read on demand from the short `skills/delegate/SKILL.md` core (commands, sessions, briefs, quota, launch, review and agents).
 - `skills/delegate/scripts/delegate`: argparse entry point (no `.py` extension), dispatching to:
-  - `quota.py`: pools from `openusage export`
+  - `quota.py`: pools from `codex app-server` and `openusage export`
   - `monitor.py`: closed-window unused share (`quota --unused`) and per-job pool costs / rounds left
   - `ratings.py`: Artificial Analysis via API key or leaderboard scrape, cached 24h
   - `route.py`: per-task score = ratings × weights × quota

@@ -22,6 +22,9 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- Default quota source is `hybrid` (cutover 2026-11-07): Codex from `codex app-server`, Claude and Cursor from `openusage export --source direct` under a private HOME that skips Codex; `auto|direct|daemon` remain plain openusage. `check_dispatch` reads only codex-5h and codex-7d via one `codex app-server` call and never runs openusage. `quota.jsonl` rows carry `reader` and may reuse a complete hybrid reading up to 15 s old (`reused_from`), except a job-end or session-end that would share a reading with its own start.
+- A rate-limited Claude pool's error now ends `: usage API rate limited (429)` instead of only `metric … missing`.
+- `install.sh --timer` puts `codex`'s directory on the quota timer's PATH and warns if `codex` is missing.
 - The `delegate` skill description gives spare Codex and Cursor quota as the reason for unprompted use, and the README puts "Claude's quota ran out first" on the Pro plan: on Max the first full 7-day window peaked at 65% used.
 - Claude-only control sessions, when the prompt or the handoff's next step asks for delegated work, must say so in a text message before the first tool call, ask in a picker whether to work alone or with Claude subagents (any Claude model), and repeat the reason at the close: one session's notice stayed in a thinking block.
 - Session rules: a status line is a text message, and a claim needs its whole line. Topic tips cover verification-heavy items and truncated lines.

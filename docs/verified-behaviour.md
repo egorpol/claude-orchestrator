@@ -2,6 +2,28 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-11-07
+
+- **Hybrid quota reader is the default** for `delegate quota`, `delegate quota --snapshot`, `delegate route` and the read `delegate report` does. Codex comes from `codex app-server --stdio` (JSON-RPC method `account/rateLimits/read`, codex-cli 0.159.1). Claude and Cursor come from `openusage export --source direct` under a private HOME, `~/.cache/claude-delegate/openusage-home`, which links `.claude`, `.claude.json`, `.cursor` and `.config/Cursor` and leaves out `.codex`, so openusage skips Codex. `--source auto|direct|daemon` remain as plain openusage reads. If one side fails, the other side's pools are still read and the failed pools carry a per-pool `error`; only when both fail does the row get a top-level `error`.
+- **Speed:** `delegate quota` 4.75 s wall; a `codex app-server` read alone 0.87 s; a plain `openusage export --source direct` 27.3 s (22 s in an earlier timing the same day).
+- **`quota.jsonl` rows:** `source` is `hybrid`; a new field `reader` is `codex-app-server+openusage-direct`, or `openusage-<source>` for a plain source. An event may reuse a complete `hybrid` reading up to 15 s old and still writes its own row, with `reused_from` set to the original reading's `ts`. A job-end or session-end that would share a reading with its own start reads afresh. 11 of the first 18 hybrid rows reused a reading.
+- **Cutover:** 2026-11-07 00:49:49 UTC (the patch was applied to this live checkout; source: the run's `applied` marker). First `hybrid` row: 00:50:02 UTC. Earlier rows have `source: direct` and no `reader`. The change falls inside the experiment's open window, which the preregistration's "treatment as maintained" clause covers.
+- **A rate-limited Claude pool now says so.** Its error reads `metric usage_five_hour missing: usage API rate limited (429)`; before, it read `metric usage_five_hour missing`. Reproduced live: a plain direct export taken seconds after other reads had no Claude metric and its `usage_api_error` diagnostic contained 429.
+- **Why one-shot reads get 429s:** openusage v0.26.3 (`internal/providers/claude_code/claude_code.go`) serves the usage API from memory for 3 minutes (`usageAPIMinInterval`, line 602) and backs off 1 to 30 minutes after a 429 or 5xx (lines 605-606), honouring Retry-After (`noteUsageAPIThrottle`). That state sits on the provider struct and that file writes nothing to disk, so the long-running daemon has it until a restart and a one-shot `export` never has it.
+- **Claude misses by gap to the previous row**, 7 days to the cutover (2026-10-31 00:49:49 to 2026-11-07 00:49:49 UTC), 1,553 rows, 461 misses:
+
+  | gap | rows | missed |
+  |---|---|---|
+  | under 30 s | 585 | 47% |
+  | 30-60 s | 108 | 44% |
+  | 1-2 min | 156 | 31% |
+  | 2-5 min | 259 | 22% |
+  | 5-10 min | 202 | 6% |
+  | over 10 min | 243 | 9% |
+
+  173 of the 193 rows within 30 s after a miss missed too (90%). This is correlation: busy periods confound it, and the API's real limit is unknown. Rows before the cutover don't record why a metric was missing, and a 500 gives the same bare `metric usage_five_hour missing`, so the table can't separate 429s from other failures. A confirmed 429 is a rate limit on repeated reads: it says nothing against the reader or about the quota itself.
+- **openusage's telemetry daemon crashes and costs about a core.** v0.26.3, measured over the 3 h 20 min after a boot: 5 panics, every one at `cost := e.costs[i]` (`internal/providers/claude_code/conversation_usage.go:966`) with the index equal to the length, so a cached entry's `costs` was shorter than its `records`. `Restart=always` brought it back each time. It polls every 30 s (`internal/daemon/server.go:141`). After the last restart it averaged 5.3 cores for 2 minutes, then 1.1 to 1.3, in bursts of 3.5 to 4.8 cores. The trigger is unknown. No hybrid read has failed this way: the quota log has 0 `exited with status` rows. With the daemon stopped, `delegate quota` read all six pools in 4.46 s.
+
 ## 2026-11-04
 
 - **Cursor's ask mode runs some commands and rejects others.** Two runs of `delegate ask`'s command with `--output-format stream-json` (cursor-agent 2026.10.22-27dcf5f, model auto), in a scratch repo whose previous commit held a random token (no plain-text hit under `.git`; `git show` from a normal shell printed it), were asked to run `ls -1` and `git show HEAD~1:note.txt`. Both runs went the same way: the compound `ls -1 && echo … && git show …` came back `rejected`, `ls -1` alone succeeded, and `git show HEAD~1:note.txt` alone came back `rejected`. The token appeared nowhere in either stream. Which other commands pass was not tested.
