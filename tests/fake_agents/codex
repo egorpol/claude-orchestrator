@@ -7,6 +7,72 @@ import sys
 
 
 args = sys.argv[1:]
+if args[0] == "app-server":
+    import subprocess
+    import time
+    from datetime import datetime, timezone
+
+    assert args == ["app-server", "--stdio"], args
+    mode = os.environ.get("FAKE_CODEX_MODE", "ok")
+    if os.environ.get("FAKE_CODEX_PIDS"):
+        with Path(os.environ["FAKE_CODEX_PIDS"]).open("a") as stream:
+            stream.write(str(os.getpid()) + "\n")
+    if mode in ("grandchild", "exit-grandchild"):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        if os.environ.get("FAKE_CODEX_PIDS"):
+            with Path(os.environ["FAKE_CODEX_PIDS"]).open("a") as stream:
+                stream.write(str(child.pid) + "\n")
+        if mode == "exit-grandchild":
+            sys.exit(0)
+    if mode in ("silent", "grandchild"):
+        time.sleep(60)
+    if mode == "eof-init":
+        sys.exit(0)
+    for line in sys.stdin:
+        request = json.loads(line)
+        if request["method"] == "initialized":
+            continue
+        if request["method"] == "initialize":
+            assert "clientInfo" in request["params"]
+            print(json.dumps({"method": "remoteControl/status/changed", "params": {}}), flush=True)
+            print(json.dumps({"id": request["id"], "result": {}}), flush=True)
+            continue
+        assert request["method"] == "account/rateLimits/read", request
+        if os.environ.get("FAKE_CODEX_LOG"):
+            with Path(os.environ["FAKE_CODEX_LOG"]).open("a") as stream:
+                stream.write("read\n")
+        time.sleep(float(os.environ.get("FAKE_CODEX_SLEEP", "0")))
+        if mode == "eof":
+            sys.exit(0)
+        if mode == "partial":
+            sys.stdout.write('{"id":2,"result":')
+            sys.stdout.flush()
+            time.sleep(60)
+        print(json.dumps({"method": "account/updated", "params": {}}), flush=True)
+        if mode == "garbage":
+            print("not JSON", flush=True)
+        if mode == "nonobject":
+            print("[1,2,3]", flush=True)
+        if mode == "chatty":
+            sys.stderr.write("secret-account-id" * 100000)
+            sys.stderr.flush()
+        if mode == "rpc-error":
+            print(json.dumps({"id": request["id"], "error": {
+                "code": -1, "message": "secret-account-id secret-credit-id"}}), flush=True)
+            continue
+        if mode == "bad-result":
+            result = {"accountId": "secret-account-id", "rateLimits": "secret-credit-id"}
+        elif os.environ.get("FAKE_CODEX_FILE"):
+            result = json.loads(Path(os.environ["FAKE_CODEX_FILE"]).read_text())
+        else:
+            now = int(datetime.now(timezone.utc).timestamp())
+            result = {"accountId": "secret-account-id", "rateLimits": {
+                "primary": {"usedPercent": 20, "windowDurationMins": 300, "resetsAt": now + 7200},
+                "secondary": {"usedPercent": 30, "windowDurationMins": 10080, "resetsAt": now + 172800},
+                "credits": {"id": "secret-credit-id"}}}
+        print(json.dumps({"id": request["id"], "result": result}), flush=True)
+    sys.exit(0)
+
 assert args[0] == "exec" and "--json" in args, args
 if "resume" in args:
     assert "fake-codex-thread" in args, args

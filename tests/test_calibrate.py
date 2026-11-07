@@ -79,6 +79,16 @@ class TestSnapshotPairs(unittest.TestCase):
         self.assertEqual(pairs[0]["rise"], 3)
         self.assertEqual(pairs[0]["t1"] - pairs[0]["t0"], timedelta(minutes=10))
 
+    def test_hybrid_reused_rows_preserve_observation_and_do_not_make_pairs(self):
+        reset = T0 + timedelta(hours=3)
+        first = _row(T0, codex_5h=_entry(10, reset))
+        first.update(source="hybrid", reader="codex-app-server+openusage-direct")
+        reused = {**first, "ts": (T0 + timedelta(seconds=10)).isoformat(), "reused_from": first["ts"]}
+        last = _row(T0 + timedelta(seconds=20), codex_5h=_entry(12, reset))
+        pairs, stats = calibrate.snapshot_pairs([first, reused, last], "codex-5h")
+        self.assertEqual(stats, {})
+        self.assertEqual(pairs, [{"t0": T0, "t1": T0 + timedelta(seconds=20), "rise": 2}])
+
     def test_error_stale_and_new_window_break_pairs(self):
         reset = T0 + timedelta(hours=3)
         later = T0 + timedelta(hours=8)

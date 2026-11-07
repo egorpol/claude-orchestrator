@@ -1,10 +1,15 @@
-"""Remaining quota per delegation pool, read from `openusage export`."""
+"""Remaining quota per delegation pool, read from Codex and openusage."""
 import fcntl
 import json
+import math
 import os
 import re
+import selectors
+import signal
 import subprocess
 import sys
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,18 +37,15 @@ POOLS = {
 
 # Dispatch checks only these pools; Cursor dispatches do not need a quota read.
 DISPATCH_POOLS = ("codex-5h", "codex-7d")
-DISPATCH_MAX_AGE_MIN = 15
+# At ~11 points per 355 s round, 15 s is about half a whole-percent gauge step.
+REUSE_MAX_S = 15
+REUSE_TAIL_BYTES = 256 * 1024
 
 
 def check_dispatch(catalog_path=None):
-    """Classify dispatch pools as ok/low/unknown, refreshing stale data once.
+    """Classify fresh Codex pools as ok/low/unknown; failures never block dispatch.
 
-    A failed auto read never retries. A failed direct read invalidates only the
-    pools that needed refreshing. Neither failure prevents an agent dispatch.
-
-    The catalog (base + optional local overlay) is loaded before the quota fetch
-    and outside the fetch try, so a broken local file raises instead of being
-    reported as "quota unknown".
+    Load the catalog outside the read's try so broken local configuration raises.
     """
     # Import inside the function: hooks load this module via
     # spec_from_file_location without the scripts dir on sys.path; a top-level
@@ -55,36 +57,21 @@ def check_dispatch(catalog_path=None):
     catalog = catalog_mod.load(catalog_path or scripts / "catalog.json")
     threshold = catalog.get("min_quota_pct", 10)
     try:
-        entries = pools(fetch("auto", timeout=15))
+        entries = pools({"snapshots": [_codex_snapshot(timeout=15)]})
     except Exception as exc:
-        return {"catalog": catalog, "threshold": threshold, "error": str(exc),
-                "pools": {pid: {"state": "unknown", "reason": " ".join(_fetch_error(exc).split())}
+        error = _fetch_error(exc, "codex app-server")
+        return {"catalog": catalog, "threshold": threshold, "error": error,
+                "pools": {pid: {"state": "unknown", "reason": error}
                           for pid in DISPATCH_POOLS}}
 
-    def stale(entry):
-        age = entry.get("age_min")
-        return age is None or age > DISPATCH_MAX_AGE_MIN
-
-    refresh = [pid for pid in DISPATCH_POOLS if stale(entries.get(pid) or {})]
-    refresh_error = None
-    if refresh:
-        try:
-            direct = pools(fetch("direct", timeout=30))
-            entries = {**entries, **{pid: direct.get(pid) or {} for pid in refresh}}
-        except Exception as exc:
-            refresh_error = _fetch_error(exc)
     checked = {}
     for pid in DISPATCH_POOLS:
         entry = dict(entries.get(pid) or {})
         reason = None
-        if pid in refresh and refresh_error:
-            reason = f"refresh failed: {refresh_error}"
-        elif entry.get("error"):
+        if entry.get("error"):
             reason = entry["error"]
         elif entry.get("age_min") is None:
             reason = "snapshot timestamp missing"
-        elif stale(entry):
-            reason = f"snapshot {entry['age_min']:g} min old (over {DISPATCH_MAX_AGE_MIN} min)"
         elif entry.get("left_pct") is None:
             reason = "remaining quota missing"
         entry["state"] = ("unknown" if reason else
@@ -107,7 +94,9 @@ def parse_ts(s):
     return datetime.fromisoformat(head + (f".{frac[:6]}" if frac else "") + tz)
 
 
-def fetch(source="auto", timeout=90):
+def fetch(source="hybrid", timeout=90):
+    if source == "hybrid":
+        return _hybrid_snapshot(timeout)
     out = subprocess.run(
         ["openusage", "export", "--output", "-", "--format", "json", "--source", source],
         capture_output=True, text=True, timeout=timeout, check=True,
@@ -125,11 +114,16 @@ def pools(envelope, now=None):
         entry = {"label": spec["label"], "provider": spec["provider"]}
         result[pid] = entry
         if not snap:
-            entry["error"] = "provider missing from openusage export"
+            entry["error"] = (envelope.get("_reader_errors") or {}).get(
+                spec["provider"], "provider missing from openusage export")
             continue
         m = (snap.get("metrics") or {}).get(spec["metric"])
         if not m:
             entry["error"] = f"metric {spec['metric']} missing"
+            # Fixed text only: the diagnostic carries a raw upstream response body.
+            diagnostics = snap.get("diagnostics")
+            if isinstance(diagnostics, dict) and "429" in str(diagnostics.get("usage_api_error")):
+                entry["error"] += ": usage API rate limited (429)"
             continue
         limit = m.get("limit") or 100
         if m.get("remaining") is not None:
@@ -256,24 +250,203 @@ def _snapshot_pools(envelope, ts):
     return result
 
 
-def _fetch_error(exc):
+class _ReaderError(ValueError):
+    """An authored, safe error: never constructed from a Codex reply or stderr."""
+
+
+def _fetch_error(exc, reader="openusage"):
+    if isinstance(exc, _ReaderError):
+        return " ".join(str(exc).split())[:600]
     if isinstance(exc, FileNotFoundError):
-        cause = "openusage not found"
+        cause = f"{reader} not found"
     elif isinstance(exc, subprocess.TimeoutExpired):
-        cause = "openusage timed out"
+        cause = f"{reader} timed out"
     elif isinstance(exc, subprocess.CalledProcessError):
-        cause = f"openusage exited with status {exc.returncode}"
-    elif isinstance(exc, (ValueError, TypeError, AttributeError, KeyError)):
-        cause = "invalid openusage JSON/export"
+        cause = f"{reader} exited with status {exc.returncode}"
+    elif isinstance(exc, (ValueError, TypeError, AttributeError, KeyError, OverflowError)):
+        cause = f"invalid {reader} JSON/export"
     else:
-        cause = f"openusage failed: {str(exc)[:200]}"
-    stderr = getattr(exc, "stderr", None) or ""
+        cause = f"{reader} failed"
+        if reader == "openusage":
+            cause += ": " + " ".join(str(exc).split())[:200]
+    # Codex can include account/credit ids anywhere, including RPC errors and stderr.
+    stderr = (getattr(exc, "stderr", None) or "") if reader == "openusage" else ""
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", errors="replace")
-    return cause + (": " + stderr.strip()[-300:] if stderr.strip() else "")
+    tail = " ".join(stderr.strip()[-300:].split())
+    return cause + (": " + tail if tail else "")
+
+
+def _codex_snapshot(timeout=15):
+    """A bounded JSON-lines RPC exchange, with no raw reply data in errors."""
+    deadline = time.monotonic() + min(15, timeout)
+    proc = subprocess.Popen(["codex", "app-server", "--stdio"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            start_new_session=True, bufsize=0)
+    try:
+        os.set_blocking(proc.stdout.fileno(), False)
+        os.set_blocking(proc.stdin.fileno(), False)
+        pending = b""
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+
+            def send(message):
+                data = (json.dumps(message) + "\n").encode()
+                while data:
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired("codex app-server", timeout)
+                    try:
+                        count = os.write(proc.stdin.fileno(), data)
+                        data = data[count:]
+                    except BlockingIOError:
+                        # Requests are tiny, but a child that never reads must still time out.
+                        with selectors.DefaultSelector() as writable:
+                            writable.register(proc.stdin, selectors.EVENT_WRITE)
+                            writable.select(max(0, deadline - time.monotonic()))
+                    except BrokenPipeError:
+                        raise _ReaderError("codex app-server closed stdin") from None
+
+            def reply(request_id):
+                nonlocal pending
+                while True:
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        try:
+                            message = json.loads(line)
+                        except (ValueError, UnicodeError):
+                            continue
+                        if not isinstance(message, dict) or message.get("id") != request_id:
+                            continue
+                        if "error" in message:
+                            raise _ReaderError("codex app-server RPC error")
+                        if not isinstance(message.get("result"), dict):
+                            raise _ReaderError("codex app-server invalid result")
+                        return message["result"], datetime.now(timezone.utc)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise subprocess.TimeoutExpired("codex app-server", timeout)
+                    try:
+                        chunk = os.read(proc.stdout.fileno(), 65536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        raise _ReaderError("codex app-server EOF before reply")
+                    pending += chunk
+                    if len(pending) > 1024 * 1024:
+                        raise _ReaderError("codex app-server reply too large")
+
+            send({"id": 1, "method": "initialize", "params": {
+                "clientInfo": {"name": "claude-delegate-quota", "version": "1"}}})
+            reply(1)
+            send({"method": "initialized"})
+            send({"id": 2, "method": "account/rateLimits/read"})
+            result, arrived = reply(2)
+        limits = result.get("rateLimits")
+        if not isinstance(limits, dict):
+            raise _ReaderError("codex app-server rate limits missing")
+        snap = {"provider_id": "codex", "timestamp": arrived.isoformat(),
+                "status": "ok", "metrics": {}, "resets": {}}
+        for window in (limits.get("primary"), limits.get("secondary")):
+            if not isinstance(window, dict):
+                continue
+            for pid in DISPATCH_POOLS:
+                spec = POOLS[pid]
+                if window.get("windowDurationMins") != spec["window_h"] * 60:
+                    continue
+                used, reset = window.get("usedPercent"), window.get("resetsAt")
+                if (not isinstance(used, (int, float)) or isinstance(used, bool)
+                        or not math.isfinite(used)):
+                    raise _ReaderError("codex app-server invalid usedPercent")
+                if reset is not None:
+                    if not isinstance(reset, (int, float)) or isinstance(reset, bool):
+                        raise _ReaderError("codex app-server invalid resetsAt")
+                    try:
+                        reset = datetime.fromtimestamp(reset, timezone.utc).isoformat()
+                    except (ValueError, OverflowError, OSError):
+                        raise _ReaderError("codex app-server invalid resetsAt") from None
+                snap["metrics"][spec["metric"]] = {
+                    "limit": 100, "used": used, "remaining": 100 - used}
+                snap["resets"][spec["reset"]] = reset
+        return snap
+    finally:
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=min(0.05, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            pass
+        # Even an exited leader may have descendants holding stdout open.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            pass  # killed but not released yet: that must not cost a good reading
+        proc.stdout.close()
+
+
+def _cache_path():
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache").expanduser()
+
+
+def _openusage_env():
+    # Resolve cache and targets against the real environment before hiding HOME/XDG.
+    home = _cache_path() / "claude-delegate/openusage-home"
+    real = Path.home()
+    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    home.chmod(0o700)
+    (home / ".config").mkdir(mode=0o700, exist_ok=True)
+    for name in (".claude", ".claude.json", ".cursor", ".config/Cursor"):
+        target, link = real / name, home / name
+        if not target.exists():
+            if link.is_symlink():
+                link.unlink(missing_ok=True)
+            continue
+        if link.is_symlink() and os.readlink(link) == str(target):
+            continue
+        temporary = link.with_name(link.name + "." + uuid.uuid4().hex)
+        try:
+            temporary.symlink_to(target)
+            os.replace(temporary, link)
+        finally:
+            temporary.unlink(missing_ok=True)
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("XDG_") and key != "CODEX_HOME"}
+    env["HOME"] = str(home)
+    return env
+
+
+def _hybrid_snapshot(timeout):
+    snapshots, errors = [], {}
+    try:
+        snapshots.append(_codex_snapshot(timeout=min(15, timeout)))
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
+        errors["codex"] = _fetch_error(exc, "codex app-server")
+    try:
+        output = subprocess.run(
+            ["openusage", "export", "--output", "-", "--format", "json", "--source", "direct"],
+            env=_openusage_env(), capture_output=True, text=True, timeout=timeout, check=True)
+        try:
+            envelope = json.loads(output.stdout)
+            other = [snap for snap in envelope["snapshots"] if snap.get("provider_id") != "codex"]
+            # Validate the other side separately: malformed exports cannot discard Codex.
+            pools({"snapshots": other})
+        except (ValueError, TypeError, AttributeError, KeyError) as exc:
+            exc.stderr = output.stderr
+            raise
+        snapshots.extend(other)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
+        error = _fetch_error(exc)
+        errors.update(claude_code=error, cursor=error)
+    if "codex" in errors and "claude_code" in errors:
+        raise _ReaderError(errors["codex"] + "; " + errors["claude_code"])
+    return {"snapshots": snapshots, "_reader_errors": errors}
 
 
 def _fetch_snapshot(source, timeout):
+    if source == "hybrid":
+        return _hybrid_snapshot(timeout)
     # Keep fetch()'s legacy behavior, but retain stderr on a JSON decoding error.
     output = subprocess.run(
         ["openusage", "export", "--output", "-", "--format", "json", "--source", source],
@@ -287,13 +460,57 @@ def _fetch_snapshot(source, timeout):
 
 
 def log_path(log=None):
-    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    cache = _cache_path()
     return Path(log or os.environ.get("CLAUDE_DELEGATE_QUOTA_LOG")
                 or cache / "claude-delegate/quota.jsonl").expanduser()
 
 
+def _reuse_reading(path, row, now):
+    """Use only the bounded tail, and never turn a start/end measurement into zero."""
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - REUSE_TAIL_BYTES))
+            if size > REUSE_TAIL_BYTES:
+                stream.readline()  # discard the first, potentially truncated row
+            lines = stream.read().splitlines()
+    except FileNotFoundError:
+        return None
+    rows = []
+    for line in lines:
+        try:
+            previous = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        if isinstance(previous, dict):
+            rows.append(previous)
+    if not rows:
+        return None
+    latest = rows[-1]
+    entries = latest.get("pools")
+    if (latest.get("source") != "hybrid" or "error" in latest or "reader" not in latest
+            or not isinstance(entries, dict) or not all(
+                isinstance(entries.get(pid), dict) and "used_pct" in entries[pid] for pid in POOLS)):
+        return None
+    origin = latest.get("reused_from", latest.get("ts"))
+    observed = _safe_ts(origin)
+    latest_ts = _safe_ts(latest.get("ts"))
+    if (observed is None or latest_ts is None or latest_ts > now
+            or not 0 <= (now - observed).total_seconds() <= REUSE_MAX_S):
+        return None
+    # Require the original row to be in the tail; otherwise pair history is incomplete.
+    if not any(p.get("ts") == origin and "reused_from" not in p for p in rows):
+        return None
+    key = {"job-end": "run", "session-end": "session"}.get(row["reason"])
+    if key and row.get(key) is not None and any(
+            p.get(key) == row[key] and p.get("reused_from", p.get("ts")) == origin for p in rows):
+        return None
+    return latest, origin
+
+
 def record(reason=None, session=None, run=None, if_active=False, log=None,
-           source="direct", timeout=90, job=None):
+           source="hybrid", timeout=90, job=None):
     """Append one durable quota reading; return (row, None), or (None, why) when gated off."""
     path = log_path(log)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,17 +521,25 @@ def record(reason=None, session=None, run=None, if_active=False, log=None,
             reason, gate, skip = _activity_gate(path, datetime.now(timezone.utc))
             if skip:
                 return None, skip
-        ts = datetime.now(timezone.utc).replace(microsecond=0)
-        row = {"ts": ts.isoformat(), "source": source, "reason": reason,
+        now = datetime.now(timezone.utc)
+        ts = now.replace(microsecond=0)
+        row = {"ts": ts.isoformat(), "source": source,
+               "reader": "codex-app-server+openusage-direct" if source == "hybrid" else f"openusage-{source}",
+               "reason": reason,
                "session": session if isinstance(session, str)
                and re.fullmatch(r"[A-Za-z0-9_-]+", session) else None, "run": run}
         if isinstance(job, str) and re.fullmatch(r"(round|review)-[0-9]+", job):
             row["job"] = job
         if gate is not None:
             row["gate"] = gate
+        reusable = _reuse_reading(path, row, now) if source == "hybrid" else None
         try:
-            row["pools"] = _snapshot_pools(_fetch_snapshot(source, timeout), ts)
-        except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            if reusable:
+                previous, origin = reusable
+                row.update(pools=previous["pools"], reader=previous["reader"], reused_from=origin)
+            else:
+                row["pools"] = _snapshot_pools(_fetch_snapshot(source, timeout), ts)
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
             row["error"] = _fetch_error(exc)
         line = json.dumps(row)
         with path.open("ab+") as stream:
@@ -330,7 +555,7 @@ def record(reason=None, session=None, run=None, if_active=False, log=None,
 
 
 def snapshot(reason=None, session=None, run=None, if_active=False, log=None,
-             source="direct", timeout=90, job=None):
+             source="hybrid", timeout=90, job=None):
     """`delegate quota --snapshot`: record a reading, print it; exit status 1 on a fetch error."""
     row, skip = record(reason, session, run, if_active, log, source, timeout, job=job)
     if skip:

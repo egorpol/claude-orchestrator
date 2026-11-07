@@ -83,7 +83,7 @@ def cmd_quota(a):
         )
         print(json.dumps(out, indent=2) if a.json else out)
         return
-    source = a.source or ("direct" if a.snapshot else "auto")
+    source = a.source
     if a.snapshot:
         sys.exit(quota.snapshot(reason=a.reason, session=a.session, run=a.run,
                                 if_active=a.if_active, log=a.log, source=source,
@@ -179,9 +179,9 @@ def main():
 
     s = sub.add_parser("quota", help="remaining quota and reset time per pool")
     s.add_argument("--json", action="store_true")
-    s.add_argument("--source", choices=["auto", "direct", "daemon"],
-                   help="openusage collection source; 'direct' polls providers now (slower, fresher)")
-    s.add_argument("--snapshot", action="store_true", help="append a quota.jsonl reading (default source: direct)")
+    s.add_argument("--source", default="hybrid", choices=["hybrid", "auto", "direct", "daemon"],
+                   help="quota reader (default: hybrid); auto/direct/daemon use plain openusage")
+    s.add_argument("--snapshot", action="store_true", help="append a quota.jsonl reading (default source: hybrid)")
     s.add_argument("--unused", action="store_true",
                    help="report closed quota windows' unused share and per-job pool costs from local logs")
     s.add_argument("--since", help="with --unused: keep windows/jobs ending/starting on or after this date")
@@ -211,7 +211,7 @@ def main():
     s.add_argument("--prefer", help="comma list of preferred delegate IDs")
     s.add_argument("--min-quota", type=float, help="exclude pools below this %% left (default from catalog)")
     s.add_argument("--refresh", action="store_true")
-    s.add_argument("--source", default="auto", choices=["auto", "direct", "daemon"])
+    s.add_argument("--source", default="hybrid", choices=["hybrid", "auto", "direct", "daemon"])
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_route)
 

@@ -205,9 +205,18 @@ install_timer() {
   if provider_bin="$(command -v openusage)"; then
     unit_path="$(cd "$(dirname "$provider_bin")" && pwd -P):$unit_path"
   else
-    warn "openusage not found; quota timer PATH uses system directories only"
+    warn "openusage not found; quota timer needs it installed on its PATH"
   fi
   rate_path="$unit_path"
+  if agent_bin="$(command -v codex)"; then
+    agent_bin="$(cd "$(dirname "$agent_bin")" && pwd -P)"
+    case ":$unit_path:" in
+      *":$agent_bin:"*) ;;
+      *) unit_path="$agent_bin:$unit_path" ;;
+    esac
+  else
+    warn "codex not found; quota timer needs it installed on its PATH"
+  fi
   if agent_bin="$(command -v cursor-agent)"; then
     agent_bin="$(cd "$(dirname "$agent_bin")" && pwd -P)"
     case ":$rate_path:" in

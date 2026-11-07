@@ -13,12 +13,16 @@ source = args[args.index("--source") + 1]
 if os.environ.get("FAKE_OPENUSAGE_LOG"):
     with Path(os.environ["FAKE_OPENUSAGE_LOG"]).open("a") as stream:
         stream.write(source + "\n")
+if os.environ.get("FAKE_OPENUSAGE_ENV"):
+    with Path(os.environ["FAKE_OPENUSAGE_ENV"]).open("a") as stream:
+        stream.write(json.dumps({key: value for key, value in os.environ.items()
+                                if key == "HOME" or key.startswith("XDG_") or key == "CODEX_HOME"}) + "\n")
 code = int(os.environ.get("FAKE_OPENUSAGE_EXIT", "0"))
 if code:
     sys.exit(code)
 if os.environ.get("FAKE_OPENUSAGE_FILE"):
     fixture = json.loads(Path(os.environ["FAKE_OPENUSAGE_FILE"]).read_text())
-    print(json.dumps(fixture.get(source, fixture)))
+    print(json.dumps(fixture.get(source, fixture) if isinstance(fixture, dict) else fixture))
 else:
     now = datetime.now(timezone.utc)
     print(json.dumps({"snapshots": [{

@@ -879,7 +879,7 @@ class TestReport(unittest.TestCase):
         with mock.patch("quota.fetch", side_effect=RuntimeError("openusage\nmissing")) as fetch:
             code, _, err = self.invoke("--session", SESSION, "--feedback-dir", str(self.feedback), defaults=False)
         self.assertEqual((code, err), (0, ""))
-        fetch.assert_called_once_with("auto")
+        fetch.assert_called_once_with("hybrid")
         self.assertEqual(self.usage_row()["quota_end"], {"error": "openusage missing"})
         self.assertTrue(self.skeleton().is_file())
         self.assertIn("Quota at the end: not measured.", self.skeleton().read_text(encoding="utf-8"))

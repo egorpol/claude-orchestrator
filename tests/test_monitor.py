@@ -492,13 +492,18 @@ class CliPlumbingTests(unittest.TestCase):
         fake.write_text(f"#!{sys.executable}\nimport pathlib,sys\n"
                         f"print(pathlib.Path({str(export)!r}).read_text())\n")
         fake.chmod(0o755)
+        codex = bin_dir / "codex"
+        codex.write_text(f"#!{sys.executable}\n" +
+                         (Path(__file__).parent / "fake_agents/codex").read_text().split("\n", 1)[1])
+        codex.chmod(0o755)
         out_log = self.tmp / "snap.jsonl"
         result = subprocess.run(
             [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "launch",
              "--job", "round-1", "--log", str(out_log)],
             capture_output=True, text=True,
             env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
-                 "HOME": str(self.tmp), "DELEGATE_CATALOG_LOCAL": ""},
+                 "HOME": str(self.tmp), "XDG_CACHE_HOME": str(self.tmp / "cache"),
+                 "DELEGATE_CATALOG_LOCAL": ""},
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         row = json.loads(out_log.read_text().splitlines()[0])

@@ -240,7 +240,7 @@ class LoadIntegrationTests(unittest.TestCase):
     def test_check_dispatch_takes_min_quota_from_local(self):
         self.local.write_text(json.dumps({"min_quota_pct": 33}), encoding="utf-8")
         with mock.patch.dict(os.environ, {"DELEGATE_CATALOG_LOCAL": str(self.local)}), \
-             mock.patch.object(quota, "fetch", return_value={}), \
+             mock.patch.object(quota, "_codex_snapshot", return_value={}), \
              mock.patch.object(quota, "pools", return_value={
                  "codex-5h": {"left_pct": 50, "age_min": 0},
                  "codex-7d": {"left_pct": 50, "age_min": 0}}):

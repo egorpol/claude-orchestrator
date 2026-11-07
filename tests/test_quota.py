@@ -2,10 +2,12 @@
 import io
 import json
 import os
+import time
 import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,55 +67,44 @@ class DispatchCheckTests(unittest.TestCase):
                 "codex-7d": {"left_pct": 50, "age_min": 0},
                 "cursor-auto": {"left_pct": 0, "age_min": None}}
 
-    def test_only_dispatch_pools_and_strict_freshness_boundary(self):
-        with mock.patch.object(quota, "fetch", return_value={}) as fetch, \
-             mock.patch.object(quota, "pools", return_value=self.entries()):
+    def test_dispatch_reads_codex_once_and_never_openusage(self):
+        with mock.patch.object(quota, "_codex_snapshot", return_value={}) as read, \
+             mock.patch.object(quota, "fetch") as fetch, \
+             mock.patch.object(quota, "pools", return_value=self.entries(age_min=999)):
             result = quota.check_dispatch()
-        fetch.assert_called_once_with("auto", timeout=15)
-        self.assertEqual(set(result["pools"]), {"codex-5h", "codex-7d"})
+        read.assert_called_once_with(timeout=15)
+        fetch.assert_not_called()
+        self.assertEqual(set(result["pools"]), set(quota.DISPATCH_POOLS))
         self.assertTrue(all(entry["state"] == "ok" for entry in result["pools"].values()))
 
-    def test_missing_timestamp_refreshes_once(self):
-        with mock.patch.object(quota, "fetch", return_value={}) as fetch, \
-             mock.patch.object(quota, "pools", side_effect=[self.entries(age_min=None, left_pct=1),
-                                                          self.entries(age_min=0)]):
+    def test_missing_values_stay_unknown_without_refresh(self):
+        with mock.patch.object(quota, "_codex_snapshot", return_value={}) as read, \
+             mock.patch.object(quota, "pools", return_value=self.entries(age_min=None)):
             result = quota.check_dispatch()
-        self.assertEqual(fetch.call_args_list, [mock.call("auto", timeout=15), mock.call("direct", timeout=30)])
-        self.assertEqual(result["pools"]["codex-5h"]["state"], "ok")
-
-    def test_failed_direct_refresh_is_unknown_even_when_cached_pool_was_low(self):
-        timeout = subprocess.TimeoutExpired("openusage", 30)
-        with mock.patch.object(quota, "fetch", side_effect=[{}, timeout]) as fetch, \
-             mock.patch.object(quota, "pools", return_value=self.entries(age_min=16, left_pct=1)):
-            result = quota.check_dispatch()
-        self.assertEqual(fetch.call_args_list, [mock.call("auto", timeout=15), mock.call("direct", timeout=30)])
-        self.assertEqual(result["pools"]["codex-5h"]["state"], "unknown")
-        self.assertIn("refresh failed: openusage timed out", result["pools"]["codex-5h"]["reason"])
-        self.assertEqual(result["pools"]["codex-7d"]["state"], "ok")
-
-    def test_missing_timestamp_after_refresh_stays_unknown(self):
-        with mock.patch.object(quota, "fetch", return_value={}) as fetch, \
-             mock.patch.object(quota, "pools", return_value=self.entries(age_min=None, left_pct=1)):
-            result = quota.check_dispatch()
-        self.assertEqual(fetch.call_count, 2)
-        self.assertEqual(result["pools"]["codex-5h"]["state"], "unknown")
+        self.assertEqual(read.call_count, 1)
         self.assertEqual(result["pools"]["codex-5h"]["reason"], "snapshot timestamp missing")
 
-    def test_auto_timeout_does_not_retry_and_makes_all_pools_unknown(self):
-        with mock.patch.object(quota, "fetch", side_effect=subprocess.TimeoutExpired("openusage", 15)) as fetch:
-            result = quota.check_dispatch()
-        fetch.assert_called_once_with("auto", timeout=15)
-        self.assertTrue(all(entry["state"] == "unknown" for entry in result["pools"].values()))
+    def test_read_failure_is_unknown_bounded_and_private(self):
+        for error in (subprocess.TimeoutExpired("codex", 15),
+                      subprocess.CalledProcessError(1, "codex", stderr="secret-account-id\n"),
+                      ValueError("secret-credit-id")):
+            with self.subTest(error=type(error)), \
+                 mock.patch.object(quota, "_codex_snapshot", side_effect=error) as read:
+                result = quota.check_dispatch()
+            read.assert_called_once_with(timeout=15)
+            self.assertTrue(all(entry["state"] == "unknown" for entry in result["pools"].values()))
+            self.assertNotIn("secret", json.dumps(result))
+            self.assertNotIn("\n", result["error"])
 
-    def test_read_errors_fit_on_one_notice_line(self):
-        error = subprocess.CalledProcessError(1, "openusage", stderr="first line\nsecond line\n")
-        for reads, entries in (([error], self.entries()), ([{}, error], self.entries(age_min=16))):
-            with self.subTest(reads=len(reads)), \
-                 mock.patch.object(quota, "fetch", side_effect=reads), \
-                 mock.patch.object(quota, "pools", return_value=entries):
-                reason = quota.check_dispatch()["pools"]["codex-5h"]["reason"]
-            self.assertIn("first line second line", reason)
-            self.assertNotIn("\n", reason)
+    def test_broken_catalog_raises_before_read(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "catalog.local.json"
+            path.write_text("invalid json")
+            with mock.patch.dict(os.environ, {"DELEGATE_CATALOG_LOCAL": str(path)}), \
+                 mock.patch.object(quota, "_codex_snapshot") as read:
+                with self.assertRaises(Exception):
+                    quota.check_dispatch()
+            read.assert_not_called()
 
 
 class QuotaTests(unittest.TestCase):
@@ -145,6 +136,8 @@ class QuotaTests(unittest.TestCase):
         self.export.write_text(json.dumps(self.envelope))
 
     def cli(self, *args, code=0, env=None):
+        if "--source" not in args:
+            args = (*args, "--source", "direct" if "--snapshot" in args else "auto")
         result = subprocess.run([sys.executable, str(CLI), "quota", *map(str, args)],
                                 env={**self.env, **(env or {})}, text=True, capture_output=True)
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)
@@ -179,7 +172,7 @@ class QuotaTests(unittest.TestCase):
         output = self.collect("--reason", "session-start", "--session", "abc_123-x", "--run", "demo")
         row = self.rows()[0]
         self.assertEqual(json.loads(output), row)
-        self.assertEqual(set(row), {"ts", "source", "reason", "session", "run", "pools"})
+        self.assertEqual(set(row), {"ts", "source", "reader", "reason", "session", "run", "pools"})
         self.assertEqual((row["source"], row["reason"], row["session"], row["run"]),
                          ("direct", "session-start", "abc_123-x", "demo"))
         ts = quota.parse_ts(row["ts"])
@@ -235,7 +228,7 @@ class QuotaTests(unittest.TestCase):
         row = self.rows()[0]
         self.assertEqual(json.loads(output), row)
         self.assertEqual(row["error"], "openusage not found")
-        self.assertEqual(set(row), {"ts", "source", "reason", "session", "run", "error"})
+        self.assertEqual(set(row), {"ts", "source", "reader", "reason", "session", "run", "error"})
         self.assertEqual((row["session"], row["run"]), ("s", "r"))
 
     def test_nonzero_openusage_writes_error_with_bounded_stderr_tail(self):
@@ -255,7 +248,7 @@ class QuotaTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {**self.env, "FAKE_QUOTA_SLEEP": "0.3",
                                           "FAKE_QUOTA_STDERR": "timeout tail"}, clear=True), \
                 redirect_stdout(output):
-            code = quota.snapshot(reason="manual", log=self.log, timeout=0.1)
+            code = quota.snapshot(reason="manual", log=self.log, source="direct", timeout=0.1)
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(output.getvalue()), self.rows()[0])
         self.assertEqual(self.rows()[0]["error"], "openusage timed out: timeout tail")
@@ -549,6 +542,357 @@ class QuotaTests(unittest.TestCase):
                "cursor-auto": {"used_pct": 90.0, "stale": False}}))
         line = quota.format_spare_line(quota.spare_pools(self.log, now=now), now=now)
         self.assertIn("Codex 5h unknown", line)
+
+class HybridTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="hybrid-quota-")
+        self.addCleanup(temporary.cleanup)
+        self.tmp = Path(temporary.name)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.cache = self.tmp / "cache"
+        self.hidden = self.cache / "claude-delegate/openusage-home"
+        self.log = self.tmp / "quota.jsonl"
+        self.calls = self.tmp / "openusage.calls"
+        self.codex_calls = self.tmp / "codex.calls"
+        self.env_log = self.tmp / "environ.jsonl"
+        fakes = Path(__file__).parent / "fake_agents"
+        for name in ("codex", "openusage"):
+            path = self.bin / name
+            path.write_text(f"#!{sys.executable}\n" + (fakes / name).read_text().split("\n", 1)[1])
+            path.chmod(0o755)
+        self.now = datetime.now(timezone.utc).replace(microsecond=0)
+        self.export = self.tmp / "export.json"
+        self.export.write_text(json.dumps(fixture(self.now)))
+        self.env = {"HOME": str(self.home), "PATH": str(self.bin),
+                    "XDG_CACHE_HOME": str(self.cache), "XDG_CONFIG_HOME": str(self.tmp / "config"),
+                    "XDG_DATA_HOME": "hidden-data", "XDG_ANYTHING": "hidden-anything",
+                    "CODEX_HOME": "hidden-codex", "DELEGATE_CATALOG_LOCAL": "",
+                    "FAKE_OPENUSAGE_FILE": str(self.export), "FAKE_OPENUSAGE_LOG": str(self.calls),
+                    "FAKE_OPENUSAGE_ENV": str(self.env_log), "FAKE_CODEX_LOG": str(self.codex_calls)}
+        patcher = mock.patch.dict(os.environ, self.env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def rows(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def raw_limits(self, primary=None, secondary=None):
+        return {"accountId": "secret-account-id", "rateLimits": {
+            "primary": primary or {"usedPercent": 32, "windowDurationMins": 300, "resetsAt": 1794020641},
+            "secondary": secondary or {"usedPercent": 67, "windowDurationMins": 10080, "resetsAt": 1794386768},
+            "credits": {"id": "secret-credit-id"}}}
+
+    def use_limits(self, reply):
+        path = self.tmp / "codex.json"
+        path.write_text(json.dumps(reply))
+        os.environ["FAKE_CODEX_FILE"] = str(path)
+
+    def record_at(self, seconds, **kwargs):
+        with mock.patch.object(quota, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = self.now + timedelta(seconds=seconds)
+            return quota.record(log=self.log, **kwargs)[0]
+
+    def test_rate_limited_claude_names_the_cause_without_the_raw_body(self):
+        now = datetime.now(timezone.utc)
+        snap = {"provider_id": "claude_code", "metrics": {}, "diagnostics": {
+            "usage_api_error": 'oauth: API returned 429: {"body": "upstream-private"}'}}
+        error = quota.pools({"snapshots": [snap]}, now=now)["claude-5h"]["error"]
+        self.assertEqual(error, "metric usage_five_hour missing: usage API rate limited (429)")
+        for other in ({"usage_api_error": "oauth: API returned 500"}, {}, [], None):
+            snap["diagnostics"] = other
+            self.assertEqual(quota.pools({"snapshots": [snap]}, now=now)["claude-5h"]["error"],
+                             "metric usage_five_hour missing")
+
+    def test_cleanup_failure_keeps_a_good_codex_reading(self):
+        real_wait, stuck_procs = subprocess.Popen.wait, []
+
+        def stuck(proc, timeout=None):
+            if timeout == 0.2:  # the wait after the kill: a child the kernel has not released yet
+                stuck_procs.append(proc)
+                raise subprocess.TimeoutExpired("codex", timeout)
+            return real_wait(proc, timeout=timeout)
+
+        with mock.patch.object(quota.os, "killpg", side_effect=PermissionError), \
+                mock.patch.object(subprocess.Popen, "wait", stuck):
+            snap = quota._codex_snapshot(timeout=5)
+        self.assertIn("rate_limit_primary", snap["metrics"])
+        self.assertTrue(stuck_procs[0].stdout.closed)
+        real_wait(stuck_procs[0], timeout=5)
+
+    def test_windows_match_duration_and_private_fields_never_escape(self):
+        reply = self.raw_limits()
+        reply["rateLimits"]["primary"], reply["rateLimits"]["secondary"] = (
+            reply["rateLimits"]["secondary"], reply["rateLimits"]["primary"])
+        self.use_limits(reply)
+        result = quota.pools(quota.fetch())
+        self.assertEqual(result["codex-5h"]["left_pct"], 68)
+        self.assertEqual(result["codex-7d"]["left_pct"], 33)
+        self.assertEqual(result["codex-5h"]["resets_at"], "2026-11-07T03:04:01+00:00")
+        row, _ = quota.record(log=self.log)
+        self.assertEqual(row["source"], "hybrid")
+        self.assertEqual(row["reader"], "codex-app-server+openusage-direct")
+        self.assertEqual(row["pools"]["codex-5h"]["used_pct"], 32)
+        self.assertNotIn("secret", json.dumps(row))
+        self.assertNotIn("accountId", json.dumps(row))
+        self.assertEqual(row["pools"]["claude-5h"]["used_pct"], 12.3457)
+
+    def test_missing_null_and_invalid_windows_are_safe(self):
+        for mode in ("missing", "null", "nonnumeric", "null-reset", "bad-result"):
+            with self.subTest(mode=mode):
+                reply = self.raw_limits()
+                if mode == "missing":
+                    del reply["rateLimits"]["primary"]
+                elif mode == "null":
+                    reply["rateLimits"]["primary"] = None
+                elif mode == "nonnumeric":
+                    reply["rateLimits"]["primary"]["usedPercent"] = "secret-credit-id"
+                elif mode == "null-reset":
+                    reply["rateLimits"]["primary"]["resetsAt"] = None
+                else:
+                    reply["rateLimits"] = "secret-account-id"
+                self.use_limits(reply)
+                result = quota.pools(quota.fetch())
+                row, _ = quota.record(log=self.log, reason="manual")
+                self.assertNotIn("secret", json.dumps(row))
+                if mode == "null-reset":
+                    self.assertEqual(result["codex-5h"]["left_pct"], 68)
+                    self.assertIsNone(result["codex-5h"]["resets_at"])
+                else:
+                    self.assertIn("error", result["codex-5h"])
+                if mode in ("missing", "null"):
+                    self.assertIn("rate_limit_primary missing", result["codex-5h"]["error"])
+                    self.assertEqual(result["codex-7d"]["left_pct"], 33)
+
+    def test_each_child_failure_is_bounded_and_kills_descendants(self):
+        for mode in ("garbage", "nonobject", "rpc-error", "eof", "eof-init", "silent",
+                     "partial", "grandchild", "exit-grandchild", "chatty", "bad-result"):
+            with self.subTest(mode=mode):
+                pidfile = self.tmp / f"pids-{mode}"
+                started = time.monotonic()
+                with mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": mode, "FAKE_CODEX_PIDS": str(pidfile)}):
+                    try:
+                        result = quota._codex_snapshot(timeout=1)
+                    except Exception as exc:
+                        self.assertNotIn(mode, ("garbage", "nonobject", "chatty"))
+                        self.assertNotIn("secret", quota._fetch_error(exc, "codex app-server"))
+                    else:
+                        self.assertIn(mode, ("garbage", "nonobject", "chatty"))
+                        self.assertIn("rate_limit_primary", result["metrics"])
+                self.assertLess(time.monotonic() - started, 3)
+                for pid in pidfile.read_text().splitlines():
+                    status = Path("/proc") / pid / "stat"
+                    # An orphan's zombie may await init's reaper; it cannot keep a pipe/process alive.
+                    deadline = time.monotonic() + 0.5
+                    while status.exists() and status.read_text().split()[2] != "Z" and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if status.exists():
+                        self.assertEqual(status.read_text().split()[2], "Z", f"surviving pid {pid}")
+
+    def test_partial_failures_and_both_fail_through_all_entry_points(self):
+        for codex_fails, openusage_fails in ((True, False), (False, True), (True, True)):
+            with self.subTest(codex=codex_fails, openusage=openusage_fails), mock.patch.dict(os.environ, {
+                    "FAKE_CODEX_MODE": "rpc-error" if codex_fails else "ok",
+                    "FAKE_OPENUSAGE_EXIT": "7" if openusage_fails else "0"}):
+                if codex_fails and openusage_fails:
+                    with self.assertRaises(ValueError) as failure:
+                        quota.pools(quota.fetch())
+                    self.assertNotIn("secret", str(failure.exception))
+                else:
+                    entries = quota.pools(quota.fetch())
+                    self.assertEqual("error" in entries["codex-5h"], codex_fails)
+                    for pid in ("claude-5h", "claude-7d", "cursor-auto", "cursor-premium"):
+                        self.assertEqual("error" in entries[pid], openusage_fails)
+                    failed = entries["codex-5h" if codex_fails else "claude-5h"]["error"]
+                    self.assertIn("codex app-server" if codex_fails else "openusage", failed)
+                row, _ = quota.record(log=self.log)
+                self.assertEqual("error" in row, codex_fails and openusage_fails)
+                self.assertNotIn("secret", json.dumps(row))
+                with redirect_stdout(io.StringIO()):
+                    code = quota.snapshot(log=self.log)
+                self.assertEqual(code, int(codex_fails and openusage_fails))
+
+    def test_partial_failure_does_not_suppress_next_attempt(self):
+        for settings in ({"FAKE_CODEX_MODE": "rpc-error"}, {"FAKE_OPENUSAGE_EXIT": "7"}):
+            with self.subTest(settings=settings), mock.patch.dict(os.environ, settings):
+                self.log.unlink(missing_ok=True)
+                self.calls.unlink(missing_ok=True)
+                self.codex_calls.unlink(missing_ok=True)
+                quota.record(log=self.log)
+                row, _ = quota.record(log=self.log)
+                self.assertNotIn("reused_from", row)
+                self.assertEqual(self.calls.read_text().splitlines(), ["direct", "direct"])
+                self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
+
+    def test_invalid_openusage_does_not_discard_codex(self):
+        self.export.write_text("[]")
+        row, _ = quota.record(log=self.log)
+        self.assertEqual(row["pools"]["codex-5h"]["used_pct"], 20)
+        self.assertIn("invalid openusage", row["pools"]["claude-5h"]["error"])
+
+    def test_hidden_home_links_repair_privacy_and_environment(self):
+        (self.home / ".codex").mkdir()
+        for name in (".claude", ".cursor", ".config/Cursor"):
+            (self.home / name).mkdir(parents=True)
+        (self.home / ".claude.json").write_text("{}")
+        quota.fetch()
+        self.assertEqual(self.hidden.stat().st_mode & 0o777, 0o700)
+        self.assertFalse((self.hidden / ".codex").exists())
+        self.assertEqual(json.loads(self.env_log.read_text()), {"HOME": str(self.hidden)})
+        for name in (".claude", ".claude.json", ".cursor", ".config/Cursor"):
+            self.assertEqual((self.hidden / name).readlink(), self.home / name)
+        (self.hidden / ".claude").unlink()
+        (self.hidden / ".cursor").unlink()
+        (self.hidden / ".cursor").symlink_to(self.tmp / "wrong")
+        (self.hidden / ".claude.json").unlink()
+        (self.hidden / ".claude.json").write_text("regular file")
+        quota.fetch()
+        for name in (".claude", ".cursor", ".claude.json"):
+            self.assertEqual((self.hidden / name).readlink(), self.home / name)
+
+    def test_missing_targets_and_concurrent_first_use(self):
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            envs = list(executor.map(lambda _: quota._openusage_env(), range(16)))
+        self.assertTrue(all(env["HOME"] == str(self.hidden) for env in envs))
+        self.assertFalse((self.hidden / ".claude").is_symlink())
+        (self.home / ".claude").mkdir()
+        quota._openusage_env()
+        self.assertEqual((self.hidden / ".claude").readlink(), self.home / ".claude")
+
+    def test_explicit_sources_use_real_home_and_always_poll(self):
+        for source in ("auto", "direct", "daemon"):
+            quota.fetch(source)
+            row, _ = quota.record(log=self.log, source=source)
+            self.assertEqual(row["reader"], f"openusage-{source}")
+            self.assertNotIn("reused_from", row)
+        self.assertFalse(self.codex_calls.exists())
+        for env in map(json.loads, self.env_log.read_text().splitlines()):
+            self.assertEqual(env["HOME"], str(self.home))
+            self.assertEqual(env["XDG_CACHE_HOME"], str(self.cache))
+            self.assertEqual(env["CODEX_HOME"], "hidden-codex")
+        self.assertEqual(self.calls.read_text().splitlines(), [s for s in ("auto", "direct", "daemon") for _ in range(2)])
+
+    def test_cli_defaults_and_source_choices(self):
+        for args in (("--json",), ("--snapshot", "--reason", "manual", "--log", str(self.log))):
+            result = subprocess.run([sys.executable, str(CLI), "quota", *args],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("secret", result.stdout)
+        self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
+        self.assertEqual(self.calls.read_text().splitlines(), ["direct", "direct"])
+        self.assertEqual(self.rows()[0]["source"], "hybrid")
+        result = subprocess.run([sys.executable, str(CLI), "quota", "--source", "auto", "--json"],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.env_log.read_text().splitlines()[-1])["HOME"], str(self.home))
+        self.assertEqual(self.calls.read_text().splitlines()[-1], "auto")
+        self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
+        # Exercise route's parser and selected source without any ratings/network lookup.
+        import runpy
+        delegate = runpy.run_path(str(CLI))
+        for source in (None, "hybrid", "auto", "direct", "daemon"):
+            argv = [str(CLI), "route", "implement", "--json"]
+            if source:
+                argv.extend(["--source", source])
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch("quota.fetch", return_value={}) as fetch, \
+                 mock.patch("ratings.load", return_value={"models": {}}), \
+                 mock.patch("monitor.load_cost_groups", return_value={}), redirect_stdout(io.StringIO()):
+                delegate["main"]()
+            fetch.assert_called_once_with(source or "hybrid")
+
+    def test_reuse_boundaries_chain_and_observed_times(self):
+        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+            first = self.record_at(0, reason="session-end", session="A")
+            second = self.record_at(10, reason="session-start", session="B")
+            self.assertEqual(second["reused_from"], first["ts"])
+            boundary = self.record_at(15, reason="manual")
+            self.assertEqual(boundary["pools"], first["pools"])
+            self.assertEqual(boundary["reader"], first["reader"])
+            self.assertEqual(boundary["reused_from"], first["ts"])
+            self.record_at(20, reason="manual")
+            self.assertEqual(read.call_count, 2)  # 0/10/20 does not extend the reading's age
+        self.log.unlink()
+        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+            self.record_at(0)
+            row = self.record_at(16)
+            self.assertNotIn("reused_from", row)
+            self.assertEqual(read.call_count, 2)
+
+    def test_reuse_age_is_not_rounded_down_with_the_row_timestamp(self):
+        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+            self.record_at(0)
+            row = self.record_at(15.1)
+        self.assertNotIn("reused_from", row)
+        self.assertEqual(read.call_count, 2)
+
+    def test_reuse_keeps_its_own_gate(self):
+        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+            first = self.record_at(0, reason="manual")
+            gate = {"last_good": first["ts"], "last_write": "new-write"}
+            with mock.patch.object(quota, "_activity_gate", return_value=("timer", gate, None)):
+                row = self.record_at(1, if_active=True)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(row["gate"], gate)
+        self.assertEqual(row["reason"], "timer")
+        self.assertEqual(row["reused_from"], first["ts"])
+
+    def test_nonreusable_readings_retry(self):
+        base = {"ts": self.now.isoformat(), "source": "hybrid", "reader": "reader",
+                "pools": {pid: {"used_pct": 1} for pid in quota.POOLS}}
+        for alteration in ({"ts": (self.now + timedelta(seconds=1)).isoformat()},
+                           {"error": "failed"}, {"source": "direct"},
+                           {"pools": {"claude-5h": {"used_pct": 1}}}):
+            with self.subTest(alteration=alteration):
+                self.log.write_text(json.dumps({**base, **alteration}) + "\n")
+                with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+                    self.record_at(0)
+                read.assert_called_once()
+        self.log.write_text(json.dumps(base) + "\n")
+        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+            self.record_at(1, source="direct")
+        read.assert_called_once_with("direct", 90)
+
+    def test_end_pairs_poll_even_through_reuse(self):
+        for end, key in (("job-end", "run"), ("session-end", "session")):
+            for through_reuse in (False, True):
+                with self.subTest(end=end, through_reuse=through_reuse):
+                    self.log.unlink(missing_ok=True)
+                    with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+                        self.record_at(0, reason="manual", **{key: "A"})
+                        if through_reuse:
+                            shared = self.record_at(1, reason="launch" if key == "run" else "session-start", **{key: "B"})
+                            self.assertIn("reused_from", shared)
+                        row = self.record_at(5, reason=end, **{key: "B" if through_reuse else "A"})
+                    self.assertNotIn("reused_from", row)
+                    self.assertEqual(read.call_count, 2)
+                    self.assertEqual(row[key], "B" if through_reuse else "A")
+
+    def test_tail_only_and_metadata_preserved(self):
+        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+            first = self.record_at(0, reason="manual", session="A", run="a", job="round-1")
+            self.log.write_text("x" * (quota.REUSE_TAIL_BYTES * 2) + "\n" + self.log.read_text())
+            second = self.record_at(1, reason="launch", session="B", run="b", job="review-2")
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual((second["reason"], second["session"], second["run"], second["job"]),
+                         ("launch", "B", "b", "review-2"))
+        self.assertEqual(second["pools"], first["pools"])
+
+    def test_concurrent_collectors_each_write_but_poll_once(self):
+        command = [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual", "--log", str(self.log)]
+        with mock.patch.dict(os.environ, {"FAKE_CODEX_SLEEP": "0.2"}):
+            children = [subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        for _ in range(4)]
+            for child in children:
+                stdout, stderr = child.communicate(timeout=8)
+                self.assertEqual(child.returncode, 0, stdout + stderr)
+        self.assertEqual(len(self.rows()), 4)
+        self.assertEqual(sum("reused_from" in row for row in self.rows()), 3)
+        self.assertEqual(self.calls.read_text().splitlines(), ["direct"])
+        self.assertEqual(self.codex_calls.read_text().splitlines(), ["read"])
+        self.assertTrue(all(row["pools"] == self.rows()[0]["pools"] for row in self.rows()))
 
 
 if __name__ == "__main__":

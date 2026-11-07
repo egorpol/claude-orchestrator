@@ -47,7 +47,7 @@ class LifecycleTests(unittest.TestCase):
                     "DELEGATE_CATALOG_LOCAL": ""}
         self.env.pop("FAKE_AGENT_EXIT", None)
         for key in list(self.env):
-            if key.startswith("FAKE_OPENUSAGE_"):
+            if key.startswith(("FAKE_OPENUSAGE_", "FAKE_CODEX_")):
                 self.env.pop(key)
         self.git("init", "-q")
         self.git("config", "user.name", "Lifecycle Test")
@@ -113,11 +113,23 @@ class LifecycleTests(unittest.TestCase):
         }]}
 
     def quota_env(self, envelope):
-        path = self.tmp / "openusage.json"
-        path.write_text(json.dumps(envelope))
-        return {"FAKE_OPENUSAGE_FILE": str(path), "FAKE_OPENUSAGE_LOG": str(self.tmp / "quota-calls")}
+        # Dispatch reads the live RPC result, not a stale openusage snapshot.
+        snap = (envelope.get("snapshots") or [{}])[0]
+        metrics, resets = snap.get("metrics", {}), snap.get("resets", {})
+        limits = {}
+        for key, metric, minutes in (("primary", "rate_limit_primary", 300),
+                                     ("secondary", "rate_limit_secondary", 10080)):
+            if metric in metrics:
+                limits[key] = {"usedPercent": 100 - metrics[metric]["remaining"],
+                               "windowDurationMins": minutes,
+                               "resetsAt": datetime.fromisoformat(resets[metric]).timestamp()}
+        path = self.tmp / "codex.json"
+        path.write_text(json.dumps({"rateLimits": limits}))
+        return {"FAKE_CODEX_FILE": str(path), "FAKE_CODEX_LOG": str(self.tmp / "quota-calls"),
+                "FAKE_OPENUSAGE_LOG": str(self.tmp / "unexpected-openusage")}
 
     def quota_calls(self):
+        self.assertFalse((self.tmp / "unexpected-openusage").exists())
         path = self.tmp / "quota-calls"
         return path.read_text().splitlines() if path.exists() else []
 
@@ -194,7 +206,7 @@ class LifecycleTests(unittest.TestCase):
         packet_warning = warnings.replace("warning:", "WARNING:", 1)
         self.assertIn(packet_warning, self.last_packet(r.stdout))
         self.assertIn(packet_warning, self.cli("status", "quota-low"))
-        self.assertEqual(self.quota_calls(), ["auto"])
+        self.assertEqual(self.quota_calls(), ["read"])
 
     def test_followup_codex_low_keeps_agent_and_persists_warning(self):
         self.launch("codex", "follow-low")
@@ -248,7 +260,7 @@ class LifecycleTests(unittest.TestCase):
                          "--name", "wt-low", extra_env=self.quota_env(self.quota_envelope(five=1)))
         self.assertIn("warning: codex-5h 1% left", r.stderr)
         self.assertIn("consider cursor", (self.root("wt-low") / "review-1" / "warnings").read_text())
-        self.assertEqual(self.quota_calls(), ["auto"])
+        self.assertEqual(self.quota_calls(), ["read"])
 
     def test_healthy_quota_prints_nothing(self):
         env = self.quota_env(self.quota_envelope(five=10, seven=10))
@@ -259,42 +271,33 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(r.stderr, "")
             self.assertNotIn("quota:", r.stdout)
             self.assertNotIn("warning:", r.stdout)
-        self.assertEqual(self.quota_calls(), ["auto"] * 3)
+        self.assertEqual(self.quota_calls(), ["read"] * 3)
 
-    def test_failed_auto_quota_keeps_codex_with_one_unknown_line(self):
+    def test_failed_codex_quota_keeps_codex_with_one_unknown_line(self):
         self.launch("cursor", "unknown")
-        env = {**self.quota_env({}), "FAKE_OPENUSAGE_EXIT": "7"}
+        env = {**self.quota_env({}), "FAKE_CODEX_MODE": "rpc-error"}
         for args in (("launch", "codex", "--brief", self.brief, "--name", "unknown-launch"),
                      ("followup", "unknown-launch", "--brief", self.follow_brief),
                      ("review", "unknown")):
             r = self.cli_raw(*args, extra_env=env)
             self.assertEqual(len(r.stderr.splitlines()), 1)
-            self.assertIn("quota: codex-5h unknown (openusage exited with status 7)", r.stderr)
+            self.assertIn("quota: codex-5h unknown (codex app-server RPC error)", r.stderr)
             self.assertTrue(r.stderr.rstrip().endswith("; keeping codex"))
             self.assertNotIn("quota:", r.stdout)
         for root in (self.root("unknown-launch"), self.root("unknown") / "review-1"):
             self.assertEqual(runs.load_meta(root)["agent"], "codex")
             self.assertFalse((root / "warnings").exists())
-        self.assertEqual(self.quota_calls(), ["auto"] * 3)  # auto failure never retries
+        self.assertEqual(self.quota_calls(), ["read"] * 3)  # RPC failure never retries
 
-    def test_stale_auto_refreshes_from_direct_before_dispatch(self):
-        env = self.quota_env({"auto": self.quota_envelope(age=16), "direct": self.quota_envelope(five=3)})
-        r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "refreshed", extra_env=env)
-        self.assertEqual(self.quota_calls(), ["auto", "direct"])
+    def test_dispatch_uses_fresh_codex_even_if_openusage_would_be_stale(self):
+        env = self.quota_env(self.quota_envelope(five=3, age=16))
+        r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "fresh", extra_env=env)
+        self.assertEqual(self.quota_calls(), ["read"])
         self.assertIn("warning: codex-5h 3% left", r.stderr)
         self.assertNotIn("unknown", r.stderr)
 
-    def test_stale_after_direct_is_unknown_and_keeps_codex(self):
-        env = self.quota_env({source: self.quota_envelope(five=1, age=16) for source in ("auto", "direct")})
-        r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "stale", extra_env=env)
-        self.assertEqual(self.quota_calls(), ["auto", "direct"])
-        self.assertEqual(len(r.stderr.splitlines()), 1)
-        self.assertIn("codex-5h unknown (snapshot 16 min old", r.stderr)
-        self.assertIn("keeping codex", r.stderr)
-        self.assertFalse((self.root("stale") / "warnings").exists())
-
     def test_cursor_dispatches_never_read_quota(self):
-        env = {**self.quota_env({}), "FAKE_OPENUSAGE_EXIT": "7"}
+        env = {**self.quota_env({}), "FAKE_CODEX_MODE": "rpc-error"}
         for args in (("launch", "cursor", "--brief", self.brief, "--name", "no-quota"),
                      ("followup", "no-quota", "--brief", self.follow_brief),
                      ("review", "no-quota", "--agent", "cursor")):
@@ -303,7 +306,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_dry_run_and_preflight_never_read_quota(self):
         self.launch("codex", "dry-existing")
-        env = {**self.quota_env({}), "FAKE_OPENUSAGE_EXIT": "7"}
+        env = {**self.quota_env({}), "FAKE_CODEX_MODE": "rpc-error"}
         for args in (("launch", "codex", "--brief", self.brief, "--name", "dry", "--dry-run"),
                      ("followup", "dry-existing", "--brief", self.follow_brief, "--dry-run"),
                      ("review", "dry-existing", "--agent", "codex", "--dry-run"),

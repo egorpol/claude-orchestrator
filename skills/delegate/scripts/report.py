@@ -159,7 +159,7 @@ def quota_end(no_quota):
     if no_quota:
         return None
     try:
-        result = quota.pools(quota.fetch("auto"))
+        result = quota.pools(quota.fetch("hybrid"))
         return {pool: round(entry["left_pct"], 1) for pool, entry in result.items()
                 if entry.get("left_pct") is not None}
     except Exception as exc:

@@ -36,6 +36,7 @@ class InstallTests(unittest.TestCase):
         self.timer = self.units / "claude-delegate-quota.timer"
         self.rate_service = self.units / "claude-delegate-rate.service"
         self.rate_timer = self.units / "claude-delegate-rate.timer"
+        self.exe("codex", "#!/bin/sh\nexit 99\n")
         self.exe("openusage", "#!/bin/sh\nprintf 'fake-openusage\\n'\n")
         self.exe("cursor-agent", "#!/bin/sh\ncase \"$1\" in\n"
                  "status) echo 'Logged in as installer-test' ;;\n"
@@ -458,6 +459,24 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(found.stdout.strip(), str(agent_dir / "cursor-agent"))
         self.assertEqual((self.service.read_bytes(), self.timer.read_bytes()), quota)
 
+    def test_quota_timer_finds_codex_in_a_different_folder(self):
+        codex_dir = self.tmp / "codex-bin"
+        codex_dir.mkdir()
+        (self.bin / "codex").rename(codex_dir / "codex")
+        self.install("--timer", env={"PATH": f"{codex_dir}:{self.env['PATH']}"})
+        environment = dict(item.split("=", 1) for item in
+                           shlex.split(self.unit(self.service)["Service"]["Environment"]))
+        found = subprocess.run(["/bin/sh", "-c", "command -v codex"], env=environment,
+                               capture_output=True, text=True, check=True)
+        self.assertEqual(found.stdout.strip(), str(codex_dir / "codex"))
+        self.assertIn(str(self.bin), environment["PATH"].split(":"))
+
+    def test_missing_codex_warns_and_installs_timer(self):
+        output = self.install("--timer", env=self.private_path_without("codex"))
+        self.assertIn("codex not found; quota timer", output)
+        self.assertTrue(self.service.exists())
+        self.assertIn("--user enable --now claude-delegate-quota.timer", self.calls.read_text())
+
     def test_missing_cursor_agent_warns_but_still_installs_and_enables_both_timers(self):
         output = self.install("--timer", env=self.private_path_without("cursor-agent"))
         self.assertIn("cursor-agent not found; rate timer", output)
@@ -471,7 +490,7 @@ class InstallTests(unittest.TestCase):
         output = self.install("--timer", env=self.private_path_without("openusage"))
         self.assertIn("openusage not found", output)
         self.assertNotIn("cursor-agent not found", output)
-        self.assertIn('Environment="PATH=/usr/local/bin:/usr/bin:/bin"', self.service.read_text())
+        self.assertIn(f'Environment="PATH={self.bin}:/usr/local/bin:/usr/bin:/bin"', self.service.read_text())
         self.assertIn(f'Environment="PATH={self.bin}:/usr/local/bin:/usr/bin:/bin"',
                       self.rate_service.read_text())
 
@@ -522,7 +541,7 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(self.settings.parent.exists())
 
     def test_without_systemctl_writes_units_warns_and_check_uses_unit_file(self):
-        env = self.private_path_without("systemctl", "openusage", "cursor-agent")
+        env = self.private_path_without("systemctl", "openusage", "cursor-agent", "codex")
         before = self.install("--check", env=env)
         for kind in ("quota", "rate"):
             self.assertIn(f"{kind} timer unit not installed", before)

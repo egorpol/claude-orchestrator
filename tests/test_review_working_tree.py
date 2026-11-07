@@ -287,7 +287,7 @@ class WorkingTreeReviewTests(unittest.TestCase):
         report = {"fallback": selection, "fallback_reason": "", "warnings": []}
         started = []
         out = io.StringIO()
-        with patch("quota.fetch", return_value={"ok": True}), \
+        with patch("quota._codex_snapshot", return_value={"ok": True}), \
              patch("quota.pools", return_value=pools), \
              patch("frontier.load_report", return_value=report), \
              patch.object(runs.quota, "spawn_snapshot"), \

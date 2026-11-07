@@ -56,8 +56,8 @@ class TestAsk(unittest.TestCase):
                                            "DELEGATE_CATALOG_LOCAL": ""})
         env.start()
         self.addCleanup(env.stop)
-        # Both now checks quota. Never consult the machine's real openusage.
-        fetch = mock.patch("ask.quota.fetch", return_value={})
+        # Both now checks quota. Never consult the machine's real Codex.
+        fetch = mock.patch("ask.quota._codex_snapshot", return_value={})
         pools = mock.patch("ask.quota.pools", return_value={
             "codex-5h": {"left_pct": 50, "age_min": 0}, "codex-7d": {"left_pct": 50, "age_min": 0}})
         self.quota_fetch, self.quota_pools = fetch.start(), pools.start()
@@ -287,22 +287,19 @@ class TestAsk(unittest.TestCase):
 
     def test_both_normal_only_reads_quota(self):
         out, cursor, codex, load = self._run_fallback_both()
-        self.quota_fetch.assert_called_once_with("auto", timeout=15)
+        self.quota_fetch.assert_called_once_with(timeout=15)
         load.assert_not_called()
         codex.assert_called_once()
         self.assertEqual(cursor.call_args.args[1], "auto")
         self.assertNotIn("fallback", out)
 
-    def test_both_stale_quota_refreshes_before_selecting_fallback(self):
-        self.quota_pools.side_effect = [
-            {"codex-5h": {"left_pct": 80, "age_min": 16},
-             "codex-7d": {"left_pct": 80, "age_min": 16}},
-            {"codex-5h": {"left_pct": 1, "age_min": 0},
-             "codex-7d": {"left_pct": 80, "age_min": 0}},
-        ]
+    def test_both_fresh_codex_read_selects_fallback_once(self):
+        self.quota_pools.return_value = {
+            "codex-5h": {"left_pct": 1, "age_min": 0},
+            "codex-7d": {"left_pct": 80, "age_min": 0},
+        }
         out, cursor, codex, load = self._run_fallback_both()
-        self.assertEqual(self.quota_fetch.call_args_list,
-                         [mock.call("auto", timeout=15), mock.call("direct", timeout=30)])
+        self.quota_fetch.assert_called_once_with(timeout=15)
         codex.assert_not_called()
         load.assert_called_once()
         self.assertIn("codex-5h 1% left", out)
@@ -360,7 +357,7 @@ class TestAsk(unittest.TestCase):
             self.assertIn("quota unknown", out)
             codex.assert_called_once()
             load.assert_not_called()
-        self.quota_fetch.side_effect = FileNotFoundError("openusage missing")
+        self.quota_fetch.side_effect = FileNotFoundError("codex missing")
         out, cursor, codex, load = self._run_fallback_both()
         self.assertIn("quota unknown", out)
         codex.assert_called_once()
@@ -378,9 +375,9 @@ class TestAsk(unittest.TestCase):
         self.assertIn("15% threshold", out)
 
     def test_quota_fetch_timeout_keeps_codex_and_prints_one_unknown_line(self):
-        self.quota_fetch.side_effect = ask.subprocess.TimeoutExpired(["openusage", "export"], 15)
+        self.quota_fetch.side_effect = ask.subprocess.TimeoutExpired(["codex", "app-server"], 15)
         out, cursor, codex, load = self._run_fallback_both()
-        self.quota_fetch.assert_called_once_with("auto", timeout=15)
+        self.quota_fetch.assert_called_once_with(timeout=15)
         self.quota_pools.assert_not_called()
         load.assert_not_called()
         codex.assert_called_once()
