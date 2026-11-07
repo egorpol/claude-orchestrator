@@ -82,6 +82,11 @@ check_prereqs() {
   else
     miss "openusage: needed by 'delegate quota/route'. See https://github.com/janekbaraniewski/openusage"
   fi
+  if command -v claude >/dev/null; then
+    ok "claude $(claude --version 2>/dev/null | head -1)"
+  else
+    miss "claude: needed by hybrid 'delegate quota' (Claude Code CLI with a claude.ai login)"
+  fi
   if command -v codex >/dev/null; then
     if codex login status >/dev/null 2>&1; then ok "codex $(codex --version 2>/dev/null | awk '{print $NF}'), logged in"
     else warn "codex installed but not logged in: run 'codex login'"; fi
@@ -216,6 +221,15 @@ install_timer() {
     esac
   else
     warn "codex not found; quota timer needs it installed on its PATH"
+  fi
+  if agent_bin="$(command -v claude)"; then
+    agent_bin="$(cd "$(dirname "$agent_bin")" && pwd -P)"
+    case ":$unit_path:" in
+      *":$agent_bin:"*) ;;
+      *) unit_path="$agent_bin:$unit_path" ;;
+    esac
+  else
+    warn "claude not found; quota timer needs it installed on its PATH"
   fi
   if agent_bin="$(command -v cursor-agent)"; then
     agent_bin="$(cd "$(dirname "$agent_bin")" && pwd -P)"

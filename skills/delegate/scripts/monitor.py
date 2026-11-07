@@ -47,7 +47,8 @@ def good_entry(row, pid):
     if not isinstance(pools, dict):
         return None
     entry = pools.get(pid)
-    if not isinstance(entry, dict) or entry.get("stale") or entry.get("stale_reset"):
+    if not isinstance(entry, dict) or entry.get("stale") or entry.get("stale_reset") \
+            or entry.get("carried"):
         return None
     try:
         used = float(entry["used_pct"])

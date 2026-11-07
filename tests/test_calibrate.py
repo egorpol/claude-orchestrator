@@ -107,6 +107,20 @@ class TestSnapshotPairs(unittest.TestCase):
         self.assertEqual([p["rise"] for p in pairs], [2])
         self.assertEqual(stats, {"error": 2, "stale": 1})
 
+    def test_carried_entries_neither_end_nor_break_pairs(self):
+        reset = T0 + timedelta(hours=3)
+        rows = [
+            _row(T0, claude_5h=_entry(10, reset)),
+            _row(T0 + timedelta(minutes=5), claude_5h=_entry(11, reset, carried="backoff")),
+            # A stale flag on a carried row must not break the pair either.
+            _row(T0 + timedelta(minutes=10),
+                 claude_5h=_entry(99, reset, carried="failed", stale=True)),
+            _row(T0 + timedelta(minutes=15), claude_5h=_entry(13, reset)),
+        ]
+        pairs, stats = calibrate.snapshot_pairs(rows, "claude-5h")
+        self.assertEqual(pairs, [{"t0": T0, "t1": T0 + timedelta(minutes=15), "rise": 3}])
+        self.assertEqual(stats, {})
+
     def test_idle_reading_pairs_only_with_a_window_opened_after_it(self):
         t_idle = T0
         opened_after = T0 + timedelta(minutes=5) + timedelta(hours=5)

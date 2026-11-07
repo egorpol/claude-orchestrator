@@ -349,7 +349,9 @@ class QuotaTests(unittest.TestCase):
 
     def test_simultaneous_collectors_fetch_exactly_once(self):
         self.transcript(self.now - timedelta(seconds=30))
-        cmd = [sys.executable, str(CLI), "quota", "--snapshot", "--if-active", "--log", str(self.log)]
+        # Explicit direct: this class's PATH only has the openusage fixture.
+        cmd = [sys.executable, str(CLI), "quota", "--snapshot", "--if-active",
+               "--source", "direct", "--log", str(self.log)]
         env = {**self.env, "FAKE_QUOTA_SLEEP": "0.3"}
         children = [subprocess.Popen(cmd, env=env, text=True, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE) for _ in range(2)]
@@ -543,6 +545,18 @@ class QuotaTests(unittest.TestCase):
         line = quota.format_spare_line(quota.spare_pools(self.log, now=now), now=now)
         self.assertIn("Codex 5h unknown", line)
 
+class _ClaudeFakeRestorer:
+    def __init__(self, tests, previous):
+        self.tests, self.previous = tests, previous
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        path = self.tests.claude_config / "fake-claude.json"
+        path.write_text(json.dumps(self.previous))
+
+
 class HybridTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="hybrid-quota-")
@@ -557,9 +571,12 @@ class HybridTests(unittest.TestCase):
         self.log = self.tmp / "quota.jsonl"
         self.calls = self.tmp / "openusage.calls"
         self.codex_calls = self.tmp / "codex.calls"
+        self.claude_calls = self.tmp / "claude.calls"
+        self.claude_config = self.tmp / "claude-config"
+        self.claude_config.mkdir()
         self.env_log = self.tmp / "environ.jsonl"
         fakes = Path(__file__).parent / "fake_agents"
-        for name in ("codex", "openusage"):
+        for name in ("codex", "openusage", "claude"):
             path = self.bin / name
             path.write_text(f"#!{sys.executable}\n" + (fakes / name).read_text().split("\n", 1)[1])
             path.chmod(0o755)
@@ -570,11 +587,46 @@ class HybridTests(unittest.TestCase):
                     "XDG_CACHE_HOME": str(self.cache), "XDG_CONFIG_HOME": str(self.tmp / "config"),
                     "XDG_DATA_HOME": "hidden-data", "XDG_ANYTHING": "hidden-anything",
                     "CODEX_HOME": "hidden-codex", "DELEGATE_CATALOG_LOCAL": "",
+                    "CLAUDE_CONFIG_DIR": str(self.claude_config),
                     "FAKE_OPENUSAGE_FILE": str(self.export), "FAKE_OPENUSAGE_LOG": str(self.calls),
                     "FAKE_OPENUSAGE_ENV": str(self.env_log), "FAKE_CODEX_LOG": str(self.codex_calls)}
         patcher = mock.patch.dict(os.environ, self.env, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.set_claude_fake(mode="ok", log=str(self.claude_calls))
+
+    def set_claude_fake(self, **kwargs):
+        path = self.claude_config / "fake-claude.json"
+        data = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+            except ValueError:
+                data = {}
+        data.update(kwargs)
+        path.write_text(json.dumps(data))
+
+    def claude_fake(self, **kwargs):
+        previous = {}
+        path = self.claude_config / "fake-claude.json"
+        if path.exists():
+            previous = json.loads(path.read_text())
+        self.set_claude_fake(**kwargs)
+        return _ClaudeFakeRestorer(self, previous)
+
+    def claude_call_count(self):
+        if not self.claude_calls.exists():
+            return 0
+        return len(self.claude_calls.read_text().splitlines())
+
+    def clear_claude_state(self):
+        path = quota._claude_state_path(self.log)
+        path.unlink(missing_ok=True)
+        lock = Path(str(path) + ".lock")
+        if lock.is_dir():
+            lock.rmdir()
+        else:
+            lock.unlink(missing_ok=True)
 
     def rows(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
@@ -627,17 +679,20 @@ class HybridTests(unittest.TestCase):
         reply["rateLimits"]["primary"], reply["rateLimits"]["secondary"] = (
             reply["rateLimits"]["secondary"], reply["rateLimits"]["primary"])
         self.use_limits(reply)
-        result = quota.pools(quota.fetch())
+        result = quota.pools(quota.fetch(log=self.log))
         self.assertEqual(result["codex-5h"]["left_pct"], 68)
         self.assertEqual(result["codex-7d"]["left_pct"], 33)
         self.assertEqual(result["codex-5h"]["resets_at"], "2026-11-07T03:04:01+00:00")
+        # Same state folder as fetch: still inside the 3-minute Claude throttle.
         row, _ = quota.record(log=self.log)
         self.assertEqual(row["source"], "hybrid")
-        self.assertEqual(row["reader"], "codex-app-server+openusage-direct")
+        self.assertEqual(row["reader"], quota.HYBRID_READER)
         self.assertEqual(row["pools"]["codex-5h"]["used_pct"], 32)
         self.assertNotIn("secret", json.dumps(row))
         self.assertNotIn("accountId", json.dumps(row))
         self.assertEqual(row["pools"]["claude-5h"]["used_pct"], 12.3457)
+        self.assertEqual(row["pools"]["claude-5h"].get("carried"), "throttle")
+        self.assertEqual(self.claude_call_count(), 1)
 
     def test_missing_null_and_invalid_windows_are_safe(self):
         for mode in ("missing", "null", "nonnumeric", "null-reset", "bad-result"):
@@ -691,28 +746,53 @@ class HybridTests(unittest.TestCase):
                     if status.exists():
                         self.assertEqual(status.read_text().split()[2], "Z", f"surviving pid {pid}")
 
-    def test_partial_failures_and_both_fail_through_all_entry_points(self):
-        for codex_fails, openusage_fails in ((True, False), (False, True), (True, True)):
-            with self.subTest(codex=codex_fails, openusage=openusage_fails), mock.patch.dict(os.environ, {
+    def test_partial_failures_and_all_three_fail_through_all_entry_points(self):
+        cases = (
+            (True, False, False),
+            (False, True, False),
+            (False, False, True),
+            (True, True, False),
+            (True, False, True),
+            (False, True, True),
+            (True, True, True),
+        )
+        for codex_fails, claude_fails, openusage_fails in cases:
+            with self.subTest(codex=codex_fails, claude=claude_fails, openusage=openusage_fails):
+                self.log.unlink(missing_ok=True)
+                self.clear_claude_state()
+                self.claude_calls.unlink(missing_ok=True)
+                env = {
                     "FAKE_CODEX_MODE": "rpc-error" if codex_fails else "ok",
-                    "FAKE_OPENUSAGE_EXIT": "7" if openusage_fails else "0"}):
-                if codex_fails and openusage_fails:
-                    with self.assertRaises(ValueError) as failure:
-                        quota.pools(quota.fetch())
-                    self.assertNotIn("secret", str(failure.exception))
-                else:
-                    entries = quota.pools(quota.fetch())
-                    self.assertEqual("error" in entries["codex-5h"], codex_fails)
-                    for pid in ("claude-5h", "claude-7d", "cursor-auto", "cursor-premium"):
-                        self.assertEqual("error" in entries[pid], openusage_fails)
-                    failed = entries["codex-5h" if codex_fails else "claude-5h"]["error"]
-                    self.assertIn("codex app-server" if codex_fails else "openusage", failed)
-                row, _ = quota.record(log=self.log)
-                self.assertEqual("error" in row, codex_fails and openusage_fails)
+                    "FAKE_OPENUSAGE_EXIT": "7" if openusage_fails else "0",
+                }
+                with mock.patch.dict(os.environ, env), \
+                        self.claude_fake(mode="fail" if claude_fails else "ok"):
+                    if codex_fails and claude_fails and openusage_fails:
+                        with self.assertRaises(ValueError) as failure:
+                            quota.pools(quota.fetch(log=self.log))
+                        self.assertNotIn("secret", str(failure.exception))
+                    else:
+                        entries = quota.pools(quota.fetch(log=self.log))
+                        self.assertEqual("error" in entries["codex-5h"], codex_fails)
+                        self.assertEqual("error" in entries["claude-5h"], claude_fails)
+                        self.assertEqual("error" in entries["cursor-auto"], openusage_fails)
+                        if not claude_fails:
+                            self.assertIn("left_pct", entries["claude-5h"])
+                        if openusage_fails and not claude_fails:
+                            self.assertIn("openusage", entries["cursor-auto"]["error"])
+                            self.assertNotIn("error", entries["claude-5h"])
+                self.clear_claude_state()
+                with mock.patch.dict(os.environ, env), \
+                        self.claude_fake(mode="fail" if claude_fails else "ok"):
+                    row, _ = quota.record(log=self.log)
+                self.assertEqual("error" in row, codex_fails and claude_fails and openusage_fails)
                 self.assertNotIn("secret", json.dumps(row))
-                with redirect_stdout(io.StringIO()):
+                self.clear_claude_state()
+                with mock.patch.dict(os.environ, env), \
+                        self.claude_fake(mode="fail" if claude_fails else "ok"), \
+                        redirect_stdout(io.StringIO()):
                     code = quota.snapshot(log=self.log)
-                self.assertEqual(code, int(codex_fails and openusage_fails))
+                self.assertEqual(code, int(codex_fails and claude_fails and openusage_fails))
 
     def test_partial_failure_does_not_suppress_next_attempt(self):
         for settings in ({"FAKE_CODEX_MODE": "rpc-error"}, {"FAKE_OPENUSAGE_EXIT": "7"}):
@@ -720,46 +800,63 @@ class HybridTests(unittest.TestCase):
                 self.log.unlink(missing_ok=True)
                 self.calls.unlink(missing_ok=True)
                 self.codex_calls.unlink(missing_ok=True)
+                self.claude_calls.unlink(missing_ok=True)
+                self.clear_claude_state()
                 quota.record(log=self.log)
-                row, _ = quota.record(log=self.log)
+                row = self.record_at(200)
                 self.assertNotIn("reused_from", row)
                 self.assertEqual(self.calls.read_text().splitlines(), ["direct", "direct"])
                 self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
+                # Second Claude call is past the 3-minute throttle.
+                self.assertEqual(self.claude_call_count(), 2)
 
-    def test_invalid_openusage_does_not_discard_codex(self):
+    def test_invalid_openusage_does_not_discard_codex_or_claude(self):
         self.export.write_text("[]")
         row, _ = quota.record(log=self.log)
         self.assertEqual(row["pools"]["codex-5h"]["used_pct"], 20)
-        self.assertIn("invalid openusage", row["pools"]["claude-5h"]["error"])
+        self.assertEqual(row["pools"]["claude-5h"]["used_pct"], 12.3457)
+        self.assertIn("invalid openusage", row["pools"]["cursor-auto"]["error"])
 
-    def test_hidden_home_links_repair_privacy_and_environment(self):
+    def test_hidden_home_links_drop_claude_and_keep_cursor(self):
         (self.home / ".codex").mkdir()
         for name in (".claude", ".cursor", ".config/Cursor"):
             (self.home / name).mkdir(parents=True)
         (self.home / ".claude.json").write_text("{}")
-        quota.fetch()
+        # Stale links from an older install must be removed on the next hybrid read.
+        self.hidden.mkdir(parents=True)
+        (self.hidden / ".config").mkdir(exist_ok=True)
+        (self.hidden / ".claude").symlink_to(self.home / ".claude")
+        (self.hidden / ".claude.json").symlink_to(self.home / ".claude.json")
+        quota.fetch(log=self.log)
         self.assertEqual(self.hidden.stat().st_mode & 0o777, 0o700)
         self.assertFalse((self.hidden / ".codex").exists())
+        self.assertFalse((self.hidden / ".claude").exists())
+        self.assertFalse((self.hidden / ".claude.json").exists())
         self.assertEqual(json.loads(self.env_log.read_text()), {"HOME": str(self.hidden)})
-        for name in (".claude", ".claude.json", ".cursor", ".config/Cursor"):
+        for name in (".cursor", ".config/Cursor"):
             self.assertEqual((self.hidden / name).readlink(), self.home / name)
-        (self.hidden / ".claude").unlink()
         (self.hidden / ".cursor").unlink()
         (self.hidden / ".cursor").symlink_to(self.tmp / "wrong")
-        (self.hidden / ".claude.json").unlink()
         (self.hidden / ".claude.json").write_text("regular file")
-        quota.fetch()
-        for name in (".claude", ".cursor", ".claude.json"):
-            self.assertEqual((self.hidden / name).readlink(), self.home / name)
+        (self.hidden / ".claude").symlink_to(self.home / ".claude")
+        quota.fetch(log=self.log)
+        self.assertEqual((self.hidden / ".cursor").readlink(), self.home / ".cursor")
+        self.assertFalse((self.hidden / ".claude").exists())
+        self.assertTrue((self.hidden / ".claude.json").is_file())
+        self.assertFalse((self.hidden / ".claude.json").is_symlink())
 
     def test_missing_targets_and_concurrent_first_use(self):
         with ThreadPoolExecutor(max_workers=8) as executor:
             envs = list(executor.map(lambda _: quota._openusage_env(), range(16)))
         self.assertTrue(all(env["HOME"] == str(self.hidden) for env in envs))
-        self.assertFalse((self.hidden / ".claude").is_symlink())
+        self.assertFalse((self.hidden / ".claude").exists())
         (self.home / ".claude").mkdir()
+        (self.hidden / ".claude").symlink_to(self.home / ".claude")
         quota._openusage_env()
-        self.assertEqual((self.hidden / ".claude").readlink(), self.home / ".claude")
+        self.assertFalse((self.hidden / ".claude").exists())
+        (self.home / ".cursor").mkdir()
+        quota._openusage_env()
+        self.assertEqual((self.hidden / ".cursor").readlink(), self.home / ".cursor")
 
     def test_explicit_sources_use_real_home_and_always_poll(self):
         for source in ("auto", "direct", "daemon"):
@@ -782,13 +879,17 @@ class HybridTests(unittest.TestCase):
             self.assertNotIn("secret", result.stdout)
         self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
         self.assertEqual(self.calls.read_text().splitlines(), ["direct", "direct"])
+        # --json uses the default log folder; --snapshot --log uses self.log — two state files.
+        self.assertEqual(self.claude_call_count(), 2)
         self.assertEqual(self.rows()[0]["source"], "hybrid")
+        self.assertEqual(self.rows()[0]["reader"], quota.HYBRID_READER)
         result = subprocess.run([sys.executable, str(CLI), "quota", "--source", "auto", "--json"],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.env_log.read_text().splitlines()[-1])["HOME"], str(self.home))
         self.assertEqual(self.calls.read_text().splitlines()[-1], "auto")
         self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
+        self.assertEqual(self.claude_call_count(), 2)
         # Exercise route's parser and selected source without any ratings/network lookup.
         import runpy
         delegate = runpy.run_path(str(CLI))
@@ -853,7 +954,7 @@ class HybridTests(unittest.TestCase):
         self.log.write_text(json.dumps(base) + "\n")
         with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
             self.record_at(1, source="direct")
-        read.assert_called_once_with("direct", 90)
+        read.assert_called_once_with("direct", 90, log=self.log)
 
     def test_end_pairs_poll_even_through_reuse(self):
         for end, key in (("job-end", "run"), ("session-end", "session")):
@@ -892,7 +993,553 @@ class HybridTests(unittest.TestCase):
         self.assertEqual(sum("reused_from" in row for row in self.rows()), 3)
         self.assertEqual(self.calls.read_text().splitlines(), ["direct"])
         self.assertEqual(self.codex_calls.read_text().splitlines(), ["read"])
+        self.assertEqual(self.claude_call_count(), 1)
         self.assertTrue(all(row["pools"] == self.rows()[0]["pools"] for row in self.rows()))
+
+    def test_claude_throttle_backoff_and_carry_reasons(self):
+        first = self.record_at(0)
+        self.assertNotIn("carried", first["pools"]["claude-5h"])
+        self.assertEqual(self.claude_call_count(), 1)
+        throttled = self.record_at(60)
+        self.assertEqual(throttled["pools"]["claude-5h"]["carried"], "throttle")
+        self.assertEqual(throttled["pools"]["claude-5h"]["used_pct"], first["pools"]["claude-5h"]["used_pct"])
+        self.assertEqual(throttled["pools"]["claude-5h"]["observed_at"],
+                         first["pools"]["claude-5h"]["observed_at"])
+        self.assertEqual(self.claude_call_count(), 1)
+        with self.claude_fake(mode="fail"):
+            failed = self.record_at(200)
+        self.assertEqual(failed["pools"]["claude-5h"]["carried"], "failed")
+        self.assertEqual(self.claude_call_count(), 2)
+        # 3-minute floor still holds after a failure (effective wait is max(3m, backoff)).
+        with self.claude_fake(mode="ok"):
+            backed = self.record_at(290)
+        self.assertEqual(backed["pools"]["claude-5h"]["carried"], "backoff")
+        self.assertEqual(self.claude_call_count(), 2)
+        with self.claude_fake(mode="ok"):
+            recovered = self.record_at(381)
+        self.assertNotIn("carried", recovered["pools"]["claude-5h"])
+        self.assertEqual(self.claude_call_count(), 3)
+        good = json.loads(quota._claude_state_path(self.log).read_text())["last_good"]
+        self.claude_calls.write_text("")
+        offset = 20_000
+        for index in range(len(quota.CLAUDE_BACKOFF_S)):
+            wait = quota._claude_wait_s(index)
+            quota._claude_state_path(self.log).write_text(json.dumps({
+                "last_attempt_at": (self.now + timedelta(seconds=offset - wait - 1)).isoformat(),
+                "failures": index, "last_good": good}))
+            with self.claude_fake(mode="fail"):
+                row = self.record_at(offset)
+            self.assertEqual(row["pools"]["claude-5h"]["carried"], "failed")
+            state = json.loads(quota._claude_state_path(self.log).read_text())
+            self.assertEqual(state["failures"], index + 1)
+            offset += wait + 5
+        quota._claude_state_path(self.log).write_text(json.dumps({
+            "last_attempt_at": (self.now + timedelta(seconds=offset - 1801)).isoformat(),
+            "failures": len(quota.CLAUDE_BACKOFF_S), "last_good": good}))
+        with self.claude_fake(mode="fail"):
+            row = self.record_at(offset)
+        self.assertEqual(row["pools"]["claude-5h"]["carried"], "failed")
+        state = json.loads(quota._claude_state_path(self.log).read_text())
+        self.assertEqual(state["failures"], len(quota.CLAUDE_BACKOFF_S) + 1)
+
+    def test_claude_floor_holds_after_failure(self):
+        good = {"timestamp": self.now.isoformat(),
+                "metrics": {"usage_five_hour": {"limit": 100, "used": 5, "remaining": 95},
+                            "usage_seven_day": {"limit": 100, "used": 68, "remaining": 32}},
+                "resets": {"usage_five_hour": (self.now + timedelta(hours=3)).isoformat(),
+                           "usage_seven_day": (self.now + timedelta(days=2)).isoformat()}}
+        for failures, age, want in ((1, 90, 0), (1, 200, 1), (3, 200, 0), (3, 250, 1)):
+            with self.subTest(failures=failures, age=age):
+                self.claude_calls.write_text("")
+                quota._claude_state_path(self.log).write_text(json.dumps({
+                    "last_attempt_at": (self.now - timedelta(seconds=age)).isoformat(),
+                    "failures": failures, "last_good": good}))
+                with mock.patch.object(quota, "datetime", wraps=datetime) as clock:
+                    clock.now.return_value = self.now
+                    quota._claude_snapshot(log=self.log)
+                self.assertEqual(self.claude_call_count(), want)
+
+    def test_claude_failure_shapes_and_idle_and_scoped(self):
+        shapes = (
+            ("fail", "failed"),
+            ("null-limits", "failed"),
+            ("malformed-limits", "failed"),
+            ("no-report", "failed"),
+            ("bad-percent-bool", "failed"),
+            ("bad-percent-neg", "failed"),
+            ("bad-percent-str", "failed"),
+            ("garbage-line", None),  # mixed with a good assistant line
+        )
+        for mode, carried in shapes:
+            with self.subTest(mode=mode):
+                self.log.unlink(missing_ok=True)
+                self.clear_claude_state()
+                self.claude_calls.unlink(missing_ok=True)
+                if carried == "failed":
+                    quota.record(log=self.log)
+                    state_path = quota._claude_state_path(self.log)
+                    good = json.loads(state_path.read_text())["last_good"]
+                    state_path.write_text(json.dumps({
+                        "last_attempt_at": (self.now - timedelta(minutes=10)).isoformat(),
+                        "failures": 0, "last_good": good}))
+                    self.log.unlink()
+                    self.claude_calls.unlink(missing_ok=True)
+                with self.claude_fake(mode=mode):
+                    row, _ = quota.record(log=self.log)
+                self.assertNotIn("secret", json.dumps(row))
+                state_text = quota._claude_state_path(self.log).read_text()
+                self.assertNotIn("secret", state_text)
+                if carried:
+                    self.assertEqual(row["pools"]["claude-5h"].get("carried"), carried)
+                else:
+                    self.assertNotIn("carried", row["pools"]["claude-5h"])
+                    self.assertIn("used_pct", row["pools"]["claude-5h"])
+        self.clear_claude_state()
+        self.log.unlink(missing_ok=True)
+        with self.claude_fake(mode="idle"):
+            row, _ = quota.record(log=self.log)
+        self.assertEqual(row["pools"]["claude-5h"]["used_pct"], 0)
+        self.assertIsNone(row["pools"]["claude-5h"]["resets_at"])
+        self.assertIn("error", row["pools"]["claude-7d"])
+        self.clear_claude_state()
+        self.log.unlink()
+        with self.claude_fake(mode="session-only"):
+            row, _ = quota.record(log=self.log)
+        self.assertIn("used_pct", row["pools"]["claude-5h"])
+        self.assertIn("error", row["pools"]["claude-7d"])
+
+    def test_claude_timeout_grandchild_and_close_then_exit(self):
+        for mode in ("silent", "exit-grandchild"):
+            with self.subTest(mode=mode):
+                self.clear_claude_state()
+                pidfile = self.tmp / f"claude-pids-{mode}"
+                pidfile.unlink(missing_ok=True)
+                started = time.monotonic()
+                with self.claude_fake(mode=mode, pids=str(pidfile)):
+                    snap, reason, error = quota._claude_snapshot(timeout=1, log=self.log)
+                self.assertLess(time.monotonic() - started, 3)
+                self.assertIsNone(snap)
+                self.assertIsNotNone(error)
+                self.assertNotIn("secret", error)
+                for pid in pidfile.read_text().splitlines():
+                    status = Path("/proc") / pid / "stat"
+                    deadline = time.monotonic() + 0.5
+                    while status.exists() and status.read_text().split()[2] != "Z" and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if status.exists():
+                        self.assertEqual(status.read_text().split()[2], "Z", f"surviving pid {pid}")
+        self.clear_claude_state()
+        started = time.monotonic()
+        with self.claude_fake(mode="close-then-exit"):
+            snap, reason, error = quota._claude_snapshot(timeout=20, log=self.log)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIsNotNone(snap)
+        self.assertIsNone(reason)
+        # Child exits after the report while a grandchild still holds the pipes.
+        for mode in ("report-linger", "pad-linger"):
+            with self.subTest(mode=mode):
+                self.clear_claude_state()
+                started = time.monotonic()
+                with self.claude_fake(mode=mode):
+                    snap, reason, error = quota._claude_snapshot(timeout=20, log=self.log)
+                took = time.monotonic() - started
+                self.assertLess(took, 5, f"{mode} took {took:.1f} s")
+                self.assertIsNotNone(snap)
+                self.assertIsNone(reason)
+                self.assertIn("usage_five_hour", snap["metrics"])
+
+    def test_claude_env_allowlist_cwd_and_argv(self):
+        self.clear_claude_state()
+        self.claude_calls.unlink(missing_ok=True)
+        with mock.patch.dict(os.environ, {
+                "ANTHROPIC_API_KEY": "sk-ant-secret", "CLAUDECODE": "1",
+                "CLAUDE_CODE_SESSION_ID": "sess", "LD_LIBRARY_PATH": "/tmp/.mount_cursor",
+                "FAKE_CLAUDE_X": "should-not-reach-fake"}):
+            quota.record(log=self.log)
+        call = json.loads(self.claude_calls.read_text().splitlines()[0])
+        self.assertEqual(call["cwd"], str(self.log.parent))
+        self.assertEqual(call["argv"][:2], ["-p", "/usage"])
+        self.assertIn("--no-session-persistence", call["argv"])
+        self.assertIn("--strict-mcp-config", call["argv"])
+        self.assertEqual(call["argv"][call["argv"].index("--settings") + 1],
+                         '{"disableAllHooks": true}')
+        env = call["env"]
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("CLAUDECODE", env)
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", env)
+        self.assertNotIn("LD_LIBRARY_PATH", env)
+        self.assertNotIn("FAKE_CLAUDE_X", env)
+        self.assertEqual(env.get("HOME"), str(self.home))
+        self.assertEqual(env.get("PATH"), str(self.bin))
+        self.assertEqual(env.get("CLAUDE_CONFIG_DIR"), str(self.claude_config))
+        self.assertNotIn("FAKE_CLAUDE_X", quota._claude_env())
+
+    def test_claude_state_corrupt_future_and_unwritable(self):
+        path = quota._claude_state_path(self.log)
+        path.write_text("{not-json")
+        row, _ = quota.record(log=self.log)
+        self.assertIn("used_pct", row["pools"]["claude-5h"])
+        self.clear_claude_state()
+        path.write_text(json.dumps({
+            "last_attempt_at": (self.now + timedelta(hours=1)).isoformat(),
+            "failures": 3,
+            "last_good": {"timestamp": self.now.isoformat(),
+                          "metrics": {"usage_five_hour": {"limit": 100, "used": 1, "remaining": 99}},
+                          "resets": {}}}))
+        row, _ = quota.record(log=self.log)
+        self.assertNotIn("carried", row["pools"]["claude-5h"])
+        if os.geteuid() == 0:
+            self.skipTest("chmod 0555 is writable as root")
+        self.clear_claude_state()
+        blocked = self.tmp / "blocked-log"
+        blocked.mkdir()
+        log = blocked / "quota.jsonl"
+        blocked.chmod(0o555)
+        try:
+            snap, reason, error = quota._claude_snapshot(log=log)
+        finally:
+            blocked.chmod(0o755)
+        self.assertIsNotNone(snap)
+        self.assertIsNone(reason)
+        self.assertIsNone(error)
+
+    def test_concurrent_claude_readers_call_once(self):
+        self.clear_claude_state()
+        self.claude_calls.unlink(missing_ok=True)
+        with self.claude_fake(sleep=0.2):
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(executor.map(
+                    lambda _: quota._claude_snapshot(timeout=5, log=self.log), range(4)))
+        self.assertEqual(self.claude_call_count(), 1)
+        snaps = [snap for snap, reason, error in results if snap and not reason]
+        carried = [reason for snap, reason, error in results if reason]
+        self.assertEqual(len(snaps) + len(carried), 4)
+        self.assertGreaterEqual(len(snaps), 1)
+
+    def test_last_good_skips_carried_for_if_active(self):
+        good_ts = self.now
+        carried_ts = self.now + timedelta(minutes=10)
+        later = self.now + timedelta(minutes=20)
+        activity = self.now + timedelta(minutes=5)
+        pools = {pid: {"used_pct": 1, "resets_at": (self.now + timedelta(hours=3)).isoformat()}
+                 for pid in ("claude-5h", "claude-7d")}
+        carried_pools = {pid: {**pools[pid], "carried": "backoff"} for pid in pools}
+        self.log.write_text("".join(json.dumps(row) + "\n" for row in (
+            {"ts": good_ts.isoformat(), "pools": pools},
+            {"ts": carried_ts.isoformat(), "pools": carried_pools},
+            {"ts": later.isoformat(), "pools": carried_pools},
+        )))
+        good, stamp = quota._last_good(self.log)
+        self.assertEqual(stamp, good_ts)
+        self.projects = self.tmp / "claude/projects"
+        self.projects.mkdir(parents=True)
+        transcript = self.projects / "x" / "y.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n")
+        os.utime(transcript, (activity.timestamp(), activity.timestamp()))
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.projects.parent)}):
+            reason, gate, skip = quota._activity_gate(self.log, later)
+        self.assertEqual(reason, "timer")
+        self.assertIsNone(skip)
+
+    def test_reuse_recomputes_stale_for_carried(self):
+        observed = self.now
+        pools = {pid: {"used_pct": 1, "resets_at": (self.now + timedelta(hours=3)).isoformat(),
+                       "observed_at": observed.isoformat(), "stale": False}
+                 for pid in quota.POOLS}
+        for pid in ("claude-5h", "claude-7d"):
+            pools[pid]["carried"] = "throttle"
+            pools[pid]["stale"] = False
+        # Carried at +110s (age 110, not yet stale); reused at +125s → age 125 → stale.
+        first = {"ts": (self.now + timedelta(seconds=110)).isoformat(),
+                 "source": "hybrid", "reader": quota.HYBRID_READER, "pools": pools}
+        self.log.write_text(json.dumps(first) + "\n")
+        row = self.record_at(125)
+        self.assertEqual(row["reused_from"], first["ts"])
+        self.assertTrue(row["pools"]["claude-5h"]["stale"])
+        self.assertEqual(row["pools"]["claude-5h"]["carried"], "throttle")
+        self.assertNotIn("carried", row["pools"]["codex-5h"])
+
+    def test_garbage_last_good_keeps_codex_and_cursor(self):
+        # Valid timestamps so rejection comes from the gauges, not the stamp check.
+        shapes = (
+            {"usage_five_hour": "x"},
+            {"usage_five_hour": {"limit": 100, "used": "a", "remaining": "b"}},
+            {"usage_seven_day": None},
+        )
+        for metrics in shapes:
+            with self.subTest(metrics=metrics):
+                self.log.unlink(missing_ok=True)
+                self.clear_claude_state()
+                self.claude_calls.unlink(missing_ok=True)
+                quota._claude_state_path(self.log).write_text(json.dumps({
+                    "last_attempt_at": (self.now - timedelta(seconds=10)).isoformat(),
+                    "failures": 0,
+                    "last_good": {"timestamp": self.now.isoformat(),
+                                  "metrics": metrics, "resets": {}}}))
+                result = subprocess.run(
+                    [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+                     "--log", str(self.log)],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                row = json.loads(result.stdout)
+                self.assertNotIn("error", row)
+                self.assertIn("used_pct", row["pools"]["codex-5h"])
+                self.assertIn("used_pct", row["pools"]["cursor-auto"])
+                # Corrupt state counts as none: throttle without last_good errors Claude,
+                # or a fresh call succeeds once the floor allows — either way others survive.
+                self.assertTrue("error" in row["pools"]["claude-5h"]
+                                or "used_pct" in row["pools"]["claude-5h"])
+
+    def test_date_only_stamps_keep_codex_and_cursor(self):
+        good = {"timestamp": self.now.isoformat(),
+                "metrics": {"usage_five_hour": {"limit": 100, "used": 5, "remaining": 95},
+                            "usage_seven_day": {"limit": 100, "used": 68, "remaining": 32}},
+                "resets": {}}
+        for label, patch in (("reset", {"resets": {"usage_five_hour": "2026-11-07"}}),
+                             ("timestamp", {"timestamp": "2026-11-07"})):
+            with self.subTest(label=label):
+                self.log.unlink(missing_ok=True)
+                self.clear_claude_state()
+                quota._claude_state_path(self.log).write_text(json.dumps({
+                    "last_attempt_at": (self.now - timedelta(seconds=10)).isoformat(),
+                    "failures": 0, "last_good": {**good, **patch}}))
+                result = subprocess.run(
+                    [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+                     "--log", str(self.log)],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                row = json.loads(result.stdout)
+                self.assertNotIn("error", row)
+                self.assertIn("used_pct", row["pools"]["codex-5h"])
+                self.assertIn("used_pct", row["pools"]["cursor-auto"])
+        self.clear_claude_state()
+        self.log.unlink(missing_ok=True)
+        self.claude_calls.unlink(missing_ok=True)
+        with self.claude_fake(mode="ok", session_reset="2026-11-07"):
+            result = subprocess.run(
+                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+                 "--log", str(self.log)],
+                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads(result.stdout)
+        self.assertNotIn("error", row)
+        self.assertIn("used_pct", row["pools"]["claude-7d"])
+        self.assertIn("used_pct", row["pools"]["codex-5h"])
+        self.assertIn("used_pct", row["pools"]["cursor-auto"])
+        # Date-only Cursor reset from openusage: pool numbers stay, no TypeError.
+        self.clear_claude_state()
+        self.log.unlink(missing_ok=True)
+        envelope = fixture(self.now)
+        for snap in envelope["snapshots"]:
+            if snap["provider_id"] == "cursor":
+                snap["resets"] = {"billing_cycle_end": "2026-11-07"}
+        self.export.write_text(json.dumps(envelope))
+        result = subprocess.run(
+            [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+             "--log", str(self.log)],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads(result.stdout)
+        self.assertNotIn("error", row)
+        self.assertIn("used_pct", row["pools"]["cursor-auto"])
+        self.assertIn("used_pct", row["pools"]["codex-5h"])
+        self.assertIsNone(quota.parse_ts("2026-11-07"))
+        self.assertIsNone(quota.parse_ts("20261107"))
+        no_zone = quota.parse_ts("2026-11-07T03:00:00")
+        self.assertIsNotNone(no_zone)
+        self.assertEqual(no_zone.utcoffset(), timedelta(0))
+
+    def test_lock_as_directory_still_uses_state(self):
+        good = {"timestamp": self.now.isoformat(),
+                "metrics": {"usage_five_hour": {"limit": 100, "used": 5, "remaining": 95},
+                            "usage_seven_day": {"limit": 100, "used": 68, "remaining": 32}},
+                "resets": {}}
+        state_path = quota._claude_state_path(self.log)
+        lock = Path(str(state_path) + ".lock")
+
+        def make_lock_dir():
+            lock.unlink(missing_ok=True)
+            if lock.is_dir():
+                lock.rmdir()
+            lock.mkdir()
+
+        self.clear_claude_state()
+        self.claude_calls.unlink(missing_ok=True)
+        state_path.write_text(json.dumps({
+            "last_attempt_at": (self.now - timedelta(seconds=10)).isoformat(),
+            "failures": 5, "last_good": good}))
+        make_lock_dir()
+        snap, reason, error = quota._claude_snapshot(log=self.log)
+        self.assertEqual(self.claude_call_count(), 0)
+        self.assertIsNotNone(snap)
+        self.assertEqual(reason, "backoff")
+
+        self.clear_claude_state()
+        self.claude_calls.unlink(missing_ok=True)
+        state_path.write_text(json.dumps({
+            "last_attempt_at": (self.now - timedelta(hours=1)).isoformat(),
+            "failures": 0, "last_good": good}))
+        make_lock_dir()
+        with self.claude_fake(mode="fail"):
+            snap, reason, error = quota._claude_snapshot(log=self.log)
+        self.assertIsNotNone(snap)
+        self.assertEqual(reason, "failed")
+
+        self.clear_claude_state()
+        self.claude_calls.unlink(missing_ok=True)
+        make_lock_dir()
+        first, _, _ = quota._claude_snapshot(log=self.log)
+        quota._claude_snapshot(log=self.log)
+        self.assertIsNotNone(first)
+        self.assertEqual(self.claude_call_count(), 1)
+
+        self.clear_claude_state()
+        self.claude_calls.unlink(missing_ok=True)
+        folder = self.log.parent
+        state_path.write_text(json.dumps({
+            "last_attempt_at": (self.now - timedelta(seconds=10)).isoformat(),
+            "failures": 5, "last_good": good}))
+        folder.chmod(0o555)
+        try:
+            snap, reason, error = quota._claude_snapshot(log=self.log)
+        finally:
+            folder.chmod(0o755)
+        self.assertEqual(self.claude_call_count(), 0)
+        self.assertEqual(reason, "backoff")
+
+    def test_malformed_reset_costs_only_its_pool(self):
+        self.clear_claude_state()
+        self.claude_calls.unlink(missing_ok=True)
+        with self.claude_fake(mode="bad-reset"):
+            result = subprocess.run(
+                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+                 "--log", str(self.log)],
+                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads(result.stdout)
+        self.assertNotIn("error", row)
+        self.assertIn("error", row["pools"]["claude-5h"])
+        self.assertIn("used_pct", row["pools"]["claude-7d"])
+        self.assertIn("used_pct", row["pools"]["codex-5h"])
+        self.assertIn("used_pct", row["pools"]["cursor-auto"])
+        # A last_good poisoned with a bad reset counts as no state.
+        self.clear_claude_state()
+        good = {"timestamp": self.now.isoformat(),
+                "metrics": {"usage_five_hour": {"limit": 100, "used": 5, "remaining": 95},
+                            "usage_seven_day": {"limit": 100, "used": 68, "remaining": 32}},
+                "resets": {"usage_five_hour": "not-an-iso-date"}}
+        quota._claude_state_path(self.log).write_text(json.dumps({
+            "last_attempt_at": (self.now - timedelta(seconds=10)).isoformat(),
+            "failures": 0, "last_good": good}))
+        self.log.unlink(missing_ok=True)
+        result = subprocess.run(
+            [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+             "--log", str(self.log)],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads(result.stdout)
+        self.assertNotIn("error", row)
+        self.assertIn("used_pct", row["pools"]["codex-5h"])
+        self.assertIn("used_pct", row["pools"]["cursor-auto"])
+
+    def test_interrupted_read_leaves_attempt_and_throttles(self):
+        self.clear_claude_state()
+        self.claude_calls.unlink(missing_ok=True)
+        good = {"timestamp": self.now.isoformat(),
+                "metrics": {"usage_five_hour": {"limit": 100, "used": 5, "remaining": 95},
+                            "usage_seven_day": {"limit": 100, "used": 68, "remaining": 32}},
+                "resets": {}}
+        quota._claude_state_path(self.log).write_text(json.dumps({
+            "failures": 0, "last_good": good}))
+        real = quota._claude_call
+
+        def boom(*_a, **_k):
+            raise KeyboardInterrupt
+
+        quota._claude_call = boom
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                quota._claude_snapshot(log=self.log)
+        finally:
+            quota._claude_call = real
+        saved = json.loads(quota._claude_state_path(self.log).read_text())
+        self.assertIn("last_attempt_at", saved)
+        self.assertEqual(saved.get("failures"), 0)
+        self.assertEqual(saved["last_good"]["metrics"], good["metrics"])
+        self.claude_calls.write_text("")
+        snap, reason, error = quota._claude_snapshot(log=self.log)
+        self.assertEqual(reason, "throttle")
+        self.assertEqual(self.claude_call_count(), 0)
+        self.assertIsNotNone(snap)
+
+    def test_no_usable_pool_is_total_failure(self):
+        self.clear_claude_state()
+        empty = {"provider_id": "cursor", "status": "error", "timestamp": self.now.isoformat(),
+                 "metrics": {}, "resets": {}}
+        self.export.write_text(json.dumps({"snapshots": [empty]}))
+        with self.claude_fake(mode="fail"), mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": "rpc-error"}):
+            result = subprocess.run(
+                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+                 "--log", str(self.log)],
+                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        row = json.loads(result.stdout)
+        self.assertIn("error", row)
+        # Usable Cursor keeps exit 0 even when Codex and Claude fail.
+        self.clear_claude_state()
+        self.log.unlink(missing_ok=True)
+        self.export.write_text(json.dumps(fixture(self.now)))
+        with self.claude_fake(mode="fail"), mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": "rpc-error"}):
+            result = subprocess.run(
+                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+                 "--log", str(self.log)],
+                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads(result.stdout)
+        self.assertNotIn("error", row)
+        self.assertIn("used_pct", row["pools"]["cursor-auto"])
+        # A carried Claude reading is usable.
+        self.clear_claude_state()
+        self.log.unlink(missing_ok=True)
+        good = {"timestamp": self.now.isoformat(),
+                "metrics": {"usage_five_hour": {"limit": 100, "used": 5, "remaining": 95},
+                            "usage_seven_day": {"limit": 100, "used": 68, "remaining": 32}},
+                "resets": {"usage_five_hour": (self.now + timedelta(hours=3)).isoformat(),
+                           "usage_seven_day": (self.now + timedelta(days=2)).isoformat()}}
+        quota._claude_state_path(self.log).write_text(json.dumps({
+            "last_attempt_at": self.now.isoformat(), "failures": 0, "last_good": good}))
+        self.export.write_text(json.dumps({"snapshots": [empty]}))
+        with mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": "rpc-error"}):
+            result = subprocess.run(
+                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+                 "--log", str(self.log)],
+                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads(result.stdout)
+        self.assertNotIn("error", row)
+        self.assertEqual(row["pools"]["claude-5h"].get("carried"), "throttle")
+
+    def test_quota_change_needs_two_observations(self):
+        import report
+        t0, t1 = "2026-11-07T08:00:00+00:00", "2026-11-07T08:01:00+00:00"
+
+        def entry(used, observed, carried=None):
+            row = {"used_pct": used, "resets_at": "2026-11-07T12:00:00+00:00",
+                   "observed_at": observed, "stale": False}
+            return {**row, "carried": carried} if carried else row
+
+        def delta(first, last):
+            rows = [{"ts": ts, "pools": {"claude-5h": item}}
+                    for ts, item in (("2026-11-07T08:00:00+00:00", first),
+                                     ("2026-11-07T08:02:00+00:00", last))]
+            return report.quota_change(*rows)["pools"]["claude-5h"]["delta"]
+
+        self.assertIsNone(delta(entry(10, t0), entry(10, t0, "throttle")))
+        self.assertIsNone(delta(entry(10, t0, "throttle"), entry(10, t0, "backoff")))
+        self.assertEqual(delta(entry(10, t0), entry(12, t1, "throttle")), 2)
+        self.assertEqual(delta(entry(10, t0), entry(12, t1)), 2)
+        self.assertEqual(delta(entry(10, None), entry(12, None)), 2)
 
 
 if __name__ == "__main__":

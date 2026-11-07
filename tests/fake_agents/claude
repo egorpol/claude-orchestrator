@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Quota-free claude -p /usage fixture; controls come from $CLAUDE_CONFIG_DIR/fake-claude.json."""
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+def _config():
+    root = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not root:
+        return {}
+    path = Path(root) / "fake-claude.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+CFG = _config()
+
+
+def _log():
+    path = CFG.get("log")
+    if not path:
+        return
+    keys = ("HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "CLAUDE_CONFIG_DIR",
+            "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy",
+            "ALL_PROXY", "all_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE",
+            "ANTHROPIC_API_KEY", "CLAUDECODE", "LD_LIBRARY_PATH")
+    env = {key: os.environ[key] for key in keys if key in os.environ}
+    env.update({key: os.environ[key] for key in os.environ if key.startswith("CLAUDE_CODE_")})
+    env.update({key: os.environ[key] for key in os.environ if key.startswith("FAKE_CLAUDE_")})
+    with Path(path).open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "env": env}) + "\n")
+
+
+_log()
+args = sys.argv[1:]
+assert args[:2] == ["-p", "/usage"], args
+assert "--output-format" in args and "stream-json" in args, args
+assert "--verbose" in args, args
+assert "--no-session-persistence" in args, args
+assert "--strict-mcp-config" in args, args
+assert "--settings" in args and args[args.index("--settings") + 1] == '{"disableAllHooks": true}', args
+assert "--bare" not in args, args
+
+pids = CFG.get("pids")
+if pids:
+    with Path(pids).open("a") as stream:
+        stream.write(str(os.getpid()) + "\n")
+
+mode = CFG.get("mode", "ok")
+if mode in ("grandchild", "exit-grandchild"):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    if pids:
+        with Path(pids).open("a") as stream:
+            stream.write(str(child.pid) + "\n")
+    if mode == "exit-grandchild":
+        sys.exit(0)
+
+time.sleep(float(CFG.get("sleep", 0)))
+
+secret = CFG.get("secret", "secret-claude-token-planted")
+if mode == "chatty":
+    sys.stderr.write(secret * 1000)
+    sys.stderr.flush()
+
+code = int(CFG.get("exit", 0))
+if mode == "fail" or code:
+    print(secret, flush=True)
+    print(secret, file=sys.stderr, flush=True)
+    sys.exit(code or 1)
+
+if mode in ("silent", "grandchild"):
+    time.sleep(60)
+
+now = datetime.now(timezone.utc)
+session_pct = float(CFG.get("session_pct", 12.34567889))
+weekly_pct = float(CFG.get("weekly_pct", 70))
+session_reset = CFG.get("session_reset", "__default__")
+weekly_reset = CFG.get("weekly_reset", "__default__")
+if session_reset == "__default__":
+    session_reset = (now + timedelta(hours=3)).isoformat()
+elif session_reset == "":
+    session_reset = None
+if weekly_reset == "__default__":
+    weekly_reset = (now + timedelta(days=2)).isoformat()
+elif weekly_reset == "":
+    weekly_reset = None
+
+limits = [
+    {"kind": "session", "group": "session", "percent": session_pct,
+     "resets_at": session_reset, "scope": None, "utilization": "normal", "is_active": False},
+    {"kind": "weekly_all", "group": "weekly", "percent": weekly_pct,
+     "resets_at": weekly_reset, "scope": None, "utilization": "normal", "is_active": True},
+    {"kind": "weekly_scoped", "group": "weekly", "percent": 6,
+     "resets_at": weekly_reset, "scope": {"model": {"display_name": "Fable"}, "surface": None},
+     "utilization": "normal", "is_active": False},
+]
+
+rate_limits = {"limits": limits, "extra_usage": {
+    "is_enabled": False, "monthly_limit": None, "used_credits": None,
+    "utilization": None, "currency": None}}
+if mode == "idle":
+    rate_limits["limits"] = [{"kind": "session", "group": "session", "percent": 0,
+                              "resets_at": None, "scope": None, "utilization": "normal",
+                              "is_active": False}]
+elif mode == "session-only":
+    rate_limits["limits"] = [limits[0]]
+elif mode == "weekly-only":
+    rate_limits["limits"] = [limits[1]]
+elif mode == "bad-percent-bool":
+    rate_limits["limits"] = [{"kind": "session", "percent": True, "resets_at": None}]
+elif mode == "bad-percent-neg":
+    rate_limits["limits"] = [{"kind": "session", "percent": -1, "resets_at": None}]
+elif mode == "bad-percent-str":
+    rate_limits["limits"] = [{"kind": "session", "percent": "secret", "resets_at": None}]
+elif mode == "bad-reset":
+    limits[0]["resets_at"] = "not-an-iso-date"
+elif mode == "null-limits":
+    rate_limits = None
+elif mode == "malformed-limits":
+    rate_limits = {"limits": "secret"}
+
+print(json.dumps({
+    "type": "system", "subtype": "init",
+    "cwd": "/secret/project/path", "session_id": "secret-session",
+    "mcp_servers": [{"name": "secret-server"}],
+}), flush=True)
+
+if mode == "pad-linger" or CFG.get("pad"):
+    # 60 KB of padding before the report (drain must not stop at one read).
+    print(json.dumps({"type": "system", "pad": "0" * 60000}), flush=True)
+
+if mode == "garbage-line":
+    print("not json " + secret, flush=True)
+
+if mode != "no-report":
+    assistant = {"type": "assistant"}
+    report_file = CFG.get("file")
+    if mode == "no-usage-key":
+        pass
+    elif report_file:
+        assistant["usage_report"] = json.loads(Path(report_file).read_text(encoding="utf-8"))
+    else:
+        assistant["usage_report"] = {
+            "session": {"total_cost_usd": 0, "model_usage": {}},
+            "rate_limits": rate_limits}
+    print(json.dumps(assistant), flush=True)
+
+print(json.dumps({
+    "type": "result", "subtype": "success", "is_error": False,
+    "result": secret, "total_cost_usd": 0, "num_turns": 0,
+    "session_id": "secret-session",
+}), flush=True)
+
+if mode == "close-then-exit":
+    sys.stdout.close()
+    sys.stderr.close()
+    time.sleep(1)
+elif mode in ("report-linger", "pad-linger"):
+    # Exit after the report while a grandchild keeps the pipes open (round-3 wake-on-exit).
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    if pids:
+        with Path(pids).open("a") as stream:
+            stream.write(str(child.pid) + "\n")
+sys.exit(0)

@@ -727,9 +727,14 @@ def quota_change(start, end):
         first, last = reading(start, pool), reading(end, pool)
         same = first and last and _window(first.get("resets_at")) is not None \
             and _window(first.get("resets_at")) == _window(last.get("resets_at"))
+        # A carried copy of the same observation is not a second measurement.
+        same_obs = (first and last and (first.get("carried") or last.get("carried"))
+                    and first.get("observed_at") is not None
+                    and first.get("observed_at") == last.get("observed_at"))
         pools[pool] = {"start": first["used_pct"] if first else None,
                        "end": last["used_pct"] if last else None,
-                       "delta": round(last["used_pct"] - first["used_pct"], 4) if same else None}
+                       "delta": (None if same_obs else
+                                 round(last["used_pct"] - first["used_pct"], 4) if same else None)}
     return {"start": (start or {}).get("ts"), "end": (end or {}).get("ts"), "pools": pools}
 
 

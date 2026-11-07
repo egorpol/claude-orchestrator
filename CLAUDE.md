@@ -8,7 +8,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
 
 - `skills/delegate/reference/`: workflow topics read on demand from the short `skills/delegate/SKILL.md` core (commands, sessions, briefs, quota, launch, review and agents).
 - `skills/delegate/scripts/delegate`: argparse entry point (no `.py` extension), dispatching to:
-  - `quota.py`: pools from `codex app-server` and `openusage export`
+  - `quota.py`: pools from `codex app-server`, `claude -p /usage` and `openusage export`
   - `monitor.py`: closed-window unused share (`quota --unused`) and per-job pool costs / rounds left
   - `ratings.py`: Artificial Analysis via API key or leaderboard scrape, cached 24h
   - `route.py`: per-task score = ratings × weights × quota
@@ -67,7 +67,7 @@ bash -n install.sh
 
 - **Shell:** the Bash tool runs zsh, although the user's terminal is fish. In zsh, `$args` doesn't word-split and a bare `====` is expanded as `=cmd`.
 - **Nextcloud:** the maintainer's checkout lives in Nextcloud, so `.git` syncs too. On each other machine, use either the synced folder or a `gh repo clone`, never both.
-- **Git:** remote `egorpol/claude-orchestrator` is public since 2026-10-13, with its full history. Commit messages are imperative, e.g. "Add review, followup and verify rounds; …". Commit and push only when asked.
+- **Git:** remote `egorpol/claude-orchestrator` was public from 2026-10-13 and is private since 2026-11-07, with its full history. Commit messages are imperative, e.g. "Add review, followup and verify rounds; …". Commit and push only when asked.
 
 ## Field reports, releases, open items
 

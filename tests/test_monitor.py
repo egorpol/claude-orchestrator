@@ -103,6 +103,24 @@ class WindowTests(unittest.TestCase):
         self.assertGreater(wins[0]["gap_h"], 1.0)
         self.assertEqual(wins[0]["expired"], 40.0)
 
+    def test_carried_copy_is_not_an_observation(self):
+        start = ts("2026-10-14T10:00:00+00:00")
+        stamp = start + timedelta(seconds=120)
+        reset = start + timedelta(minutes=61)
+        first = {"used_pct": 10, "resets_at": reset.isoformat(),
+                 "observed_at": start.isoformat(), "stale": False}
+        rows = [
+            qrow(start, {"claude-5h": first}),
+            qrow(stamp, {"claude-5h": {**first, "carried": "throttle"}}),
+        ]
+        window = monitor.windows_for_pool(rows, "claude-5h", start + timedelta(minutes=2))[0]
+        self.assertEqual(window["readings"], 1)
+        self.assertTrue(window["lower_bound"])
+        rows[1] = qrow(stamp, {"claude-5h": {**first, "observed_at": stamp.isoformat()}})
+        window = monitor.windows_for_pool(rows, "claude-5h", start + timedelta(minutes=2))[0]
+        self.assertEqual(window["readings"], 2)
+        self.assertFalse(window["lower_bound"])
+
     def test_open_window_out_of_totals(self):
         reset = ts("2026-11-01T22:00:00+00:00")
         rows = [qrow("2026-10-27T10:00:00+00:00", {"claude-7d": pool(12, reset)})]
@@ -492,10 +510,14 @@ class CliPlumbingTests(unittest.TestCase):
         fake.write_text(f"#!{sys.executable}\nimport pathlib,sys\n"
                         f"print(pathlib.Path({str(export)!r}).read_text())\n")
         fake.chmod(0o755)
-        codex = bin_dir / "codex"
-        codex.write_text(f"#!{sys.executable}\n" +
-                         (Path(__file__).parent / "fake_agents/codex").read_text().split("\n", 1)[1])
-        codex.chmod(0o755)
+        fakes = Path(__file__).parent / "fake_agents"
+        for name in ("codex", "claude"):
+            path = bin_dir / name
+            path.write_text(f"#!{sys.executable}\n" + fakes.joinpath(name).read_text().split("\n", 1)[1])
+            path.chmod(0o755)
+        config = self.tmp / "claude-config"
+        config.mkdir()
+        (config / "fake-claude.json").write_text(json.dumps({"mode": "ok"}))
         out_log = self.tmp / "snap.jsonl"
         result = subprocess.run(
             [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "launch",
@@ -503,7 +525,7 @@ class CliPlumbingTests(unittest.TestCase):
             capture_output=True, text=True,
             env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
                  "HOME": str(self.tmp), "XDG_CACHE_HOME": str(self.tmp / "cache"),
-                 "DELEGATE_CATALOG_LOCAL": ""},
+                 "CLAUDE_CONFIG_DIR": str(config), "DELEGATE_CATALOG_LOCAL": ""},
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         row = json.loads(out_log.read_text().splitlines()[0])

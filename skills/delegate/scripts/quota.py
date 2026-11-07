@@ -1,4 +1,4 @@
-"""Remaining quota per delegation pool, read from Codex and openusage."""
+"""Remaining quota per delegation pool, read from Codex, Claude /usage and openusage."""
 import fcntl
 import json
 import math
@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# pool id -> where openusage keeps it. window_h is the window length when the
+# pool id -> where each reader keeps it. window_h is the window length when the
 # pool rolls on a fixed period; billing-cycle pools use billing_cycle_progress.
 POOLS = {
     "claude-5h": {"provider": "claude_code", "metric": "usage_five_hour",
@@ -40,6 +40,24 @@ DISPATCH_POOLS = ("codex-5h", "codex-7d")
 # At ~11 points per 355 s round, 15 s is about half a whole-percent gauge step.
 REUSE_MAX_S = 15
 REUSE_TAIL_BYTES = 256 * 1024
+# Claude /usage: at least 3 minutes between attempts; failure backoff never undercuts that.
+CLAUDE_MIN_INTERVAL_S = 180
+CLAUDE_BACKOFF_S = (60, 120, 240, 480, 960, 1800)  # effective waits: 3, 3, 4, 8, 16, 30 min
+CLAUDE_USAGE_SETTINGS = '{"disableAllHooks": true}'
+CLAUDE_USAGE_ARGS = (
+    "-p", "/usage",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--no-session-persistence",
+    "--strict-mcp-config",
+    "--settings", CLAUDE_USAGE_SETTINGS,
+)
+CLAUDE_ENV_ALLOW = frozenset({
+    "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "CLAUDE_CONFIG_DIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy",
+    "ALL_PROXY", "all_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE",
+})
+HYBRID_READER = "codex-app-server+claude-usage+openusage-direct"
 
 
 def check_dispatch(catalog_path=None):
@@ -90,13 +108,22 @@ def parse_ts(s):
     if not m:
         return None
     head, frac, tz = m.groups()
+    # A missing zone means UTC for a datetime; for a date-only string, appending
+    # +00:00 makes fromisoformat treat '+' as the date/time separator and return
+    # a naive midnight — reject that rather than invent a time.
     tz = "+00:00" if tz in (None, "Z") else tz
-    return datetime.fromisoformat(head + (f".{frac[:6]}" if frac else "") + tz)
+    try:
+        parsed = datetime.fromisoformat(head + (f".{frac[:6]}" if frac else "") + tz)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
 
 
-def fetch(source="hybrid", timeout=90):
+def fetch(source="hybrid", timeout=90, log=None):
     if source == "hybrid":
-        return _hybrid_snapshot(timeout)
+        return _hybrid_snapshot(timeout, log=log)
     out = subprocess.run(
         ["openusage", "export", "--output", "-", "--format", "json", "--source", source],
         capture_output=True, text=True, timeout=timeout, check=True,
@@ -193,6 +220,9 @@ def _last_good(path):
                         isinstance(entries.get(pid), dict) and "used_pct" in entries[pid]
                         for pid in ("claude-5h", "claude-7d")):
                     continue
+                # A carried Claude gauge is not a fresh watermark for --if-active.
+                if any(entries[pid].get("carried") for pid in ("claude-5h", "claude-7d")):
+                    continue
                 ts = _safe_ts(row.get("ts"))
                 if ts:
                     latest, latest_ts = row, ts
@@ -235,18 +265,23 @@ def _activity_gate(path, now):
 
 def _snapshot_pools(envelope, ts):
     snaps = {s.get("provider_id"): s for s in envelope.get("snapshots", [])}
+    carried = envelope.get("_carried") or {}
     result = {}
     for pid, entry in pools(envelope, now=ts).items():
         if "error" in entry:
             result[pid] = {"error": entry["error"]}
             continue
-        observed = snaps[POOLS[pid]["provider"]].get("timestamp")
+        provider = POOLS[pid]["provider"]
+        observed = snaps[provider].get("timestamp")
         observed_ts = _safe_ts(observed)
         result[pid] = {"used_pct": round(float(100 - entry["left_pct"]), 4),
                        "resets_at": entry["resets_at"], "observed_at": observed,
                        "stale": observed_ts is None or (ts - observed_ts).total_seconds() > 120}
         if entry.get("stale_reset"):
             result[pid]["stale_reset"] = True
+        reason = carried.get(provider)
+        if reason:
+            result[pid]["carried"] = reason
     return result
 
 
@@ -392,12 +427,18 @@ def _cache_path():
 
 def _openusage_env():
     # Resolve cache and targets against the real environment before hiding HOME/XDG.
+    # Hybrid reads Claude via /usage, so never expose the Claude OAuth token here.
     home = _cache_path() / "claude-delegate/openusage-home"
     real = Path.home()
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     home.chmod(0o700)
     (home / ".config").mkdir(mode=0o700, exist_ok=True)
-    for name in (".claude", ".claude.json", ".cursor", ".config/Cursor"):
+    for name in (".claude", ".claude.json"):
+        link = home / name
+        # Drop only leftover symlinks from older installs; never a real file.
+        if link.is_symlink():
+            link.unlink(missing_ok=True)
+    for name in (".cursor", ".config/Cursor"):
         target, link = real / name, home / name
         if not target.exists():
             if link.is_symlink():
@@ -417,36 +458,402 @@ def _openusage_env():
     return env
 
 
-def _hybrid_snapshot(timeout):
-    snapshots, errors = [], {}
+def _claude_state_path(log=None):
+    return log_path(log).parent / "claude-usage.json"
+
+
+def _load_claude_state(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_claude_state(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex)
+    try:
+        fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(state, stream, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _claude_env():
+    return {key: value for key, value in os.environ.items() if key in CLAUDE_ENV_ALLOW}
+
+
+def _claude_finite_number(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _claude_resets_at_ok(resets_at):
+    """None, or an ISO string that parses; keep the string as written when valid."""
+    if resets_at is None:
+        return True
+    if not isinstance(resets_at, str):
+        return False
+    return _safe_ts(resets_at) is not None
+
+
+def _claude_gauge_ok(gauge):
+    """A metrics value safe for pools(): numeric limit/used/remaining only."""
+    if not isinstance(gauge, dict):
+        return False
+    limit = gauge.get("limit", 100)
+    if not _claude_finite_number(limit) or limit <= 0:
+        return False
+    used, remaining = gauge.get("used"), gauge.get("remaining")
+    if used is not None and not _claude_finite_number(used):
+        return False
+    if remaining is not None and not _claude_finite_number(remaining):
+        return False
+    return used is not None or remaining is not None
+
+
+def _claude_last_good_ok(good):
+    """Normalize a persisted last_good, or None when it is corrupt / unusable."""
+    if not isinstance(good, dict):
+        return None
+    stamp = good.get("timestamp")
+    if not isinstance(stamp, str) or _safe_ts(stamp) is None:
+        return None
+    metrics = good.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    clean_metrics = {}
+    for key in ("usage_five_hour", "usage_seven_day"):
+        gauge = metrics.get(key)
+        if gauge is None:
+            continue
+        if not _claude_gauge_ok(gauge):
+            return None
+        clean_metrics[key] = {
+            "limit": gauge.get("limit", 100),
+            "used": gauge.get("used"),
+            "remaining": gauge.get("remaining"),
+        }
+    if not clean_metrics:
+        return None
+    resets = good.get("resets")
+    if resets is None:
+        resets = {}
+    if not isinstance(resets, dict):
+        return None
+    clean_resets = {}
+    for key, value in resets.items():
+        if not _claude_resets_at_ok(value):
+            return None
+        clean_resets[key] = value
+    return {"timestamp": stamp, "metrics": clean_metrics, "resets": clean_resets}
+
+
+def _claude_limit_row(row):
+    """Map one /usage limits row to (metric_key, reset_key, used, resets_at) or None."""
+    if not isinstance(row, dict):
+        return None
+    kind = row.get("kind")
+    if kind == "session":
+        metric, reset = "usage_five_hour", "usage_five_hour"
+    elif kind == "weekly_all":
+        metric, reset = "usage_seven_day", "usage_seven_day"
+    else:
+        return None
+    used = row.get("percent")
+    if not _claude_finite_number(used) or used < 0:
+        return None
+    resets_at = row.get("resets_at")
+    if not _claude_resets_at_ok(resets_at):
+        return None
+    return metric, reset, used, resets_at
+
+
+def _parse_claude_usage(stdout):
+    """Build an openusage-shaped claude_code snapshot from stream-json /usage output."""
+    report = None
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(message, dict) or message.get("type") != "assistant":
+            continue
+        if "usage_report" in message:
+            report = message.get("usage_report")
+    if not isinstance(report, dict):
+        raise _ReaderError("claude /usage report missing")
+    rate_limits = report.get("rate_limits")
+    if rate_limits is None:
+        raise _ReaderError("claude /usage unavailable")
+    if not isinstance(rate_limits, dict):
+        raise _ReaderError("claude /usage unavailable")
+    limits = rate_limits.get("limits")
+    if not isinstance(limits, list):
+        raise _ReaderError("claude /usage unavailable")
+    snap = {"provider_id": "claude_code", "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "ok", "metrics": {}, "resets": {}}
+    for row in limits:
+        parsed = _claude_limit_row(row)
+        if parsed is None:
+            continue
+        metric, reset, used, resets_at = parsed
+        snap["metrics"][metric] = {"limit": 100, "used": used, "remaining": 100 - used}
+        snap["resets"][reset] = resets_at
+    if not snap["metrics"]:
+        raise _ReaderError("claude /usage unavailable")
+    return snap
+
+
+def _claude_call(timeout, cwd):
+    """One bounded `claude -p /usage` read; kill the process group on the way out."""
+    deadline = time.monotonic() + min(20, timeout)
+    env = _claude_env()
+    proc = subprocess.Popen(
+        ["claude", *CLAUDE_USAGE_ARGS], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=str(cwd), env=env, start_new_session=True, bufsize=0)
+    pending = b""
+    try:
+        os.set_blocking(proc.stdout.fileno(), False)
+        os.set_blocking(proc.stderr.fileno(), False)
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            selector.register(proc.stderr, selectors.EVENT_READ)
+            stderr_size = 0
+
+            def take(stream, chunk):
+                nonlocal pending, stderr_size
+                if stream is proc.stdout:
+                    pending += chunk
+                    if len(pending) > 1024 * 1024:
+                        raise _ReaderError("claude /usage reply too large")
+                else:
+                    stderr_size += len(chunk)
+                    if stderr_size > 1024 * 1024:
+                        raise _ReaderError("claude /usage reply too large")
+
+            def drain():
+                # After the child exits, pull every buffered byte even if a grandchild
+                # still holds the write end (select would otherwise wait until EOF).
+                for key in list(selector.get_map().values()):
+                    while True:
+                        try:
+                            chunk = os.read(key.fd, 65536)
+                        except BlockingIOError:
+                            break
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            break
+                        take(key.fileobj, chunk)
+
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired("claude /usage", timeout)
+                # Short select so a dead child is noticed while pipes stay open.
+                if selector.get_map():
+                    events = selector.select(min(remaining, 0.05))
+                else:
+                    events = []
+                    time.sleep(min(0.05, remaining))
+                for key, _ in events:
+                    try:
+                        chunk = os.read(key.fd, 65536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    take(key.fileobj, chunk)
+                if proc.poll() is not None:
+                    drain()
+                    break
+            if proc.returncode:
+                raise subprocess.CalledProcessError(proc.returncode, "claude /usage")
+            try:
+                text = pending.decode("utf-8")
+            except UnicodeError as exc:
+                raise _ReaderError("claude /usage unavailable") from exc
+            return _parse_claude_usage(text)
+    finally:
+        try:
+            proc.wait(timeout=min(0.05, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            pass
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+def _claude_carry_from_state(state, reason):
+    good = _claude_last_good_ok(state.get("last_good"))
+    if good is None:
+        return None
+    return ({"provider_id": "claude_code", "timestamp": good["timestamp"], "status": "ok",
+             "metrics": good["metrics"], "resets": good["resets"]},
+            reason)
+
+
+def _claude_wait_s(failures):
+    """Seconds to wait after last_attempt before another call."""
+    if failures <= 0:
+        return CLAUDE_MIN_INTERVAL_S
+    backoff = CLAUDE_BACKOFF_S[min(failures, len(CLAUDE_BACKOFF_S)) - 1]
+    return max(CLAUDE_MIN_INTERVAL_S, backoff)
+
+
+def _claude_snapshot(timeout=20, log=None):
+    """Return (snapshot|None, carried_reason|None, error|None) under a private lock."""
+    state_path = _claude_state_path(log)
+    lock_path = Path(str(state_path) + ".lock")
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    lock = None
+    try:
+        try:
+            lock = lock_path.open("a")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError:
+            if lock is not None:
+                try:
+                    lock.close()
+                except OSError:
+                    pass
+            lock = None
+
+        # Load and save whether or not the lock was taken: a missing lock must not
+        # mean an unthrottled reader. _save_claude_state is atomic; races can lose
+        # one attempt stamp, which is better than no throttle at all.
+        state = _load_claude_state(state_path)
+        now = datetime.now(timezone.utc)
+        last_attempt = _safe_ts(state.get("last_attempt_at"))
+        failures = state.get("failures")
+        if not isinstance(failures, int) or failures < 0:
+            failures = 0
+        last_good = _claude_last_good_ok(state.get("last_good"))
+        # A stamp in the future (clock change) counts as no throttle.
+        if last_attempt is not None and last_attempt <= now:
+            wait_s = _claude_wait_s(failures)
+            skip_reason = "backoff" if failures > 0 else "throttle"
+            if (now - last_attempt).total_seconds() < wait_s:
+                if last_good is not None:
+                    return ({"provider_id": "claude_code", "timestamp": last_good["timestamp"],
+                             "status": "ok", "metrics": last_good["metrics"],
+                             "resets": last_good["resets"]}, skip_reason, None)
+                return (None, None, "claude /usage unavailable")
+
+        attempt = {"last_attempt_at": now.isoformat(), "failures": failures,
+                   "last_good": last_good}
+        try:
+            # Mark the attempt before the call so a kill mid-read still throttles.
+            _save_claude_state(state_path, attempt)
+        except OSError:
+            pass
+        try:
+            snap = _claude_call(timeout, state_path.parent)
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError,
+                KeyError, OverflowError) as exc:
+            error = _fetch_error(exc, "claude /usage")
+            attempt["failures"] = failures + 1
+            try:
+                _save_claude_state(state_path, attempt)
+            except OSError:
+                pass
+            carried = _claude_carry_from_state(attempt, "failed")
+            if carried:
+                return (*carried, None)
+            return None, None, error
+        # Persist only gauges and resets: never session/account fields from the report.
+        good = _claude_last_good_ok({"timestamp": snap["timestamp"],
+                                     "metrics": snap["metrics"], "resets": snap["resets"]})
+        try:
+            _save_claude_state(state_path, {
+                "last_attempt_at": attempt["last_attempt_at"], "failures": 0,
+                "last_good": good})
+        except OSError:
+            pass
+        return snap, None, None
+    finally:
+        if lock is not None:
+            try:
+                lock.close()
+            except OSError:
+                pass
+
+
+def _hybrid_snapshot(timeout, log=None):
+    snapshots, errors, carried = [], {}, {}
     try:
         snapshots.append(_codex_snapshot(timeout=min(15, timeout)))
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
         errors["codex"] = _fetch_error(exc, "codex app-server")
+    try:
+        snap, reason, error = _claude_snapshot(timeout=min(20, timeout), log=log)
+        if snap is not None:
+            snapshots.append(snap)
+            if reason:
+                carried["claude_code"] = reason
+        elif error:
+            errors["claude_code"] = error
+        else:
+            errors["claude_code"] = "claude /usage unavailable"
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
+        errors["claude_code"] = _fetch_error(exc, "claude /usage")
     try:
         output = subprocess.run(
             ["openusage", "export", "--output", "-", "--format", "json", "--source", "direct"],
             env=_openusage_env(), capture_output=True, text=True, timeout=timeout, check=True)
         try:
             envelope = json.loads(output.stdout)
-            other = [snap for snap in envelope["snapshots"] if snap.get("provider_id") != "codex"]
-            # Validate the other side separately: malformed exports cannot discard Codex.
+            # Drop Codex (owned by app-server) and any Claude openusage still returns.
+            other = [snap for snap in envelope["snapshots"]
+                     if snap.get("provider_id") not in ("codex", "claude_code")]
             pools({"snapshots": other})
         except (ValueError, TypeError, AttributeError, KeyError) as exc:
             exc.stderr = output.stderr
             raise
         snapshots.extend(other)
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
-        error = _fetch_error(exc)
-        errors.update(claude_code=error, cursor=error)
-    if "codex" in errors and "claude_code" in errors:
-        raise _ReaderError(errors["codex"] + "; " + errors["claude_code"])
-    return {"snapshots": snapshots, "_reader_errors": errors}
+        errors["cursor"] = _fetch_error(exc)
+    envelope = {"snapshots": snapshots, "_reader_errors": errors, "_carried": carried}
+    # A provider present with empty metrics is not a usable reading.
+    entries = pools(envelope)
+    if all("error" in entry for entry in entries.values()):
+        parts = [errors[key] for key in ("codex", "claude_code", "cursor") if key in errors]
+        if not parts:
+            parts = [entry["error"] for entry in entries.values() if entry.get("error")]
+        raise _ReaderError("; ".join(parts) if parts else "quota readers failed")
+    return envelope
 
 
-def _fetch_snapshot(source, timeout):
+def _fetch_snapshot(source, timeout, log=None):
     if source == "hybrid":
-        return _hybrid_snapshot(timeout)
+        return _hybrid_snapshot(timeout, log=log)
     # Keep fetch()'s legacy behavior, but retain stderr on a JSON decoding error.
     output = subprocess.run(
         ["openusage", "export", "--output", "-", "--format", "json", "--source", source],
@@ -463,6 +870,22 @@ def log_path(log=None):
     cache = _cache_path()
     return Path(log or os.environ.get("CLAUDE_DELEGATE_QUOTA_LOG")
                 or cache / "claude-delegate/quota.jsonl").expanduser()
+
+
+def _reuse_pools(entries, ts):
+    """Copy pools; recompute stale for carried Claude gauges against the new row time."""
+    result = {}
+    for pid, entry in entries.items():
+        if not isinstance(entry, dict):
+            result[pid] = entry
+            continue
+        copied = dict(entry)
+        if copied.get("carried") and "used_pct" in copied:
+            observed_ts = _safe_ts(copied.get("observed_at"))
+            copied["stale"] = (observed_ts is None
+                               or (ts - observed_ts).total_seconds() > 120)
+        result[pid] = copied
+    return result
 
 
 def _reuse_reading(path, row, now):
@@ -524,7 +947,7 @@ def record(reason=None, session=None, run=None, if_active=False, log=None,
         now = datetime.now(timezone.utc)
         ts = now.replace(microsecond=0)
         row = {"ts": ts.isoformat(), "source": source,
-               "reader": "codex-app-server+openusage-direct" if source == "hybrid" else f"openusage-{source}",
+               "reader": HYBRID_READER if source == "hybrid" else f"openusage-{source}",
                "reason": reason,
                "session": session if isinstance(session, str)
                and re.fullmatch(r"[A-Za-z0-9_-]+", session) else None, "run": run}
@@ -536,9 +959,10 @@ def record(reason=None, session=None, run=None, if_active=False, log=None,
         try:
             if reusable:
                 previous, origin = reusable
-                row.update(pools=previous["pools"], reader=previous["reader"], reused_from=origin)
+                row.update(pools=_reuse_pools(previous["pools"], ts),
+                           reader=previous["reader"], reused_from=origin)
             else:
-                row["pools"] = _snapshot_pools(_fetch_snapshot(source, timeout), ts)
+                row["pools"] = _snapshot_pools(_fetch_snapshot(source, timeout, log=log), ts)
         except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
             row["error"] = _fetch_error(exc)
         line = json.dumps(row)

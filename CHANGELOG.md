@@ -22,7 +22,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
-- Default quota source is `hybrid` (cutover 2026-11-07): Codex from `codex app-server`, Claude and Cursor from `openusage export --source direct` under a private HOME that skips Codex; `auto|direct|daemon` remain plain openusage. `check_dispatch` reads only codex-5h and codex-7d via one `codex app-server` call and never runs openusage. `quota.jsonl` rows carry `reader` and may reuse a complete hybrid reading up to 15 s old (`reused_from`), except a job-end or session-end that would share a reading with its own start.
+- Default quota source is `hybrid` (cutover 2026-11-07): Codex from `codex app-server`, Claude from `claude -p /usage` (persisted throttle/backoff with a 3-minute floor after failures; carry last good with `carried`), Cursor from openusage direct under a private HOME that skips Codex and no longer links the Claude login; `auto|direct|daemon` remain plain openusage. `check_dispatch` reads only codex-5h and codex-7d via one `codex app-server` call and never runs openusage or `/usage`. `quota.jsonl` rows carry `reader` and may reuse a complete hybrid reading up to 15 s old (`reused_from`), except a job-end or session-end that would share a reading with its own start. `monitor` skips carried entries; `report` session deltas need two distinct observations.
 - A rate-limited Claude pool's error now ends `: usage API rate limited (429)` instead of only `metric … missing`.
 - `install.sh --timer` puts `codex`'s directory on the quota timer's PATH and warns if `codex` is missing.
 - The `delegate` skill description gives spare Codex and Cursor quota as the reason for unprompted use, and the README puts "Claude's quota ran out first" on the Pro plan: on Max the first full 7-day window peaked at 65% used.
@@ -47,6 +47,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Fixed
 
+- `quota.parse_ts` returns `None` for a string without a usable time, such as a date alone: that used to give a naive datetime, which crashed `pools()` and cost the whole quota row.
 - `launch --dry-run` and `followup --dry-run` now print the `--link` not-gitignored warning as a preview on stderr.
 - `delegate ask --agent both` finds a Cursor `Pick:` glued to a status line that ends in a colon (`…re-saving:**Pick: B**`); the `## picks` block printed "no Pick line found" for these.
 - `hooks/secret-guard.py` reads heredocs as a shell does for commit/push analysis: a body is data unless a shell reads it (so prose that only mentions commit-then-push is no longer denied), and an apostrophe in a body no longer hides a real commit-then-push after it.

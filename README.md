@@ -6,7 +6,7 @@ Claude Code as orchestrator, Codex CLI and Cursor's headless agent as workers. T
 
 This is my own workflow, tuned to my setup. Cursor is my IDE, Claude Code runs inside it as the main agent, and Codex CLI and Cursor's agent run on their own subscriptions. On Claude Pro, Claude's quota ran out first. So Claude orchestrates: it keeps design, data checks and review, and hands mechanical work to whichever pool has quota to spare. The rest of the repo cuts what Claude's own sessions cost, mostly by keeping them short.
 
-It is a snapshot, published in case parts of it are useful to someone else. It is not a general-purpose tool. It assumes Linux, [openusage](https://github.com/janekbaraniewski/openusage) for quota data, and Codex and Cursor subscriptions, and it changes whenever my workflow does. Versions are in the [CHANGELOG](CHANGELOG.md).
+It is a snapshot, published in case parts of it are useful to someone else. It is not a general-purpose tool. It assumes Linux, [openusage](https://github.com/janekbaraniewski/openusage) for Cursor's quota data, and Codex and Cursor subscriptions, and it changes whenever my workflow does. Versions are in the [CHANGELOG](CHANGELOG.md).
 
 ## What it achieved so far
 
@@ -29,7 +29,7 @@ The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysi
 
 | part | what it does |
 |---|---|
-| [`delegate`](skills/delegate/SKILL.md) skill and CLI | Hands work to **Codex CLI** or **Cursor's headless agent** (`cursor-agent --model auto`). Shows live quota per pool via openusage and `codex app-server` and ranks models per task type with [Artificial Analysis](https://artificialanalysis.ai/) ratings. Each delegate runs in its own git worktree with a brief, a log and an optional check command. The other vendor reviews the result read-only, and fix rounds resume the same agent session. Claude reviews the diff and applies it uncommitted. |
+| [`delegate`](skills/delegate/SKILL.md) skill and CLI | Hands work to **Codex CLI** or **Cursor's headless agent** (`cursor-agent --model auto`). Shows live quota per pool via `codex app-server`, `claude -p /usage` and openusage, and ranks models per task type with [Artificial Analysis](https://artificialanalysis.ai/) ratings. Each delegate runs in its own git worktree with a brief, a log and an optional check command. The other vendor reviews the result read-only, and fix rounds resume the same agent session. Claude reviews the diff and applies it uncommitted. |
 | [`/field-report`](skills/field-report/SKILL.md) skill | Writes a field report on the current session from any project's chat: `delegate report` fills in the numbers, then Claude writes the narrative. |
 | [`hooks/context-guard.py`](hooks/context-guard.py) | Asks for a handoff before a new work item once context passes about 120k tokens. Holds the first prompt after an hour idle. In orchestrator sessions, nudges once toward `delegate` when spare pools remain unused. |
 | [`hooks/secret-guard.py`](hooks/secret-guard.py) | PreToolUse (Bash) and optional git pre-commit/pre-push: catches API tokens, private keys, home paths, key/env files, private names and added working files (`HANDOFF.md`, direct `feedback/*.md` or `*.jsonl`); also denies a sticking `cd`/`pushd` into a project subdirectory and notices a drifted shell `cwd`. Private literals go in `${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/private-names.txt`, one per line (blanks and `#` comments ignored); output masks names. Per-repo opt-outs: `git config secretGuard.homePaths false`, `git config secretGuard.privateNames false`, `git config secretGuard.workingFiles false`. |
@@ -40,6 +40,8 @@ The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands 
 **How this differs.** The [full orchestrators in the survey](docs/related-projects.md#full-orchestrators-alternatives-heavier) are supervisors a person watches: tmux panes, boards or a desktop app over many agents. Here, Claude Code stays the orchestrator inside one session. The official Codex plugin also delegates from Claude Code, but it works in the current checkout and only with Codex.
 
 ## Install
+
+The repository is private for now, so cloning it needs access.
 
 ```bash
 gh repo clone egorpol/claude-orchestrator
@@ -64,7 +66,7 @@ Prerequisites (`--check` prints install hints):
 
 - `codex`, logged in with `codex login`
 - `cursor-agent`: `curl https://cursor.com/install -fsS | bash`, then `cursor-agent login`. The login needs a browser approval.
-- `openusage` for quota data
+- `openusage` for Cursor's quota data; Codex and Claude quota come from their own CLIs
 - optional: the [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) (needs Node 18.18+), which adds `/codex:review` and `/codex:adversarial-review` for the current checkout. Install it with `claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex`.
 - optional: `ARTIFICIAL_ANALYSIS_API_KEY` (free) for AA's official coding index. Without it, ratings are parsed from the public leaderboard page.
 

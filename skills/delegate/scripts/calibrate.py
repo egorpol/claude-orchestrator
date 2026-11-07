@@ -62,6 +62,9 @@ def snapshot_pairs(rows, pool):
             stats["error"] += 1
             prev = None
             continue
+        # Carried Claude gauges hold no new observation; skip without breaking the pair.
+        if entry.get("carried"):
+            continue
         if entry.get("stale") or entry.get("stale_reset"):
             stats["stale"] += 1
             prev = None
