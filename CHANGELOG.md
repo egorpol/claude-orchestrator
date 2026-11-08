@@ -25,9 +25,10 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - Hybrid Cursor quota, when opted in, now comes from a scripted pty read of `cursor-agent`'s interactive `/usage` screen (30-minute cadence, carry last good; never `-p` / openusage); pool rows may set `whole_percent`, which `monitor` skips for per-job costs. `resets_at` is 00:00 UTC of the screen date; at the first whole-percent reading, `monitor` keeps the open window (36 h reset tolerance, 1-point drop).
 - Cursor `/usage` reader ships off (`"cursor_usage_reader": false`); opt in with `{"cursor_usage_reader": true}` in `catalog.local.json` (Cursor terms may restrict automated reads). Off, both Cursor pools show the off error and nothing launches.
 - `delegate route`: a preferred delegate leads only when every pool was read and clears `min_quota_pct`; with a pool unread it sorts by score, tagged `(pref, quota ?)`, and below `min_quota_pct` it stays `(excluded)`.
-- Default quota source is `hybrid` (cutover 2026-11-07): Codex from `codex app-server`, Claude from `claude -p /usage` (persisted throttle/backoff with a 3-minute floor after failures; carry last good with `carried`), Cursor, when opted in, from the interactive `/usage` screen above; `auto|direct|daemon` remain plain openusage. `check_dispatch` reads only codex-5h and codex-7d via one `codex app-server` call and never runs openusage or `/usage`. `quota.jsonl` rows carry `reader` and may reuse a complete hybrid reading up to 15 s old (`reused_from`), except a job-end or session-end that would share a reading with its own start. `monitor` skips carried entries; `report` session deltas need two distinct observations.
+- Quota comes from the `hybrid` reader (cutover 2026-11-07): Codex from `codex app-server`, Claude from `claude -p /usage` (persisted throttle/backoff with a 3-minute floor after failures; carry last good with `carried`), Cursor, when opted in, from the interactive `/usage` screen above. `check_dispatch` reads only codex-5h and codex-7d via one `codex app-server` call and never runs `/usage`. `quota.jsonl` rows carry `reader` and may reuse a complete hybrid reading up to 15 s old (`reused_from`), except a job-end or session-end that would share a reading with its own start. `monitor` skips carried entries; `report` session deltas need two distinct observations.
 - A rate-limited Claude pool's error now ends `: usage API rate limited (429)` instead of only `metric … missing`.
 - `install.sh --timer` puts `codex`'s directory on the quota timer's PATH and warns if `codex` is missing.
+- `rules/delegation.md`: Codex counts as empty below catalog `min_quota_pct`, the threshold `check_dispatch` uses, instead of a fixed 10% left.
 - The `delegate` skill description gives spare Codex and Cursor quota as the reason for unprompted use, and the README puts "Claude's quota ran out first" on the Pro plan: on Max the first full 7-day window peaked at 65% used.
 - Claude-only control sessions, when the prompt or the handoff's next step asks for delegated work, must say so in a text message before the first tool call, ask in a picker whether to work alone or with Claude subagents (any Claude model), and repeat the reason at the close: one session's notice stayed in a thinking block.
 - Session rules: a status line is a text message, and a claim needs its whole line. Topic tips cover verification-heavy items and truncated lines.
@@ -48,8 +49,13 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - The survey's last two roadmap ideas are closed (`docs/related-projects.md`): loop cost scoring as covered by the measured per-round pool costs in `delegate quota` and `route`, and pre-launch approval policies by the hook's unsandboxed check.
 - `delegate prereg --outcomes` compares the calibration file's SHA-256 with the hash in the 2026-11-03 Amendment. Any other file reports pool points as unavailable, and the rest of the analysis prints as before.
 
+### Removed
+
+- The openusage quota reader. `delegate quota` and `delegate route` no longer take `--source auto|direct|daemon` (a usage error, exit 2), `install.sh --check` and `--timer` no longer look for `openusage`, and the `delegate` skill description no longer names it. Older `quota.jsonl` rows still read as before.
+
 ### Fixed
 
+- `install.sh --timer` puts `cursor-agent`'s directory on the quota timer's PATH too, not only the rate timer's: the opted-in Cursor reader runs `cursor-agent` from the quota timer.
 - `quota.parse_ts` returns `None` for a string without a usable time, such as a date alone: that used to give a naive datetime, which crashed `pools()` and cost the whole quota row.
 - `launch --dry-run` and `followup --dry-run` now print the `--link` not-gitignored warning as a preview on stderr.
 - `delegate ask --agent both` finds a Cursor `Pick:` glued to a status line that ends in a colon (`…re-saving:**Pick: B**`); the `## picks` block printed "no Pick line found" for these.
