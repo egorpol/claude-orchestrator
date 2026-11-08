@@ -59,6 +59,29 @@ class FromPageTest(unittest.TestCase):
             self.parse([_model(i, {"omniscience-accuracy": 0.5}) for i in range(20)])
 
 
+class CurrentPageFixtureTest(unittest.TestCase):
+    """24 of the 282 model objects on the live page of 2026-11-08, between that payload
+    chunk's own head and tail. Its speed key is `outputSpeed`; the fake pages above keep
+    the older `medianOutputTokensPerSecond`."""
+
+    def test_current_layout_parses(self):
+        page = (Path(__file__).resolve().parent / "fixtures" / "aa-leaderboard-2026-11-08.html")
+        with mock.patch.object(ratings, "_get", return_value=page.read_text(encoding="utf-8")):
+            models = ratings.from_page()
+        self.assertEqual(len(models), 22)
+        for slug in ("jt-35b-flash", "nova-2-0-omni-reasoning-medium"):
+            self.assertNotIn(slug, models)  # no speed key: skipped, as the old anchor did
+        sol = models["gpt-6-1-sol-xhigh"]
+        self.assertEqual((sol["name"], sol["creator"]), ("GPT-6.1 Sol (Xhigh)", "OpenAI"))
+        self.assertAlmostEqual(sol["tps"], 50.0, places=2)
+        self.assertAlmostEqual(sol["intelligence"], 50.0, places=2)
+        self.assertAlmostEqual(sol["coding"], 50.0, places=2)
+        self.assertTrue(sol["coding_is_proxy"])
+        self.assertEqual(sol["price_blended"], 4.0)
+        self.assertAlmostEqual(sol["cost_per_task"], 0.5, places=3)
+        self.assertFalse(sol["deprecated"])
+
+
 class CacheTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

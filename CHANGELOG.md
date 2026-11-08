@@ -55,6 +55,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Fixed
 
+- The Artificial Analysis page scrape finds model objects by `outputSpeed` as well as the older `medianOutputTokensPerSecond`. AA had renamed the speed key, so a refresh parsed 0 models (seen 2026-11-08) and routing kept the 2026-11-03 cache. `tests/fixtures/aa-leaderboard-2026-11-08.html`, 24 of the page's 282 model objects, pins the current layout.
 - `install.sh --timer` puts `cursor-agent`'s directory on the quota timer's PATH too, not only the rate timer's: the opted-in Cursor reader runs `cursor-agent` from the quota timer.
 - `quota.parse_ts` returns `None` for a string without a usable time, such as a date alone: that used to give a naive datetime, which crashed `pools()` and cost the whole quota row.
 - `launch --dry-run` and `followup --dry-run` now print the `--link` not-gitignored warning as a preview on stderr.

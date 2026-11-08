@@ -83,13 +83,10 @@ def _enclosing_object(text, i):
 def from_page():
     flight = _flight(_get(PAGE_URL))
     dec = json.JSONDecoder()
-    models, pos = {}, 0
-    while True:
-        i = flight.find('"medianOutputTokensPerSecond"', pos)
-        if i < 0:
-            break
-        pos = i + 1
-        j = _enclosing_object(flight, i)
+    models = {}
+    # The speed key, which marks a model object, was renamed to outputSpeed (seen 2026-11-08).
+    for hit in re.finditer(r'"(?:outputSpeed|medianOutputTokensPerSecond)"', flight):
+        j = _enclosing_object(flight, hit.start())
         if j is None:
             continue
         try:
@@ -109,7 +106,7 @@ def from_page():
             "intelligence": o.get("intelligenceIndex"),
             "coding": 100 * sum(coding_parts) / len(coding_parts) if coding_parts else None,
             "coding_is_proxy": True,
-            "tps": o.get("medianOutputTokensPerSecond"),
+            "tps": o.get("outputSpeed", o.get("medianOutputTokensPerSecond")),
             "price_in": o.get("price1mInputTokens"),
             "price_out": o.get("price1mOutputTokens"),
             "price_blended": _blend(o.get("price1mInputTokens"), o.get("price1mOutputTokens")),
