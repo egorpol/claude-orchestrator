@@ -47,7 +47,7 @@ class LifecycleTests(unittest.TestCase):
                     "DELEGATE_CATALOG_LOCAL": ""}
         self.env.pop("FAKE_AGENT_EXIT", None)
         for key in list(self.env):
-            if key.startswith(("FAKE_OPENUSAGE_", "FAKE_CODEX_")):
+            if key.startswith("FAKE_CODEX_"):
                 self.env.pop(key)
         self.git("init", "-q")
         self.git("config", "user.name", "Lifecycle Test")
@@ -113,7 +113,7 @@ class LifecycleTests(unittest.TestCase):
         }]}
 
     def quota_env(self, envelope):
-        # Dispatch reads the live RPC result, not a stale openusage snapshot.
+        # Dispatch reads the live RPC result.
         snap = (envelope.get("snapshots") or [{}])[0]
         metrics, resets = snap.get("metrics", {}), snap.get("resets", {})
         limits = {}
@@ -125,11 +125,9 @@ class LifecycleTests(unittest.TestCase):
                                "resetsAt": datetime.fromisoformat(resets[metric]).timestamp()}
         path = self.tmp / "codex.json"
         path.write_text(json.dumps({"rateLimits": limits}))
-        return {"FAKE_CODEX_FILE": str(path), "FAKE_CODEX_LOG": str(self.tmp / "quota-calls"),
-                "FAKE_OPENUSAGE_LOG": str(self.tmp / "unexpected-openusage")}
+        return {"FAKE_CODEX_FILE": str(path), "FAKE_CODEX_LOG": str(self.tmp / "quota-calls")}
 
     def quota_calls(self):
-        self.assertFalse((self.tmp / "unexpected-openusage").exists())
         path = self.tmp / "quota-calls"
         return path.read_text().splitlines() if path.exists() else []
 
@@ -289,7 +287,7 @@ class LifecycleTests(unittest.TestCase):
             self.assertFalse((root / "warnings").exists())
         self.assertEqual(self.quota_calls(), ["read"] * 3)  # RPC failure never retries
 
-    def test_dispatch_uses_fresh_codex_even_if_openusage_would_be_stale(self):
+    def test_dispatch_uses_fresh_codex_even_when_snapshot_age_is_high(self):
         env = self.quota_env(self.quota_envelope(five=3, age=16))
         r = self.cli_raw("launch", "codex", "--brief", self.brief, "--name", "fresh", extra_env=env)
         self.assertEqual(self.quota_calls(), ["read"])

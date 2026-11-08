@@ -83,12 +83,11 @@ def cmd_quota(a):
         )
         print(json.dumps(out, indent=2) if a.json else out)
         return
-    source = a.source
     if a.snapshot:
         sys.exit(quota.snapshot(reason=a.reason, session=a.session, run=a.run,
-                                if_active=a.if_active, log=a.log, source=source,
+                                if_active=a.if_active, log=a.log,
                                 job=getattr(a, "job", None)))
-    res = quota.pools(quota.fetch(source))
+    res = quota.pools(quota.fetch())
     if a.json:
         print(json.dumps(res, indent=2))
         return
@@ -146,7 +145,7 @@ def cmd_route(a):
         return
     if a.task not in cat["tasks"]:
         sys.exit(f"unknown task {a.task!r}; known: {', '.join(cat['tasks'])}")
-    pools = quota.pools(quota.fetch(a.source))
+    pools = quota.pools(quota.fetch())
     aa = ratings.load(refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))["models"]
     agents = set(a.agents.split(",")) if a.agents else None
     options = {"min_quota": a.min_quota, "agents": agents}
@@ -179,9 +178,7 @@ def main():
 
     s = sub.add_parser("quota", help="remaining quota and reset time per pool")
     s.add_argument("--json", action="store_true")
-    s.add_argument("--source", default="hybrid", choices=["hybrid", "auto", "direct", "daemon"],
-                   help="quota reader (default: hybrid); auto/direct/daemon use plain openusage")
-    s.add_argument("--snapshot", action="store_true", help="append a quota.jsonl reading (default source: hybrid)")
+    s.add_argument("--snapshot", action="store_true", help="append a quota.jsonl reading")
     s.add_argument("--unused", action="store_true",
                    help="report closed quota windows' unused share and per-job pool costs from local logs")
     s.add_argument("--since", help="with --unused: keep windows/jobs ending/starting on or after this date")
@@ -211,7 +208,6 @@ def main():
     s.add_argument("--prefer", help="comma list of preferred delegate IDs")
     s.add_argument("--min-quota", type=float, help="exclude pools below this %% left (default from catalog)")
     s.add_argument("--refresh", action="store_true")
-    s.add_argument("--source", default="hybrid", choices=["hybrid", "auto", "direct", "daemon"])
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_route)
 

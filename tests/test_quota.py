@@ -1,4 +1,6 @@
-"""Quota collectors use scratch transcripts and a fake openusage, never live data."""
+"""Quota collectors use scratch transcripts and hybrid fakes, never live data."""
+import importlib.machinery
+import importlib.util
 import io
 import json
 import os
@@ -18,19 +20,6 @@ sys.path.insert(0, str(SCRIPTS))
 import quota
 
 CLI = SCRIPTS / "delegate"
-FAKE = """import json, os, pathlib, sys, time
-with pathlib.Path(os.environ['FAKE_QUOTA_CALLS']).open('a') as stream:
-    stream.write(json.dumps({'args': sys.argv[1:], 'ts': time.time()}) + '\\n')
-print(os.environ.get('FAKE_QUOTA_STDERR', ''), file=sys.stderr, flush=True)
-time.sleep(float(os.environ.get('FAKE_QUOTA_SLEEP', '0')))
-mode = os.environ.get('FAKE_QUOTA_MODE')
-if mode == 'fail':
-    sys.exit(1)
-if mode == 'garbage':
-    print('not json')
-else:
-    print(pathlib.Path(os.environ['FAKE_QUOTA_EXPORT']).read_text())
-"""
 
 
 def nano_iso(dt):
@@ -67,7 +56,7 @@ class DispatchCheckTests(unittest.TestCase):
                 "codex-7d": {"left_pct": 50, "age_min": 0},
                 "cursor-auto": {"left_pct": 0, "age_min": None}}
 
-    def test_dispatch_reads_codex_once_and_never_openusage(self):
+    def test_dispatch_reads_codex_once_and_skips_full_fetch(self):
         with mock.patch.object(quota, "_codex_snapshot", return_value={}) as read, \
              mock.patch.object(quota, "fetch") as fetch, \
              mock.patch.object(quota, "pools", return_value=self.entries(age_min=999)):
@@ -112,43 +101,98 @@ class QuotaTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix="quota-test-")
         self.addCleanup(temp.cleanup)
         self.tmp = Path(temp.name)
-        self.bin = self.tmp / "bin"
-        self.bin.mkdir()
-        self.binary = self.bin / "openusage"
-        self.binary.write_text(f"#!{sys.executable}\n" + FAKE)
-        self.binary.chmod(0o755)
-        self.export = self.tmp / "export.json"
-        self.calls = self.tmp / "calls.jsonl"
         self.log = self.tmp / "readings/quota.jsonl"
         self.projects = self.tmp / "claude/projects"
         self.projects.mkdir(parents=True)
         self.now = datetime.now(timezone.utc).replace(microsecond=0)
         self.envelope = fixture(self.now)
-        self.write_export()
-        self.env = {"HOME": str(self.tmp), "PATH": str(self.bin),
+        self.calls = self.tmp / "calls.jsonl"
+        self.fetch_mode = None  # None | "fail" | "timeout"
+        self.fetch_sleep = 0.0
+        self.env = {"HOME": str(self.tmp),
                     "XDG_CACHE_HOME": str(self.tmp / "cache"),
                     "XDG_CONFIG_HOME": str(self.tmp / "config"),
                     "CLAUDE_CONFIG_DIR": str(self.projects.parent),
-                    "FAKE_QUOTA_EXPORT": str(self.export), "FAKE_QUOTA_CALLS": str(self.calls),
-                    "DELEGATE_CATALOG_LOCAL": ""}
+                    "DELEGATE_CATALOG_LOCAL": "",
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        env_patch = mock.patch.dict(os.environ, self.env, clear=True)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        hybrid = mock.patch.object(quota, "_hybrid_snapshot", side_effect=self._hybrid)
+        hybrid.start()
+        self.addCleanup(hybrid.stop)
 
-    def write_export(self):
-        self.export.write_text(json.dumps(self.envelope))
+    def _hybrid(self, timeout=90, log=None):
+        with self.calls.open("a") as stream:
+            stream.write(json.dumps({"timeout": timeout, "ts": time.time()}) + "\n")
+        if self.fetch_sleep:
+            time.sleep(self.fetch_sleep)
+        if self.fetch_mode == "fail":
+            raise subprocess.CalledProcessError(1, "quota reader")
+        if self.fetch_mode == "timeout":
+            raise subprocess.TimeoutExpired("quota reader", timeout)
+        if self.fetch_mode == "shape":
+            raise ValueError("bad shape")
+        return json.loads(json.dumps(self.envelope))
 
-    def cli(self, *args, code=0, env=None):
-        if "--source" not in args:
-            args = (*args, "--source", "direct" if "--snapshot" in args else "auto")
-        result = subprocess.run([sys.executable, str(CLI), "quota", *map(str, args)],
-                                env={**self.env, **(env or {})}, text=True, capture_output=True)
+    def collect(self, *args, code=0, fetch_mode=None, fetch_sleep=None):
+        """In-process snapshot via argparse-shaped kwargs (or stdout capture)."""
+        # Parse a minimal subset of the CLI flags used by these tests.
+        kwargs = {"log": self.log}
+        argv = list(args)
+        if_active = False
+        i = 0
+        while i < len(argv):
+            arg = argv[i]
+            if arg == "--if-active":
+                if_active = True
+                i += 1
+            elif arg == "--reason":
+                kwargs["reason"] = argv[i + 1]; i += 2
+            elif arg == "--session":
+                kwargs["session"] = argv[i + 1]; i += 2
+            elif arg == "--run":
+                kwargs["run"] = argv[i + 1]; i += 2
+            elif arg == "--job":
+                kwargs["job"] = argv[i + 1]; i += 2
+            elif arg == "--log":
+                kwargs["log"] = Path(argv[i + 1]); i += 2
+            else:
+                raise AssertionError(f"unexpected collect arg: {arg}")
+        kwargs["if_active"] = if_active
+        old_mode, old_sleep = self.fetch_mode, self.fetch_sleep
+        if fetch_mode is not None:
+            self.fetch_mode = fetch_mode
+        if fetch_sleep is not None:
+            self.fetch_sleep = fetch_sleep
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                status = quota.snapshot(**kwargs)
+        finally:
+            self.fetch_mode, self.fetch_sleep = old_mode, old_sleep
+        self.assertEqual(status, code, output.getvalue())
+        return output.getvalue()
+
+    def cli_subprocess(self, *args, code=0, env=None):
+        # Empty PATH: the script is absolute; a regression must not reach live agents.
+        empty = self.tmp / "empty-path"
+        empty.mkdir(exist_ok=True)
+        result = subprocess.run(
+            [sys.executable, str(CLI), "quota", *map(str, args)],
+            env={**os.environ, "PATH": str(empty), **(env or {})},
+            text=True, capture_output=True)
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stdout + result.stderr)
-        return result.stdout
-
-    def collect(self, *args, **kwargs):
-        return self.cli("--snapshot", "--log", self.log, *args, **kwargs)
+        return result
 
     def rows(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def call_count(self):
+        if not self.calls.exists():
+            return 0
+        return len(self.calls.read_text().splitlines())
 
     def good_row(self, ts, reset=None):
         return {"ts": ts.isoformat(), "pools": {
@@ -168,13 +212,13 @@ class QuotaTests(unittest.TestCase):
 
     def test_good_row_preserves_provider_times_pool_errors_and_stale_reset(self):
         self.envelope["snapshots"].pop()  # missing Cursor provider
-        self.write_export()
         output = self.collect("--reason", "session-start", "--session", "abc_123-x", "--run", "demo")
         row = self.rows()[0]
         self.assertEqual(json.loads(output), row)
         self.assertEqual(set(row), {"ts", "source", "reader", "reason", "session", "run", "pools"})
         self.assertEqual((row["source"], row["reason"], row["session"], row["run"]),
-                         ("direct", "session-start", "abc_123-x", "demo"))
+                         ("hybrid", "session-start", "abc_123-x", "demo"))
+        self.assertEqual(row["reader"], quota.HYBRID_READER)
         ts = quota.parse_ts(row["ts"])
         self.assertEqual(ts.microsecond, 0)
         self.assertEqual(ts.utcoffset(), timedelta(0))
@@ -190,12 +234,10 @@ class QuotaTests(unittest.TestCase):
         self.assertEqual(row["pools"]["codex-5h"]["used_pct"], 15.0)
         self.assertTrue(row["pools"]["codex-5h"]["stale"])
         self.assertTrue(row["pools"]["codex-5h"]["stale_reset"])
-        self.assertEqual(row["pools"]["cursor-auto"], {"error": "provider missing from openusage export"})
-        self.assertEqual(json.loads(self.calls.read_text())["args"][-2:], ["--source", "direct"])
+        self.assertEqual(row["pools"]["cursor-auto"], {"error": "provider missing from quota reading"})
 
     def test_missing_observed_at_is_stale(self):
         self.envelope["snapshots"][2].pop("timestamp")
-        self.write_export()
         self.collect("--reason", "manual")
         entry = self.rows()[0]["pools"]["cursor-premium"]
         self.assertIsNone(entry["observed_at"])
@@ -210,53 +252,52 @@ class QuotaTests(unittest.TestCase):
 
     def test_invalid_session_is_null_and_rows_append(self):
         self.collect("--reason", "manual", "--session", "../x")
-        self.collect("--reason", "backfill")
+        # Advance past reuse so the second row is a fresh write of the same shape.
+        with mock.patch.object(quota, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = self.now + timedelta(seconds=20)
+            self.collect("--reason", "backfill")
         self.assertEqual(len(self.rows()), 2)
         self.assertTrue(all(row["session"] is None and row["run"] is None for row in self.rows()))
 
     def test_snapshot_job_tag_is_written_when_valid(self):
         self.collect("--reason", "launch", "--job", "round-1", "--run", "demo")
         self.assertEqual(self.rows()[0]["job"], "round-1")
-        self.collect("--reason", "job-end", "--job", "review-2", "--run", "demo")
+        with mock.patch.object(quota, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = self.now + timedelta(seconds=20)
+            self.collect("--reason", "job-end", "--job", "review-2", "--run", "demo")
+            clock.now.return_value = self.now + timedelta(seconds=40)
+            self.collect("--reason", "launch", "--job", "not-a-job", "--run", "demo")
         self.assertEqual(self.rows()[1]["job"], "review-2")
-        self.collect("--reason", "launch", "--job", "not-a-job", "--run", "demo")
         self.assertNotIn("job", self.rows()[2])
 
-    def test_missing_openusage_writes_error(self):
-        self.binary.unlink()
-        output = self.collect("--reason", "launch", "--session", "s", "--run", "r", code=1)
+    def test_total_reader_failure_writes_error(self):
+        output = self.collect("--reason", "launch", "--session", "s", "--run", "r",
+                              code=1, fetch_mode="fail")
         row = self.rows()[0]
         self.assertEqual(json.loads(output), row)
-        self.assertEqual(row["error"], "openusage not found")
+        self.assertEqual(row["error"], "quota reader exited with status 1")
         self.assertEqual(set(row), {"ts", "source", "reader", "reason", "session", "run", "error"})
         self.assertEqual((row["session"], row["run"]), ("s", "r"))
 
-    def test_nonzero_openusage_writes_error_with_bounded_stderr_tail(self):
-        stderr = "discarded-prefix" + "x" * 400 + "tail"
-        self.collect("--reason", "manual", code=1,
-                     env={"FAKE_QUOTA_MODE": "fail", "FAKE_QUOTA_STDERR": stderr})
-        error = self.rows()[0]["error"]
-        self.assertEqual(error, "openusage exited with status 1: " + stderr[-300:])
-
-    def test_garbage_json_writes_error(self):
-        self.collect("--reason", "manual", code=1,
-                     env={"FAKE_QUOTA_MODE": "garbage", "FAKE_QUOTA_STDERR": "parse tail"})
-        self.assertEqual(self.rows()[0]["error"], "invalid openusage JSON/export: parse tail")
+    def test_fetch_error_never_includes_stderr(self):
+        exc = subprocess.CalledProcessError(1, "codex", stderr="secret-account-id\n")
+        self.assertEqual(quota._fetch_error(exc, "codex app-server"),
+                         "codex app-server exited with status 1")
+        self.assertEqual(quota._fetch_error(exc), "quota reader exited with status 1")
+        self.assertNotIn("secret", quota._fetch_error(exc))
 
     def test_timeout_writes_error(self):
         output = io.StringIO()
-        with mock.patch.dict(os.environ, {**self.env, "FAKE_QUOTA_SLEEP": "0.3",
-                                          "FAKE_QUOTA_STDERR": "timeout tail"}, clear=True), \
-                redirect_stdout(output):
-            code = quota.snapshot(reason="manual", log=self.log, source="direct", timeout=0.1)
+        self.fetch_mode = "timeout"
+        with redirect_stdout(output):
+            code = quota.snapshot(reason="manual", log=self.log, timeout=0.1)
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(output.getvalue()), self.rows()[0])
-        self.assertEqual(self.rows()[0]["error"], "openusage timed out: timeout tail")
+        self.assertEqual(self.rows()[0]["error"], "quota reader timed out")
 
     def test_invalid_export_shape_writes_error(self):
-        self.export.write_text("[]")
-        self.collect("--reason", "manual", code=1)
-        self.assertIn("invalid openusage JSON/export", self.rows()[0]["error"])
+        self.collect("--reason", "manual", code=1, fetch_mode="shape")
+        self.assertEqual(self.rows()[0]["error"], "invalid quota reader JSON/export")
 
     def test_gate_without_last_good_polls_even_without_projects(self):
         self.projects.rmdir()
@@ -291,8 +332,11 @@ class QuotaTests(unittest.TestCase):
         row = json.loads(self.log.read_text().splitlines()[-1])
         self.assertEqual(row["reason"], "timer")
         self.assertEqual(row["gate"]["last_good"], good.isoformat())
-        self.collect("--if-active")  # the newly appended good row now suppresses polling
-        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        before = self.log.read_bytes()
+        # A wrongly allowed poll would reuse and leave call_count at 1; require a skip.
+        self.assertTrue(self.collect("--if-active").startswith("skip: "))
+        self.assertEqual(self.log.read_bytes(), before)
+        self.assertEqual(self.call_count(), 1)
 
     def test_gate_reset_polls_without_transcript_activity(self):
         good = self.now - timedelta(seconds=60)
@@ -313,7 +357,7 @@ class QuotaTests(unittest.TestCase):
         before = self.log.read_bytes()
         self.assertTrue(self.collect("--if-active").startswith("skip: "))
         self.assertEqual(self.log.read_bytes(), before)
-        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        self.assertEqual(self.call_count(), 1)
 
     def test_gate_skip_writes_nothing_and_does_not_fetch(self):
         good = self.now - timedelta(seconds=10)
@@ -322,26 +366,25 @@ class QuotaTests(unittest.TestCase):
         before = self.log.read_bytes()
         self.assertTrue(self.collect("--if-active").startswith("skip: "))
         self.assertEqual(self.log.read_bytes(), before)
-        self.assertFalse(self.calls.exists())
+        self.assertEqual(self.call_count(), 0)
 
     def test_gate_interval_boundaries_and_reset_precedes_trailing(self):
         write = self.now - timedelta(seconds=600)
         good = self.now - timedelta(seconds=500)
         self.transcript(write)
-        with mock.patch.dict(os.environ, self.env, clear=True):
-            for reset, expected in ((good, "trailing"), (self.now, "reset"),
-                                    (self.now + timedelta(seconds=1), "trailing")):
-                with self.subTest(reset=reset):
-                    self.write_rows(self.good_row(good, reset))
-                    self.assertEqual(quota._activity_gate(self.log, self.now)[0], expected)
-            self.write_rows(self.good_row(self.now))  # trailing threshold equals the good ts
-            self.assertIsNone(quota._activity_gate(self.log, self.now)[0])
+        for reset, expected in ((good, "trailing"), (self.now, "reset"),
+                                (self.now + timedelta(seconds=1), "trailing")):
+            with self.subTest(reset=reset):
+                self.write_rows(self.good_row(good, reset))
+                self.assertEqual(quota._activity_gate(self.log, self.now)[0], expected)
+        self.write_rows(self.good_row(self.now))  # trailing threshold equals the good ts
+        self.assertIsNone(quota._activity_gate(self.log, self.now)[0])
 
     def test_gate_failed_fetch_keeps_activity_visible_for_next_attempt(self):
         good = self.now - timedelta(seconds=100)
         self.write_rows(self.good_row(good))
         self.transcript(self.now - timedelta(seconds=60))
-        self.collect("--if-active", code=1, env={"FAKE_QUOTA_MODE": "fail"})
+        self.collect("--if-active", code=1, fetch_mode="fail")
         self.assertEqual(self.rows()[-1]["gate"]["last_good"], good.isoformat())
         self.collect("--if-active")
         self.assertEqual(self.rows()[-1]["gate"]["last_good"], good.isoformat())
@@ -349,57 +392,77 @@ class QuotaTests(unittest.TestCase):
 
     def test_simultaneous_collectors_fetch_exactly_once(self):
         self.transcript(self.now - timedelta(seconds=30))
-        # Explicit direct: this class's PATH only has the openusage fixture.
-        cmd = [sys.executable, str(CLI), "quota", "--snapshot", "--if-active",
-               "--source", "direct", "--log", str(self.log)]
-        env = {**self.env, "FAKE_QUOTA_SLEEP": "0.3"}
-        children = [subprocess.Popen(cmd, env=env, text=True, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE) for _ in range(2)]
-        outputs = []
-        for child in children:
-            stdout, stderr = child.communicate(timeout=5)
-            self.assertEqual(child.returncode, 0, stdout + stderr)
-            outputs.append(stdout)
+        self.fetch_sleep = 0.3
+        results = []
+
+        def one():
+            # Call record directly: redirect_stdout is not thread-safe.
+            row, skip = quota.record(if_active=True, log=self.log)
+            results.append((row, skip))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(lambda _: one(), range(2)))
         self.assertEqual(len(self.rows()), 1)
         self.assertNotIn("error", self.rows()[0])
-        self.assertEqual(sum(output.startswith("skip: ") for output in outputs), 1)
-        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        self.assertEqual(sum(skip is not None for _, skip in results), 1)
+        self.assertEqual(self.call_count(), 1)
 
     def test_log_precedence_and_xdg_and_home_fallbacks(self):
         env_path = self.tmp / "env/quota.jsonl"
-        self.collect("--reason", "manual", env={"CLAUDE_DELEGATE_QUOTA_LOG": str(env_path)})
-        self.assertTrue(self.log.exists())
-        self.assertFalse(env_path.exists())
-        self.cli("--snapshot", "--reason", "manual", env={"CLAUDE_DELEGATE_QUOTA_LOG": str(env_path)})
-        self.assertTrue(env_path.exists())
-        self.cli("--snapshot", "--reason", "manual")
-        self.assertTrue((self.tmp / "cache/claude-delegate/quota.jsonl").exists())
-        self.cli("--snapshot", "--reason", "manual", env={"XDG_CACHE_HOME": ""})
-        self.assertTrue((self.tmp / ".cache/claude-delegate/quota.jsonl").exists())
+        with mock.patch.dict(os.environ, {"CLAUDE_DELEGATE_QUOTA_LOG": str(env_path)}):
+            self.collect("--reason", "manual")
+            self.assertTrue(self.log.exists())
+            self.assertFalse(env_path.exists())
+            quota.snapshot(reason="manual")
+            self.assertTrue(env_path.exists())
+        with mock.patch.dict(os.environ, {"CLAUDE_DELEGATE_QUOTA_LOG": ""}):
+            # Fresh clock so reuse does not skip the XDG/home writes.
+            with mock.patch.object(quota, "datetime", wraps=datetime) as clock:
+                clock.now.return_value = self.now + timedelta(seconds=20)
+                quota.snapshot(reason="manual")
+                self.assertTrue((self.tmp / "cache/claude-delegate/quota.jsonl").exists())
+                clock.now.return_value = self.now + timedelta(seconds=40)
+                with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": ""}):
+                    quota.snapshot(reason="manual")
+                self.assertTrue((self.tmp / ".cache/claude-delegate/quota.jsonl").exists())
 
     def test_reason_required_and_internal_reasons_cannot_be_supplied(self):
-        self.collect(code=2)
+        self.cli_subprocess("--snapshot", "--log", self.log, code=2)
         for reason in ("reset", "trailing"):
-            self.collect("--reason", reason, code=2)
+            self.cli_subprocess("--snapshot", "--reason", reason, "--log", self.log, code=2)
         self.assertFalse(self.log.exists())
-        self.assertFalse(self.calls.exists())
+        self.assertEqual(self.call_count(), 0)
 
-    def test_legacy_json_and_text_outputs_and_explicit_sources_are_unchanged(self):
+    def test_source_flag_is_rejected(self):
+        result = self.cli_subprocess("--source", "direct", "--json", code=2)
+        self.assertIn("unrecognized arguments", result.stderr)
+        result = self.cli_subprocess("--snapshot", "--reason", "manual", "--source", "direct",
+                                     "--log", self.log, code=2)
+        self.assertIn("unrecognized arguments", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_json_and_text_outputs(self):
         # No pace clock dependency: percentages, provider metadata and age remain comparable.
         for snap in self.envelope["snapshots"]:
             snap["resets"] = {}
             snap["metrics"].pop("billing_cycle_progress", None)
-        self.write_export()
         expected = quota.pools(self.envelope, now=self.now)
         text = quota.render(expected, now=self.now)
         # age_min is stable for these fixtures; seconds are well away from its rounding boundary.
-        self.assertEqual(json.loads(self.cli("--json")), expected)
-        self.assertEqual(self.cli().rstrip(), text.rstrip())
-        self.assertTrue(all(json.loads(line)["args"][-1] == "auto"
-                            for line in self.calls.read_text().splitlines()))
-        self.collect("--reason", "manual", "--source", "daemon")
-        self.assertEqual(self.rows()[0]["source"], "daemon")
-        self.assertEqual(json.loads(self.calls.read_text().splitlines()[-1])["args"][-1], "daemon")
+        loader = importlib.machinery.SourceFileLoader("quota_delegate_cli", str(CLI))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        cli = importlib.util.module_from_spec(spec)
+        loader.exec_module(cli)
+
+        def run_cli(*args):
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", [str(CLI), "quota", *args]), \
+                    redirect_stdout(out):
+                cli.main()
+            return out.getvalue()
+
+        self.assertEqual(json.loads(run_cli("--json")), expected)
+        self.assertEqual(run_cli().rstrip(), text.rstrip())
 
     def test_cycle_window_clamps_short_months(self):
         reset = datetime(2026, 3, 31, tzinfo=timezone.utc)
@@ -545,6 +608,7 @@ class QuotaTests(unittest.TestCase):
         line = quota.format_spare_line(quota.spare_pools(self.log, now=now), now=now)
         self.assertIn("Codex 5h unknown", line)
 
+
 class _ClaudeFakeRestorer:
     def __init__(self, tests, previous):
         self.tests, self.previous = tests, previous
@@ -557,6 +621,23 @@ class _ClaudeFakeRestorer:
         path.write_text(json.dumps(self.previous))
 
 
+def _pty_available():
+    import pty
+    try:
+        master, slave = pty.openpty()
+    except OSError:
+        return False
+    for fd in (master, slave):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return True
+
+
+PTY_OK = _pty_available()
+
+
 class HybridTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="hybrid-quota-")
@@ -567,9 +648,7 @@ class HybridTests(unittest.TestCase):
         self.home = self.tmp / "home"
         self.home.mkdir()
         self.cache = self.tmp / "cache"
-        self.hidden = self.cache / "claude-delegate/openusage-home"
         self.log = self.tmp / "quota.jsonl"
-        self.calls = self.tmp / "openusage.calls"
         self.codex_calls = self.tmp / "codex.calls"
         self.claude_calls = self.tmp / "claude.calls"
         self.cursor_env_log = self.tmp / "cursor-env.jsonl"
@@ -578,28 +657,45 @@ class HybridTests(unittest.TestCase):
         self.claude_config.mkdir()
         self.catalog_local = self.tmp / "catalog.local.json"
         self.catalog_local.write_text(json.dumps({"cursor_usage_reader": True}))
-        self.env_log = self.tmp / "environ.jsonl"
         fakes = Path(__file__).parent / "fake_agents"
-        for name in ("codex", "openusage", "claude", "cursor-agent"):
+        for name in ("codex", "claude", "cursor-agent"):
             path = self.bin / name
             path.write_text(f"#!{sys.executable}\n" + (fakes / name).read_text().split("\n", 1)[1])
             path.chmod(0o755)
         self.now = datetime.now(timezone.utc).replace(microsecond=0)
-        self.export = self.tmp / "export.json"
-        self.export.write_text(json.dumps(fixture(self.now)))
         self.env = {"HOME": str(self.home), "PATH": str(self.bin),
                     "XDG_CACHE_HOME": str(self.cache), "XDG_CONFIG_HOME": str(self.tmp / "config"),
                     "XDG_DATA_HOME": "hidden-data", "XDG_ANYTHING": "hidden-anything",
                     "CODEX_HOME": "hidden-codex", "DELEGATE_CATALOG_LOCAL": str(self.catalog_local),
                     "CLAUDE_CONFIG_DIR": str(self.claude_config),
-                    "FAKE_OPENUSAGE_FILE": str(self.export), "FAKE_OPENUSAGE_LOG": str(self.calls),
-                    "FAKE_OPENUSAGE_ENV": str(self.env_log), "FAKE_CODEX_LOG": str(self.codex_calls),
+                    "FAKE_CODEX_LOG": str(self.codex_calls),
                     "FAKE_CURSOR_TUI": "normal", "FAKE_CURSOR_TUI_ENV": str(self.cursor_env_log),
                     "FAKE_CURSOR_TUI_LOG": str(self.cursor_tui_log)}
         patcher = mock.patch.dict(os.environ, self.env, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.set_claude_fake(mode="ok", log=str(self.claude_calls))
+        # CursorUsageTests skip without /dev/ptmx; HybridTests still need a cursor reading
+        # so reuse/partial-failure coverage stays meaningful in pty-less sandboxes.
+        if not PTY_OK:
+            cursor = mock.patch.object(quota, "_cursor_call", side_effect=self._stub_cursor_call)
+            cursor.start()
+            self.addCleanup(cursor.stop)
+
+    def _stub_cursor_call(self, timeout, workspace):
+        path = os.environ.get("FAKE_CURSOR_TUI_ENV")
+        if path:
+            with Path(path).open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"argv": ["--mode", "ask"], "cwd": str(workspace)}) + "\n")
+        mode = os.environ.get("FAKE_CURSOR_TUI", "normal")
+        if mode == "no_meters":
+            raise quota._ReaderError("cursor /usage: no meters on screen")
+        now = datetime.now(timezone.utc)
+        return {"provider_id": "cursor", "timestamp": now.isoformat(), "status": "ok",
+                "whole_percent": True,
+                "metrics": {"plan_auto_percent_used": {"used": 22},
+                            "plan_api_percent_used": {"used": 34}},
+                "resets": {"billing_cycle_end": (now + timedelta(days=10)).isoformat()}}
 
     def clear_cursor_state(self):
         path = quota._cursor_state_path(self.log)
@@ -611,6 +707,16 @@ class HybridTests(unittest.TestCase):
         if not self.cursor_env_log.exists():
             return 0
         return len(self.cursor_env_log.read_text().splitlines())
+
+    def snap_row(self, **kwargs):
+        """In-process snapshot so HybridTests cursor stubs apply (subprocess cannot)."""
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = quota.snapshot(log=self.log, **kwargs)
+        text = output.getvalue()
+        if text.startswith("skip: "):
+            return code, None, text
+        return code, json.loads(text), text
 
     def set_claude_fake(self, **kwargs):
         path = self.claude_config / "fake-claude.json"
@@ -830,7 +936,6 @@ class HybridTests(unittest.TestCase):
         self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
         self.assertEqual(self.claude_call_count(), 2)
         self.assertEqual(self.cursor_call_count(), 1)  # second hybrid row carries Cursor
-        self.assertFalse(self.calls.exists())
 
     def test_failed_cursor_does_not_discard_codex_or_claude(self):
         with mock.patch.dict(os.environ, {"FAKE_CURSOR_TUI": "no_meters"}):
@@ -838,100 +943,47 @@ class HybridTests(unittest.TestCase):
         self.assertEqual(row["pools"]["codex-5h"]["used_pct"], 20)
         self.assertEqual(row["pools"]["claude-5h"]["used_pct"], 12.3457)
         self.assertIn("cursor /usage", row["pools"]["cursor-auto"]["error"])
-        self.assertFalse(self.calls.exists())
 
-    def test_hidden_home_links_drop_claude_and_keep_cursor(self):
-        # _openusage_env remains for plain openusage paths; hybrid no longer calls it.
-        (self.home / ".codex").mkdir()
-        for name in (".claude", ".cursor", ".config/Cursor"):
-            (self.home / name).mkdir(parents=True)
-        (self.home / ".claude.json").write_text("{}")
-        self.hidden.mkdir(parents=True)
-        (self.hidden / ".config").mkdir(exist_ok=True)
-        (self.hidden / ".claude").symlink_to(self.home / ".claude")
-        (self.hidden / ".claude.json").symlink_to(self.home / ".claude.json")
-        env = quota._openusage_env()
-        self.assertEqual(env["HOME"], str(self.hidden))
-        self.assertEqual(self.hidden.stat().st_mode & 0o777, 0o700)
-        self.assertFalse((self.hidden / ".codex").exists())
-        self.assertFalse((self.hidden / ".claude").exists())
-        self.assertFalse((self.hidden / ".claude.json").exists())
-        for name in (".cursor", ".config/Cursor"):
-            self.assertEqual((self.hidden / name).readlink(), self.home / name)
-        (self.hidden / ".cursor").unlink()
-        (self.hidden / ".cursor").symlink_to(self.tmp / "wrong")
-        (self.hidden / ".claude.json").write_text("regular file")
-        (self.hidden / ".claude").symlink_to(self.home / ".claude")
-        env = quota._openusage_env()
-        self.assertEqual(env["HOME"], str(self.hidden))
-        self.assertEqual((self.hidden / ".cursor").readlink(), self.home / ".cursor")
-        self.assertFalse((self.hidden / ".claude").exists())
-        self.assertTrue((self.hidden / ".claude.json").is_file())
-        self.assertFalse((self.hidden / ".claude.json").is_symlink())
 
-    def test_missing_targets_and_concurrent_first_use(self):
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            envs = list(executor.map(lambda _: quota._openusage_env(), range(16)))
-        self.assertTrue(all(env["HOME"] == str(self.hidden) for env in envs))
-        self.assertFalse((self.hidden / ".claude").exists())
-        (self.home / ".claude").mkdir()
-        (self.hidden / ".claude").symlink_to(self.home / ".claude")
-        quota._openusage_env()
-        self.assertFalse((self.hidden / ".claude").exists())
-        (self.home / ".cursor").mkdir()
-        quota._openusage_env()
-        self.assertEqual((self.hidden / ".cursor").readlink(), self.home / ".cursor")
 
-    def test_explicit_sources_use_real_home_and_always_poll(self):
-        for source in ("auto", "direct", "daemon"):
-            quota.fetch(source)
-            row, _ = quota.record(log=self.log, source=source)
-            self.assertEqual(row["reader"], f"openusage-{source}")
-            self.assertNotIn("reused_from", row)
-        self.assertFalse(self.codex_calls.exists())
-        for env in map(json.loads, self.env_log.read_text().splitlines()):
-            self.assertEqual(env["HOME"], str(self.home))
-            self.assertEqual(env["XDG_CACHE_HOME"], str(self.cache))
-            self.assertEqual(env["CODEX_HOME"], "hidden-codex")
-        self.assertEqual(self.calls.read_text().splitlines(), [s for s in ("auto", "direct", "daemon") for _ in range(2)])
 
-    def test_cli_defaults_and_source_choices(self):
-        for args in (("--json",), ("--snapshot", "--reason", "manual", "--log", str(self.log))):
-            result = subprocess.run([sys.executable, str(CLI), "quota", *args],
-                                    capture_output=True, text=True, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertNotIn("secret", result.stdout)
+    def test_cli_defaults_reject_source(self):
+        default_log = self.cache / "claude-delegate/quota.jsonl"
+        entries = quota.pools(quota.fetch(log=default_log))
+        self.assertNotIn("secret", json.dumps(entries))
+        code, row, raw = self.snap_row(reason="manual")
+        self.assertEqual(code, 0)
+        self.assertNotIn("secret", raw)
         self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
-        self.assertFalse(self.calls.exists())
         self.assertEqual(self.cursor_call_count(), 2)
-        # --json uses the default log folder; --snapshot --log uses self.log — two state files.
+        # fetch on the default log folder; snapshot on self.log — two Claude state files.
         self.assertEqual(self.claude_call_count(), 2)
-        self.assertEqual(self.rows()[0]["source"], "hybrid")
-        self.assertEqual(self.rows()[0]["reader"], quota.HYBRID_READER)
-        result = subprocess.run([sys.executable, str(CLI), "quota", "--source", "auto", "--json"],
+        self.assertEqual(row["source"], "hybrid")
+        self.assertEqual(row["reader"], quota.HYBRID_READER)
+        result = subprocess.run([sys.executable, str(CLI), "quota", "--source", "direct"],
                                 capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(self.env_log.read_text().splitlines()[-1])["HOME"], str(self.home))
-        self.assertEqual(self.calls.read_text().splitlines()[-1], "auto")
-        self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
-        self.assertEqual(self.claude_call_count(), 2)
-        self.assertEqual(self.cursor_call_count(), 2)
-        # Exercise route's parser and selected source without any ratings/network lookup.
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unrecognized arguments", result.stderr)
+        # Exercise route's parser without any ratings/network lookup.
         import runpy
         delegate = runpy.run_path(str(CLI))
-        for source in (None, "hybrid", "auto", "direct", "daemon"):
-            argv = [str(CLI), "route", "implement", "--json"]
-            if source:
-                argv.extend(["--source", source])
-            with mock.patch.object(sys, "argv", argv), \
-                 mock.patch("quota.fetch", return_value={}) as fetch, \
-                 mock.patch("ratings.load", return_value={"models": {}}), \
-                 mock.patch("monitor.load_cost_groups", return_value={}), redirect_stdout(io.StringIO()):
-                delegate["main"]()
-            fetch.assert_called_once_with(source or "hybrid")
+        with mock.patch.object(sys, "argv", [str(CLI), "route", "implement", "--json"]), \
+             mock.patch("quota.fetch", return_value={}) as fetch, \
+             mock.patch("ratings.load", return_value={"models": {}}), \
+             mock.patch("monitor.load_cost_groups", return_value={}), redirect_stdout(io.StringIO()):
+            delegate["main"]()
+        fetch.assert_called_once_with()
+        with mock.patch.object(sys, "argv",
+                               [str(CLI), "route", "implement", "--source", "direct", "--json"]), \
+             mock.patch("quota.fetch", return_value={}), \
+             mock.patch("ratings.load", return_value={"models": {}}), \
+             mock.patch("monitor.load_cost_groups", return_value={}), \
+             redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exit_info:
+            delegate["main"]()
+        self.assertEqual(exit_info.exception.code, 2)
 
     def test_reuse_boundaries_chain_and_observed_times(self):
-        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+        with mock.patch.object(quota, "_hybrid_snapshot", return_value=fixture(self.now)) as read:
             first = self.record_at(0, reason="session-end", session="A")
             second = self.record_at(10, reason="session-start", session="B")
             self.assertEqual(second["reused_from"], first["ts"])
@@ -942,21 +994,21 @@ class HybridTests(unittest.TestCase):
             self.record_at(20, reason="manual")
             self.assertEqual(read.call_count, 2)  # 0/10/20 does not extend the reading's age
         self.log.unlink()
-        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+        with mock.patch.object(quota, "_hybrid_snapshot", return_value=fixture(self.now)) as read:
             self.record_at(0)
             row = self.record_at(16)
             self.assertNotIn("reused_from", row)
             self.assertEqual(read.call_count, 2)
 
     def test_reuse_age_is_not_rounded_down_with_the_row_timestamp(self):
-        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+        with mock.patch.object(quota, "_hybrid_snapshot", return_value=fixture(self.now)) as read:
             self.record_at(0)
             row = self.record_at(15.1)
         self.assertNotIn("reused_from", row)
         self.assertEqual(read.call_count, 2)
 
     def test_reuse_keeps_its_own_gate(self):
-        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+        with mock.patch.object(quota, "_hybrid_snapshot", return_value=fixture(self.now)) as read:
             first = self.record_at(0, reason="manual")
             gate = {"last_good": first["ts"], "last_write": "new-write"}
             with mock.patch.object(quota, "_activity_gate", return_value=("timer", gate, None)):
@@ -974,20 +1026,16 @@ class HybridTests(unittest.TestCase):
                            {"pools": {"claude-5h": {"used_pct": 1}}}):
             with self.subTest(alteration=alteration):
                 self.log.write_text(json.dumps({**base, **alteration}) + "\n")
-                with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+                with mock.patch.object(quota, "_hybrid_snapshot", return_value=fixture(self.now)) as read:
                     self.record_at(0)
-                read.assert_called_once()
-        self.log.write_text(json.dumps(base) + "\n")
-        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
-            self.record_at(1, source="direct")
-        read.assert_called_once_with("direct", 90, log=self.log)
+                read.assert_called_once_with(90, log=self.log)
 
     def test_end_pairs_poll_even_through_reuse(self):
         for end, key in (("job-end", "run"), ("session-end", "session")):
             for through_reuse in (False, True):
                 with self.subTest(end=end, through_reuse=through_reuse):
                     self.log.unlink(missing_ok=True)
-                    with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+                    with mock.patch.object(quota, "_hybrid_snapshot", return_value=fixture(self.now)) as read:
                         self.record_at(0, reason="manual", **{key: "A"})
                         if through_reuse:
                             shared = self.record_at(1, reason="launch" if key == "run" else "session-start", **{key: "B"})
@@ -998,7 +1046,7 @@ class HybridTests(unittest.TestCase):
                     self.assertEqual(row[key], "B" if through_reuse else "A")
 
     def test_tail_only_and_metadata_preserved(self):
-        with mock.patch.object(quota, "_fetch_snapshot", return_value=fixture(self.now)) as read:
+        with mock.patch.object(quota, "_hybrid_snapshot", return_value=fixture(self.now)) as read:
             first = self.record_at(0, reason="manual", session="A", run="a", job="round-1")
             self.log.write_text("x" * (quota.REUSE_TAIL_BYTES * 2) + "\n" + self.log.read_text())
             second = self.record_at(1, reason="launch", session="B", run="b", job="review-2")
@@ -1007,17 +1055,19 @@ class HybridTests(unittest.TestCase):
                          ("launch", "B", "b", "review-2"))
         self.assertEqual(second["pools"], first["pools"])
 
+    @unittest.skipUnless(PTY_OK, "no /dev/ptmx in this environment")
     def test_concurrent_collectors_each_write_but_poll_once(self):
-        command = [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual", "--log", str(self.log)]
+        command = [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
+                   "--log", str(self.log)]
         with mock.patch.dict(os.environ, {"FAKE_CODEX_SLEEP": "0.2"}):
-            children = [subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            children = [subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE)
                         for _ in range(4)]
             for child in children:
                 stdout, stderr = child.communicate(timeout=30)
                 self.assertEqual(child.returncode, 0, stdout + stderr)
         self.assertEqual(len(self.rows()), 4)
         self.assertEqual(sum("reused_from" in row for row in self.rows()), 3)
-        self.assertFalse(self.calls.exists())
         self.assertEqual(self.cursor_call_count(), 1)
         self.assertEqual(self.codex_calls.read_text().splitlines(), ["read"])
         self.assertEqual(self.claude_call_count(), 1)
@@ -1304,12 +1354,8 @@ class HybridTests(unittest.TestCase):
                     "failures": 0,
                     "last_good": {"timestamp": self.now.isoformat(),
                                   "metrics": metrics, "resets": {}}}))
-                result = subprocess.run(
-                    [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
-                     "--log", str(self.log)],
-                    capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                row = json.loads(result.stdout)
+                code, row, _ = self.snap_row(reason="manual")
+                self.assertEqual(code, 0)
                 self.assertNotIn("error", row)
                 self.assertIn("used_pct", row["pools"]["codex-5h"])
                 self.assertIn("used_pct", row["pools"]["cursor-auto"])
@@ -1317,6 +1363,7 @@ class HybridTests(unittest.TestCase):
                 # or a fresh call succeeds once the floor allows — either way others survive.
                 self.assertTrue("error" in row["pools"]["claude-5h"]
                                 or "used_pct" in row["pools"]["claude-5h"])
+
 
     def test_date_only_stamps_keep_codex_and_cursor(self):
         good = {"timestamp": self.now.isoformat(),
@@ -1331,12 +1378,8 @@ class HybridTests(unittest.TestCase):
                 quota._claude_state_path(self.log).write_text(json.dumps({
                     "last_attempt_at": (self.now - timedelta(seconds=10)).isoformat(),
                     "failures": 0, "last_good": {**good, **patch}}))
-                result = subprocess.run(
-                    [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
-                     "--log", str(self.log)],
-                    capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                row = json.loads(result.stdout)
+                code, row, _ = self.snap_row(reason="manual")
+                self.assertEqual(code, 0)
                 self.assertNotIn("error", row)
                 self.assertIn("used_pct", row["pools"]["codex-5h"])
                 self.assertIn("used_pct", row["pools"]["cursor-auto"])
@@ -1344,30 +1387,24 @@ class HybridTests(unittest.TestCase):
         self.log.unlink(missing_ok=True)
         self.claude_calls.unlink(missing_ok=True)
         with self.claude_fake(mode="ok", session_reset="2026-11-07"):
-            result = subprocess.run(
-                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
-                 "--log", str(self.log)],
-                capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        row = json.loads(result.stdout)
+            code, row, _ = self.snap_row(reason="manual")
+        self.assertEqual(code, 0)
         self.assertNotIn("error", row)
         self.assertIn("used_pct", row["pools"]["claude-7d"])
         self.assertIn("used_pct", row["pools"]["codex-5h"])
         self.assertIn("used_pct", row["pools"]["cursor-auto"])
-        # Date-only Cursor reset (openusage-shaped fixture): pool numbers stay, no TypeError.
+        # Date-only Cursor reset: pool numbers stay, no TypeError.
         self.clear_claude_state()
+        self.clear_cursor_state()
         self.log.unlink(missing_ok=True)
-        envelope = fixture(self.now)
-        for snap in envelope["snapshots"]:
-            if snap["provider_id"] == "cursor":
-                snap["resets"] = {"billing_cycle_end": "2026-11-07"}
-        self.export.write_text(json.dumps(envelope))
-        result = subprocess.run(
-            [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
-             "--log", str(self.log)],
-            capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        row = json.loads(result.stdout)
+        with mock.patch.object(quota, "_cursor_call", side_effect=lambda *a, **k: {
+                "provider_id": "cursor", "timestamp": self.now.isoformat(), "status": "ok",
+                "whole_percent": True,
+                "metrics": {"plan_auto_percent_used": {"used": 22},
+                            "plan_api_percent_used": {"used": 34}},
+                "resets": {"billing_cycle_end": "2026-11-07"}}):
+            code, row, _ = self.snap_row(reason="manual")
+        self.assertEqual(code, 0)
         self.assertNotIn("error", row)
         self.assertIn("used_pct", row["pools"]["cursor-auto"])
         self.assertIn("used_pct", row["pools"]["codex-5h"])
@@ -1376,6 +1413,7 @@ class HybridTests(unittest.TestCase):
         no_zone = quota.parse_ts("2026-11-07T03:00:00")
         self.assertIsNotNone(no_zone)
         self.assertEqual(no_zone.utcoffset(), timedelta(0))
+
 
     def test_lock_as_directory_still_uses_state(self):
         good = {"timestamp": self.now.isoformat(),
@@ -1439,12 +1477,8 @@ class HybridTests(unittest.TestCase):
         self.clear_claude_state()
         self.claude_calls.unlink(missing_ok=True)
         with self.claude_fake(mode="bad-reset"):
-            result = subprocess.run(
-                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
-                 "--log", str(self.log)],
-                capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        row = json.loads(result.stdout)
+            code, row, _ = self.snap_row(reason="manual")
+        self.assertEqual(code, 0)
         self.assertNotIn("error", row)
         self.assertIn("error", row["pools"]["claude-5h"])
         self.assertIn("used_pct", row["pools"]["claude-7d"])
@@ -1460,15 +1494,12 @@ class HybridTests(unittest.TestCase):
             "last_attempt_at": (self.now - timedelta(seconds=10)).isoformat(),
             "failures": 0, "last_good": good}))
         self.log.unlink(missing_ok=True)
-        result = subprocess.run(
-            [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
-             "--log", str(self.log)],
-            capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        row = json.loads(result.stdout)
+        code, row, _ = self.snap_row(reason="manual")
+        self.assertEqual(code, 0)
         self.assertNotIn("error", row)
         self.assertIn("used_pct", row["pools"]["codex-5h"])
         self.assertIn("used_pct", row["pools"]["cursor-auto"])
+
 
     def test_interrupted_read_leaves_attempt_and_throttles(self):
         self.clear_claude_state()
@@ -1505,24 +1536,16 @@ class HybridTests(unittest.TestCase):
         self.clear_cursor_state()
         with self.claude_fake(mode="fail"), mock.patch.dict(os.environ, {
                 "FAKE_CODEX_MODE": "rpc-error", "FAKE_CURSOR_TUI": "no_meters"}):
-            result = subprocess.run(
-                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
-                 "--log", str(self.log)],
-                capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        row = json.loads(result.stdout)
+            code, row, _ = self.snap_row(reason="manual")
+        self.assertEqual(code, 1)
         self.assertIn("error", row)
         # Usable Cursor keeps exit 0 even when Codex and Claude fail.
         self.clear_claude_state()
         self.clear_cursor_state()
         self.log.unlink(missing_ok=True)
         with self.claude_fake(mode="fail"), mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": "rpc-error"}):
-            result = subprocess.run(
-                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
-                 "--log", str(self.log)],
-                capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        row = json.loads(result.stdout)
+            code, row, _ = self.snap_row(reason="manual")
+        self.assertEqual(code, 0)
         self.assertNotIn("error", row)
         self.assertIn("used_pct", row["pools"]["cursor-auto"])
         # A carried Claude reading is usable.
@@ -1536,15 +1559,12 @@ class HybridTests(unittest.TestCase):
         quota._claude_state_path(self.log).write_text(json.dumps({
             "last_attempt_at": self.now.isoformat(), "failures": 0, "last_good": good}))
         with mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": "rpc-error"}):
-            result = subprocess.run(
-                [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
-                 "--log", str(self.log)],
-                capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        row = json.loads(result.stdout)
+            code, row, _ = self.snap_row(reason="manual")
+        self.assertEqual(code, 0)
         self.assertNotIn("error", row)
         self.assertEqual(row["pools"]["claude-5h"].get("carried"), "throttle")
         self.assertIn("used_pct", row["pools"]["cursor-auto"])
+
 
     def test_quota_change_needs_two_observations(self):
         import report

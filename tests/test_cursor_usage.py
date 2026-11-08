@@ -59,23 +59,13 @@ class CursorUsageTests(unittest.TestCase):
         self.catalog_local.write_text(json.dumps({"cursor_usage_reader": True}))
         self.claude_calls = self.tmp / "claude.calls"
         self.codex_calls = self.tmp / "codex.calls"
-        self.openusage_calls = self.tmp / "openusage.calls"
-        for name in ("cursor-agent", "codex", "claude", "openusage"):
+        for name in ("cursor-agent", "codex", "claude"):
             path = self.bin / name
             path.write_text(f"#!{sys.executable}\n" + (FAKES / name).read_text().split("\n", 1)[1])
             path.chmod(0o755)
         (self.claude_config / "fake-claude.json").write_text(json.dumps({
             "mode": "ok", "log": str(self.claude_calls)}))
-        self.export = self.tmp / "export.json"
         self.now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
-        self.export.write_text(json.dumps({
-            "snapshots": [{
-                "provider_id": "cursor", "timestamp": self.now.isoformat(), "status": "ok",
-                "metrics": {"plan_auto_percent_used": {"used": 99},
-                            "plan_api_percent_used": {"used": 99},
-                            "billing_cycle_progress": {"used": 50}},
-                "resets": {"billing_cycle_end": "2026-11-18T01:53:54+00:00"},
-            }]}))
         self.env = {
             "HOME": str(self.home),
             "PATH": str(self.bin),
@@ -87,8 +77,6 @@ class CursorUsageTests(unittest.TestCase):
             "FAKE_CURSOR_TUI_LOG": str(self.tui_log),
             "FAKE_CURSOR_TUI_ENV": str(self.env_log),
             "FAKE_CODEX_LOG": str(self.codex_calls),
-            "FAKE_OPENUSAGE_FILE": str(self.export),
-            "FAKE_OPENUSAGE_LOG": str(self.openusage_calls),
             "LANG": "en_US.UTF-8",
             "LC_ALL": "en_US.UTF-8",
         }
@@ -576,7 +564,7 @@ class CursorUsageTests(unittest.TestCase):
         # Reaching the reader's state path would also allow its lock and cache.
         with mock.patch.object(quota, "_cursor_state_path",
                                side_effect=AssertionError("off reader touched Cursor state")):
-            envelope = quota.fetch(source="hybrid", timeout=5, log=self.log)
+            envelope = quota.fetch(timeout=5, log=self.log)
             entries = quota.pools(envelope)
             row, _ = quota.record(log=self.log, timeout=5)
         for result in (entries, row["pools"]):
@@ -607,7 +595,7 @@ class CursorUsageTests(unittest.TestCase):
 
     @requires_pty
     def test_hybrid_cursor_reader_opt_in_calls_agent(self):
-        envelope = quota.fetch(source="hybrid", timeout=5, log=self.log)
+        envelope = quota.fetch(timeout=5, log=self.log)
         entries = quota.pools(envelope)
         self.clear_cursor_state()  # Both entry points must launch the fake on opt-in.
         row, _ = quota.record(log=self.log, timeout=5)
@@ -644,19 +632,14 @@ class CursorUsageTests(unittest.TestCase):
             self.assert_hybrid_cursor_off()
 
     @requires_pty
-    def test_hybrid_no_openusage_and_reader_string(self):
+    def test_hybrid_reader_string(self):
         self.clear_cursor_state()
-        envelope = quota.fetch(source="hybrid", log=self.log)
-        self.assertFalse(self.openusage_calls.exists())
+        envelope = quota.fetch(log=self.log)
         self.assertTrue(any(s.get("provider_id") == "cursor" for s in envelope["snapshots"]))
         row, _ = quota.record(log=self.log)
         self.assertEqual(row["reader"], "codex-app-server+claude-usage+cursor-usage")
         self.assertEqual(quota.HYBRID_READER, row["reader"])
         self.assertTrue(row["pools"]["cursor-auto"].get("whole_percent"))
-        self.assertFalse(self.openusage_calls.exists())
-        # Explicit openusage sources still work.
-        quota.fetch(source="direct")
-        self.assertEqual(self.openusage_calls.read_text().splitlines(), ["direct"])
 
     def test_strip_ansi_turns_escapes_into_spaces(self):
         raw = b"A\x1b[1mB\x1b[22mC"

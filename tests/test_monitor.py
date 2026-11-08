@@ -487,29 +487,6 @@ class CliPlumbingTests(unittest.TestCase):
     def test_snapshot_job_writes_job(self):
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        export = self.tmp / "export.json"
-        now = datetime.now(UTC).replace(microsecond=0)
-        export.write_text(json.dumps({"snapshots": [
-            {"provider_id": "claude_code", "timestamp": now.isoformat(), "status": "ok",
-             "metrics": {"usage_five_hour": {"limit": 100, "remaining": 90},
-                         "usage_seven_day": {"limit": 100, "used": 10}},
-             "resets": {"usage_five_hour": (now + timedelta(hours=3)).isoformat(),
-                        "usage_seven_day": (now + timedelta(days=2)).isoformat()}},
-            {"provider_id": "codex", "timestamp": now.isoformat(), "status": "ok",
-             "metrics": {"rate_limit_primary": {"limit": 100, "remaining": 90},
-                         "rate_limit_secondary": {"used": 10}},
-             "resets": {"rate_limit_primary": (now + timedelta(hours=3)).isoformat(),
-                        "rate_limit_secondary": (now + timedelta(days=2)).isoformat()}},
-            {"provider_id": "cursor", "timestamp": now.isoformat(), "status": "ok",
-             "metrics": {"plan_auto_percent_used": {"used": 1},
-                         "plan_api_percent_used": {"used": 2},
-                         "billing_cycle_progress": {"used": 10}},
-             "resets": {"billing_cycle_end": (now + timedelta(days=10)).isoformat()}},
-        ]}))
-        fake = bin_dir / "openusage"
-        fake.write_text(f"#!{sys.executable}\nimport pathlib,sys\n"
-                        f"print(pathlib.Path({str(export)!r}).read_text())\n")
-        fake.chmod(0o755)
         fakes = Path(__file__).parent / "fake_agents"
         for name in ("codex", "claude", "cursor-agent"):
             path = bin_dir / name

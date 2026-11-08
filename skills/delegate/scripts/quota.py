@@ -122,7 +122,7 @@ def check_dispatch(catalog_path=None):
 def parse_ts(s):
     if not s:
         return None
-    # openusage emits nanoseconds; fromisoformat accepts at most microseconds
+    # Older quota.jsonl rows carry nanoseconds; fromisoformat accepts at most microseconds
     m = re.fullmatch(r"([^.]+?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?", s.strip())
     if not m:
         return None
@@ -140,14 +140,8 @@ def parse_ts(s):
     return parsed
 
 
-def fetch(source="hybrid", timeout=90, log=None):
-    if source == "hybrid":
-        return _hybrid_snapshot(timeout, log=log)
-    out = subprocess.run(
-        ["openusage", "export", "--output", "-", "--format", "json", "--source", source],
-        capture_output=True, text=True, timeout=timeout, check=True,
-    ).stdout
-    return json.loads(out)
+def fetch(timeout=90, log=None):
+    return _hybrid_snapshot(timeout, log=log)
 
 
 def pools(envelope, now=None):
@@ -161,7 +155,7 @@ def pools(envelope, now=None):
         result[pid] = entry
         if not snap:
             entry["error"] = (envelope.get("_reader_errors") or {}).get(
-                spec["provider"], "provider missing from openusage export")
+                spec["provider"], "provider missing from quota reading")
             continue
         m = (snap.get("metrics") or {}).get(spec["metric"])
         if not m:
@@ -315,7 +309,7 @@ class _ReaderError(ValueError):
     """An authored, safe error: never constructed from a Codex reply or stderr."""
 
 
-def _fetch_error(exc, reader="openusage"):
+def _fetch_error(exc, reader="quota reader"):
     if isinstance(exc, _ReaderError):
         return " ".join(str(exc).split())[:600]
     if isinstance(exc, FileNotFoundError):
@@ -328,14 +322,9 @@ def _fetch_error(exc, reader="openusage"):
         cause = f"invalid {reader} JSON/export"
     else:
         cause = f"{reader} failed"
-        if reader == "openusage":
-            cause += ": " + " ".join(str(exc).split())[:200]
     # Codex can include account/credit ids anywhere, including RPC errors and stderr.
-    stderr = (getattr(exc, "stderr", None) or "") if reader == "openusage" else ""
-    if isinstance(stderr, bytes):
-        stderr = stderr.decode("utf-8", errors="replace")
-    tail = " ".join(stderr.strip()[-300:].split())
-    return cause + (": " + tail if tail else "")
+    # Never attach a child's stderr: that was only ever safe for openusage.
+    return cause
 
 
 def _codex_snapshot(timeout=15):
@@ -449,39 +438,6 @@ def _codex_snapshot(timeout=15):
 
 def _cache_path():
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache").expanduser()
-
-
-def _openusage_env():
-    # Resolve cache and targets against the real environment before hiding HOME/XDG.
-    # Hybrid reads Claude via /usage, so never expose the Claude OAuth token here.
-    home = _cache_path() / "claude-delegate/openusage-home"
-    real = Path.home()
-    home.mkdir(mode=0o700, parents=True, exist_ok=True)
-    home.chmod(0o700)
-    (home / ".config").mkdir(mode=0o700, exist_ok=True)
-    for name in (".claude", ".claude.json"):
-        link = home / name
-        # Drop only leftover symlinks from older installs; never a real file.
-        if link.is_symlink():
-            link.unlink(missing_ok=True)
-    for name in (".cursor", ".config/Cursor"):
-        target, link = real / name, home / name
-        if not target.exists():
-            if link.is_symlink():
-                link.unlink(missing_ok=True)
-            continue
-        if link.is_symlink() and os.readlink(link) == str(target):
-            continue
-        temporary = link.with_name(link.name + "." + uuid.uuid4().hex)
-        try:
-            temporary.symlink_to(target)
-            os.replace(temporary, link)
-        finally:
-            temporary.unlink(missing_ok=True)
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith("XDG_") and key != "CODEX_HOME"}
-    env["HOME"] = str(home)
-    return env
 
 
 def _claude_state_path(log=None):
@@ -1354,21 +1310,6 @@ def _hybrid_snapshot(timeout, log=None):
     return envelope
 
 
-def _fetch_snapshot(source, timeout, log=None):
-    if source == "hybrid":
-        return _hybrid_snapshot(timeout, log=log)
-    # Keep fetch()'s legacy behavior, but retain stderr on a JSON decoding error.
-    output = subprocess.run(
-        ["openusage", "export", "--output", "-", "--format", "json", "--source", source],
-        capture_output=True, text=True, timeout=timeout, check=True,
-    )
-    try:
-        return json.loads(output.stdout)
-    except ValueError as exc:
-        exc.stderr = output.stderr
-        raise
-
-
 def log_path(log=None):
     cache = _cache_path()
     return Path(log or os.environ.get("CLAUDE_DELEGATE_QUOTA_LOG")
@@ -1436,7 +1377,7 @@ def _reuse_reading(path, row, now):
 
 
 def record(reason=None, session=None, run=None, if_active=False, log=None,
-           source="hybrid", timeout=90, job=None):
+           timeout=90, job=None):
     """Append one durable quota reading; return (row, None), or (None, why) when gated off."""
     path = log_path(log)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1449,8 +1390,8 @@ def record(reason=None, session=None, run=None, if_active=False, log=None,
                 return None, skip
         now = datetime.now(timezone.utc)
         ts = now.replace(microsecond=0)
-        row = {"ts": ts.isoformat(), "source": source,
-               "reader": HYBRID_READER if source == "hybrid" else f"openusage-{source}",
+        row = {"ts": ts.isoformat(), "source": "hybrid",
+               "reader": HYBRID_READER,
                "reason": reason,
                "session": session if isinstance(session, str)
                and re.fullmatch(r"[A-Za-z0-9_-]+", session) else None, "run": run}
@@ -1458,14 +1399,14 @@ def record(reason=None, session=None, run=None, if_active=False, log=None,
             row["job"] = job
         if gate is not None:
             row["gate"] = gate
-        reusable = _reuse_reading(path, row, now) if source == "hybrid" else None
+        reusable = _reuse_reading(path, row, now)
         try:
             if reusable:
                 previous, origin = reusable
                 row.update(pools=_reuse_pools(previous["pools"], ts),
                            reader=previous["reader"], reused_from=origin)
             else:
-                row["pools"] = _snapshot_pools(_fetch_snapshot(source, timeout, log=log), ts)
+                row["pools"] = _snapshot_pools(_hybrid_snapshot(timeout, log=log), ts)
         except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
             row["error"] = _fetch_error(exc)
         line = json.dumps(row)
@@ -1482,9 +1423,9 @@ def record(reason=None, session=None, run=None, if_active=False, log=None,
 
 
 def snapshot(reason=None, session=None, run=None, if_active=False, log=None,
-             source="hybrid", timeout=90, job=None):
+             timeout=90, job=None):
     """`delegate quota --snapshot`: record a reading, print it; exit status 1 on a fetch error."""
-    row, skip = record(reason, session, run, if_active, log, source, timeout, job=job)
+    row, skip = record(reason, session, run, if_active, log, timeout, job=job)
     if skip:
         print("skip: " + skip)
         return 0

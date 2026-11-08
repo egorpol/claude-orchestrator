@@ -77,11 +77,6 @@ check_prereqs() {
     miss "python3 >= 3.9 (the delegate CLI is stdlib-only Python)"
   fi
   command -v git >/dev/null && ok "git" || miss "git"
-  if command -v openusage >/dev/null; then
-    ok "openusage $(openusage version 2>/dev/null | head -1)"
-  else
-    miss "openusage: needed by 'delegate quota/route'. See https://github.com/janekbaraniewski/openusage"
-  fi
   if command -v claude >/dev/null; then
     ok "claude $(claude --version 2>/dev/null | head -1)"
   else
@@ -204,15 +199,10 @@ check_timer() {
 }
 
 install_timer() {
-  local python provider_bin unit_path agent_bin rate_path
+  local python unit_path agent_bin rate_path
   python="$(python3 -c 'import os, sys; print(os.path.abspath(sys.executable))')"
   unit_path="/usr/local/bin:/usr/bin:/bin"
-  if provider_bin="$(command -v openusage)"; then
-    unit_path="$(cd "$(dirname "$provider_bin")" && pwd -P):$unit_path"
-  else
-    warn "openusage not found; quota timer needs it installed on its PATH"
-  fi
-  rate_path="$unit_path"
+  rate_path="/usr/local/bin:/usr/bin:/bin"
   if agent_bin="$(command -v codex)"; then
     agent_bin="$(cd "$(dirname "$agent_bin")" && pwd -P)"
     case ":$unit_path:" in
@@ -233,12 +223,16 @@ install_timer() {
   fi
   if agent_bin="$(command -v cursor-agent)"; then
     agent_bin="$(cd "$(dirname "$agent_bin")" && pwd -P)"
+    case ":$unit_path:" in
+      *":$agent_bin:"*) ;;
+      *) unit_path="$agent_bin:$unit_path" ;;
+    esac
     case ":$rate_path:" in
       *":$agent_bin:"*) ;;
       *) rate_path="$agent_bin:$rate_path" ;;
     esac
   else
-    warn "cursor-agent not found; rate timer needs it installed on its PATH"
+    warn "cursor-agent not found; quota and rate timers need it installed on their PATH"
   fi
   mkdir -p "$UNIT_DIR"
   # Quote and escape systemd arguments, including paths containing spaces or %.
