@@ -1,13 +1,17 @@
-"""Remaining quota per delegation pool, read from Codex, Claude /usage and openusage."""
+"""Remaining quota per delegation pool, read from Codex, Claude /usage and Cursor /usage."""
 import fcntl
 import json
 import math
 import os
+import pty
 import re
+import select
 import selectors
 import signal
+import struct
 import subprocess
 import sys
+import termios
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -57,7 +61,22 @@ CLAUDE_ENV_ALLOW = frozenset({
     "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy",
     "ALL_PROXY", "all_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE",
 })
-HYBRID_READER = "codex-app-server+claude-usage+openusage-direct"
+# Cursor interactive /usage: at least 30 minutes between attempts (success or failure).
+CURSOR_MIN_INTERVAL_S = 1800
+_ANSI_RE = re.compile(
+    rb'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>]')
+_CURSOR_MONTHS = {name: index for index, name in enumerate(
+    ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1)}
+# The TUI redraws by erasing lines (ESC[2K ESC[1A ... ESC[G) and rewriting them, so a
+# row from a superseded frame stays in the byte stream after the screen dropped it.
+_TERM_SEQ_RE = re.compile(
+    r"\x1b\[([0-9;?<>=]*)[ -/]*([@-~])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[()][0-9A-Za-z]|\x1b[@-Z\\-_=>]")
+_CURSOR_INPUT_RE = re.compile(r"\s*→\s+/usage\s*")
+_CURSOR_ROW_RE = re.compile(r"\s*→\s+/usage\s+Show plan and on-demand usage\s*")
+_CURSOR_PROMPT_RE = re.compile(r"build\s*anything")
+HYBRID_READER = "codex-app-server+claude-usage+cursor-usage"
 
 
 def check_dispatch(catalog_path=None):
@@ -170,6 +189,11 @@ def pools(envelope, now=None):
             prog = (snap.get("metrics") or {}).get("billing_cycle_progress")
             if prog and prog.get("used") is not None:
                 tlf = max(0.0, 1 - prog["used"] / (prog.get("limit") or 100))
+            elif reset:
+                start = cycle_window_start(reset)
+                window = (reset - start).total_seconds()
+                if window > 0:
+                    tlf = max(0.0, min(1.0, (reset - now).total_seconds() / window))
         elif reset and spec.get("window_h"):
             tlf = max(0.0, min(1.0, (reset - now).total_seconds() / 3600 / spec["window_h"]))
         if reset and reset < now:
@@ -277,6 +301,8 @@ def _snapshot_pools(envelope, ts):
         result[pid] = {"used_pct": round(float(100 - entry["left_pct"]), 4),
                        "resets_at": entry["resets_at"], "observed_at": observed,
                        "stale": observed_ts is None or (ts - observed_ts).total_seconds() > 120}
+        if snaps[provider].get("whole_percent"):
+            result[pid]["whole_percent"] = True
         if entry.get("stale_reset"):
             result[pid]["stale_reset"] = True
         reason = carried.get(provider)
@@ -806,6 +832,465 @@ def _claude_snapshot(timeout=20, log=None):
                 pass
 
 
+def _strip_ansi(data: bytes) -> str:
+    """Replace each ANSI escape sequence with one space."""
+    return _ANSI_RE.sub(b" ", data).decode("utf-8", errors="replace")
+
+
+def _screen_lines(data: bytes) -> list:
+    """Replay the TUI's line redraws (erase, cursor up/down, column) into screen lines.
+
+    Absolute moves, screen clears and scrolls start a fresh screen, so an unknown
+    redraw style hides old rows instead of keeping them.
+    """
+    text = data.decode("utf-8", errors="replace")
+    lines, row, col = [""], 0, 0
+
+    def put(chars):
+        nonlocal col
+        line = lines[row]
+        if len(line) < col:
+            line += " " * (col - len(line))
+        lines[row] = line[:col] + chars + line[col + len(chars):]
+        col += len(chars)
+
+    def plain(chunk):
+        nonlocal row, col
+        run = []
+        for ch in chunk:
+            if ch >= " " and ch != "\x7f":
+                run.append(ch)
+                continue
+            if run:
+                put("".join(run))
+                run = []
+            if ch == "\r":
+                col = 0
+            elif ch == "\n":
+                row += 1
+                while len(lines) <= row:
+                    lines.append("")
+        if run:
+            put("".join(run))
+
+    pos = 0
+    for match in _TERM_SEQ_RE.finditer(text):
+        plain(text[pos:match.start()])
+        pos = match.end()
+        final, params = match.group(2), match.group(1) or ""
+        if final is None or params[:1] in ("?", ">", "<", "="):
+            continue
+        try:
+            count = int(params.split(";")[0] or 0)
+        except ValueError:
+            count = 0
+        step = max(count, 1)
+        if final == "A":
+            row = max(0, row - step)
+        elif final == "B":
+            row += step
+            while len(lines) <= row:
+                lines.append("")
+        elif final == "C":
+            col += step
+        elif final == "D":
+            col = max(0, col - step)
+        elif final == "G":
+            col = step - 1
+        elif final == "K":
+            if count == 2:
+                lines[row] = ""
+            elif count == 1:  # erase to the left, through the cursor cell
+                lines[row] = " " * (col + 1) + lines[row][col + 1:]
+            else:
+                lines[row] = lines[row][:col]
+        elif final == "J" and count == 0:
+            lines[row] = lines[row][:col]
+            del lines[row + 1:]
+        elif final in "EFHJSTf":
+            lines, row, col = [""], 0, 0
+    plain(text[pos:])
+    return lines
+
+
+def _cursor_usage_selected(data: bytes) -> bool:
+    """True when the current screen shows "/usage" typed, its menu row selected, no prompt."""
+    lines = [line.rstrip() for line in _screen_lines(data)]
+    return (any(_CURSOR_INPUT_RE.fullmatch(line) for line in lines)
+            and any(_CURSOR_ROW_RE.fullmatch(line) for line in lines)
+            and not any(_CURSOR_PROMPT_RE.search(line) for line in lines))
+
+
+def _cursor_reset(text: str, now: datetime) -> datetime:
+    """Map a screen date ('18 Nov' or 'Nov 18') to 00:00:00 UTC within the window."""
+    if not isinstance(text, str):
+        raise _ReaderError("cursor /usage unavailable")
+    raw = text.strip()
+    match = re.fullmatch(r"(\d{1,2})\s+([A-Za-z]{3})", raw)
+    if match:
+        day, month_name = int(match.group(1)), match.group(2)
+    else:
+        match = re.fullmatch(r"([A-Za-z]{3})\s+(\d{1,2})", raw)
+        if not match:
+            raise _ReaderError("cursor /usage unavailable")
+        month_name, day = match.group(1), int(match.group(2))
+    month = _CURSOR_MONTHS.get(month_name)
+    if month is None:
+        raise _ReaderError("cursor /usage unavailable")
+    # Floor at midnight of (now - 3 days) so a lagging "30 Dec" on 2 Jan 10:00 still fits.
+    lo = (now - timedelta(days=3)).replace(hour=0, minute=0, second=0, microsecond=0)
+    hi = now + timedelta(days=35)
+    candidates = []
+    for year in (now.year - 1, now.year, now.year + 1):
+        try:
+            stamp = datetime(year, month, day, tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if lo <= stamp <= hi:
+            candidates.append(stamp)
+    if not candidates:
+        raise _ReaderError("cursor /usage unavailable")
+    return candidates[0]
+
+
+def _parse_cursor_screen(text: str, now: datetime) -> dict:
+    """Build a cursor snapshot from stripped /usage screen text after Enter."""
+    if not isinstance(text, str):
+        raise _ReaderError("cursor /usage unavailable")
+    auto = re.search(r"Auto\s+(\d+)%\s+used", text)
+    api = re.search(r"API\s+(\d+)%\s+used", text)
+    resets = re.search(r"Resets\s+(\d{1,2}\s+[A-Za-z]{3}|[A-Za-z]{3}\s+\d{1,2})", text)
+    if not auto or not api or not resets:
+        raise _ReaderError("cursor /usage unavailable")
+    try:
+        auto_used = int(auto.group(1))
+        api_used = int(api.group(1))
+    except (TypeError, ValueError):
+        raise _ReaderError("cursor /usage unavailable") from None
+    if not (0 <= auto_used <= 100 and 0 <= api_used <= 100):
+        raise _ReaderError("cursor /usage unavailable")
+    reset = _cursor_reset(resets.group(1), now)
+    return {
+        "provider_id": "cursor",
+        "timestamp": now.isoformat(),
+        "status": "ok",
+        "whole_percent": True,
+        "metrics": {
+            "plan_auto_percent_used": {
+                "limit": 100, "used": auto_used, "remaining": 100 - auto_used},
+            "plan_api_percent_used": {
+                "limit": 100, "used": api_used, "remaining": 100 - api_used},
+        },
+        "resets": {"billing_cycle_end": reset.isoformat()},
+    }
+
+
+def _cursor_state_path(log=None):
+    return log_path(log).parent / "cursor-usage.json"
+
+
+def _cursor_workspace():
+    path = _cache_path() / "claude-delegate/cursor-usage-ws"
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+def _cursor_last_good_ok(good):
+    """Normalize a persisted Cursor last_good, or None when corrupt / unusable."""
+    if not isinstance(good, dict):
+        return None
+    stamp = good.get("timestamp")
+    if not isinstance(stamp, str) or _safe_ts(stamp) is None:
+        return None
+    metrics = good.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    clean_metrics = {}
+    for key in ("plan_auto_percent_used", "plan_api_percent_used"):
+        gauge = metrics.get(key)
+        if gauge is None:
+            continue
+        if not _claude_gauge_ok(gauge):
+            return None
+        clean_metrics[key] = {
+            "limit": gauge.get("limit", 100),
+            "used": gauge.get("used"),
+            "remaining": gauge.get("remaining"),
+        }
+    if "plan_auto_percent_used" not in clean_metrics or "plan_api_percent_used" not in clean_metrics:
+        return None
+    resets = good.get("resets")
+    if not isinstance(resets, dict):
+        return None
+    end = resets.get("billing_cycle_end")
+    if not _claude_resets_at_ok(end) or end is None:
+        return None
+    return {"timestamp": stamp, "metrics": clean_metrics,
+            "resets": {"billing_cycle_end": end}}
+
+
+def _cursor_carry_from_state(state, reason):
+    good = _cursor_last_good_ok(state.get("last_good"))
+    if good is None:
+        return None
+    return ({"provider_id": "cursor", "timestamp": good["timestamp"], "status": "ok",
+             "whole_percent": True, "metrics": good["metrics"], "resets": good["resets"]},
+            reason)
+
+
+def _cursor_call(timeout, workspace):
+    """One bounded pty read of cursor-agent's interactive /usage screen."""
+    # Import inside the function: hooks load quota via spec_from_file_location
+    # without the scripts dir on sys.path (same pattern as check_dispatch).
+    scripts = Path(__file__).resolve().parent
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import ask as ask_mod  # noqa: E402
+
+    deadline = time.monotonic() + min(30, timeout)
+    env = ask_mod.clean_env()
+    env["TERM"] = "xterm-256color"
+    env["LANG"] = "en_GB.UTF-8"
+    env["LC_ALL"] = "en_GB.UTF-8"
+    ws = str(workspace)
+    master, slave = pty.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 130, 0, 0))
+        os.set_blocking(master, False)
+        proc = subprocess.Popen(
+            ["cursor-agent", "--mode", "ask", "--trust", "--workspace", ws],
+            stdin=slave, stdout=slave, stderr=slave,
+            cwd=ws, env=env, start_new_session=True, close_fds=True)
+    except Exception:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        try:
+            os.close(slave)
+        except OSError:
+            pass
+        raise
+    try:
+        try:
+            os.close(slave)
+        except OSError:
+            pass
+        slave = -1
+        collected = b""
+        step_mark = 0
+        closed = False  # the child is gone: no wait can succeed, so don't spin to the deadline
+
+        def remaining():
+            return deadline - time.monotonic()
+
+        def read_more(limit_s=None):
+            nonlocal collected, closed
+            end = time.monotonic() + (remaining() if limit_s is None else min(limit_s, remaining()))
+            while time.monotonic() < end:
+                wait = min(0.05, end - time.monotonic())
+                if wait <= 0:
+                    break
+                try:
+                    ready, _, _ = select.select([master], [], [], wait)
+                except (OSError, ValueError):
+                    break
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(master, 65536)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    closed = True
+                    return
+                if not chunk:
+                    closed = True
+                    return
+                collected += chunk
+                if len(collected) > 1024 * 1024:
+                    raise _ReaderError("cursor /usage reply too large")
+
+        def text_since(mark):
+            return _strip_ansi(collected[mark:])
+
+        def wait_until(check):
+            while remaining() > 0:
+                if check():
+                    return
+                if closed:
+                    break
+                read_more(min(0.05, remaining()))
+            raise _ReaderError("cursor /usage unavailable")
+
+        def wait_for(pattern):
+            nonlocal step_mark
+            step_mark = len(collected)
+            compiled = re.compile(pattern)
+            wait_until(lambda: compiled.search(text_since(step_mark)))
+
+        def write_bytes(data):
+            view = memoryview(data)
+            while view:
+                if remaining() <= 0:
+                    raise subprocess.TimeoutExpired("cursor /usage", timeout)
+                try:
+                    count = os.write(master, view)
+                    view = view[count:]
+                except BlockingIOError:
+                    read_more(0.05)
+                except OSError as exc:
+                    raise _ReaderError("cursor /usage unavailable") from exc
+
+        # 1. Wait for the ready banner; type nothing before it appears.
+        wait_for(r"build\s*anything")
+        # 2. Type /usage one character at a time, 50 ms apart.
+        for index, char in enumerate("/usage"):
+            write_bytes(char.encode())
+            if index + 1 < len("/usage"):
+                pause_until = time.monotonic() + 0.05
+                while time.monotonic() < pause_until and remaining() > 0:
+                    read_more(min(0.05, pause_until - time.monotonic(), remaining()))
+        # 3. Judge the current screen, never accumulated text: "/usage" typed, its row
+        #    selected, no restored prompt, and still so after a 100 ms settle, since a
+        #    later frame can clear the menu.
+        def usage_selected():
+            return _cursor_usage_selected(collected)
+
+        while True:
+            wait_until(usage_selected)
+            read_more(min(0.1, remaining()))
+            if usage_selected():
+                break
+        # 4. Enter only once that row is selected.
+        write_bytes(b"\r")
+        # 5. Wait for the panel, then allow meters a short grace period.
+        wait_for(r"Esc to close")
+        if not (re.search(r"Auto\s+\d+%\s+used", text_since(step_mark))
+                and re.search(r"API\s+\d+%\s+used", text_since(step_mark))
+                and re.search(r"Resets\s+", text_since(step_mark))):
+            read_more(min(2.0, remaining()))
+        return _parse_cursor_screen(text_since(step_mark), datetime.now(timezone.utc))
+    finally:
+        try:
+            os.write(master, b"\x1b")
+        except OSError:
+            pass
+        for _ in range(3):
+            try:
+                os.write(master, b"\x03")
+            except OSError:
+                break
+            time.sleep(0.02)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            proc.wait(timeout=min(0.5, max(0.05, deadline - time.monotonic() + 0.5)))
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        if slave >= 0:
+            try:
+                os.close(slave)
+            except OSError:
+                pass
+
+
+def _cursor_snapshot(timeout=30, log=None):
+    """Return (snapshot|None, carried_reason|None, error|None) under a private lock."""
+    state_path = _cursor_state_path(log)
+    lock_path = Path(str(state_path) + ".lock")
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    lock = None
+    try:
+        try:
+            lock = lock_path.open("a")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError:
+            if lock is not None:
+                try:
+                    lock.close()
+                except OSError:
+                    pass
+            lock = None
+            # No lock, no cadence guarantee: carry instead of launching the TUI.
+            carried = _cursor_carry_from_state(_load_claude_state(state_path), "failed")
+            if carried:
+                return (*carried, None)
+            return None, None, "cursor /usage unavailable"
+
+        state = _load_claude_state(state_path)
+        now = datetime.now(timezone.utc)
+        last_attempt = _safe_ts(state.get("last_attempt_at"))
+        failures = state.get("failures")
+        if not isinstance(failures, int) or failures < 0:
+            failures = 0
+        last_good = _cursor_last_good_ok(state.get("last_good"))
+        # A stamp in the future (clock change) counts as no throttle.
+        if last_attempt is not None and last_attempt <= now:
+            skip_reason = "backoff" if failures > 0 else "throttle"
+            if (now - last_attempt).total_seconds() < CURSOR_MIN_INTERVAL_S:
+                if last_good is not None:
+                    return ({"provider_id": "cursor", "timestamp": last_good["timestamp"],
+                             "status": "ok", "whole_percent": True,
+                             "metrics": last_good["metrics"],
+                             "resets": last_good["resets"]}, skip_reason, None)
+                return (None, None, "cursor /usage unavailable")
+
+        attempt = {"last_attempt_at": now.isoformat(), "failures": failures,
+                   "last_good": last_good}
+        try:
+            # Mark the attempt before the call so a kill mid-read still throttles.
+            _save_claude_state(state_path, attempt)
+        except OSError:
+            # An unsaved stamp would let the next call read again at once.
+            carried = _cursor_carry_from_state(attempt, "failed")
+            if carried:
+                return (*carried, None)
+            return None, None, "cursor /usage unavailable"
+        try:
+            snap = _cursor_call(timeout, _cursor_workspace())
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError,
+                KeyError, OverflowError) as exc:
+            error = _fetch_error(exc, "cursor /usage")
+            attempt["failures"] = failures + 1
+            try:
+                _save_claude_state(state_path, attempt)
+            except OSError:
+                pass
+            carried = _cursor_carry_from_state(attempt, "failed")
+            if carried:
+                return (*carried, None)
+            return None, None, error
+        good = _cursor_last_good_ok({"timestamp": snap["timestamp"],
+                                     "metrics": snap["metrics"], "resets": snap["resets"]})
+        try:
+            _save_claude_state(state_path, {
+                "last_attempt_at": attempt["last_attempt_at"], "failures": 0,
+                "last_good": good})
+        except OSError:
+            pass
+        return snap, None, None
+    finally:
+        if lock is not None:
+            try:
+                lock.close()
+            except OSError:
+                pass
+
+
 def _hybrid_snapshot(timeout, log=None):
     snapshots, errors, carried = [], {}, {}
     try:
@@ -825,21 +1310,17 @@ def _hybrid_snapshot(timeout, log=None):
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
         errors["claude_code"] = _fetch_error(exc, "claude /usage")
     try:
-        output = subprocess.run(
-            ["openusage", "export", "--output", "-", "--format", "json", "--source", "direct"],
-            env=_openusage_env(), capture_output=True, text=True, timeout=timeout, check=True)
-        try:
-            envelope = json.loads(output.stdout)
-            # Drop Codex (owned by app-server) and any Claude openusage still returns.
-            other = [snap for snap in envelope["snapshots"]
-                     if snap.get("provider_id") not in ("codex", "claude_code")]
-            pools({"snapshots": other})
-        except (ValueError, TypeError, AttributeError, KeyError) as exc:
-            exc.stderr = output.stderr
-            raise
-        snapshots.extend(other)
+        snap, reason, error = _cursor_snapshot(timeout=min(30, timeout), log=log)
+        if snap is not None:
+            snapshots.append(snap)
+            if reason:
+                carried["cursor"] = reason
+        elif error:
+            errors["cursor"] = error
+        else:
+            errors["cursor"] = "cursor /usage unavailable"
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
-        errors["cursor"] = _fetch_error(exc)
+        errors["cursor"] = _fetch_error(exc, "cursor /usage")
     envelope = {"snapshots": snapshots, "_reader_errors": errors, "_carried": carried}
     # A provider present with empty metrics is not a usable reading.
     entries = pools(envelope)
@@ -1025,8 +1506,18 @@ def cycle_window_start(reset):
 
 def _entry_pace(pid, entry, reading_ts):
     """Pace at reading_ts from a quota.jsonl pool entry; None if unknown."""
-    if not isinstance(entry, dict) or "used_pct" not in entry or entry.get("stale"):
+    if not isinstance(entry, dict) or "used_pct" not in entry:
         return None
+    if entry.get("stale"):
+        # Cursor's 30-minute cadence marks nearly every row stale; keep throttle
+        # carries on the spare line, but not failed/backoff carries.
+        if entry.get("carried") != "throttle":
+            return None
+        observed_ts = _safe_ts(entry.get("observed_at"))
+        if observed_ts is None:
+            return None
+        if (reading_ts - observed_ts).total_seconds() > CURSOR_MIN_INTERVAL_S + 300:
+            return None
     try:
         used = float(entry["used_pct"])
     except (TypeError, ValueError):

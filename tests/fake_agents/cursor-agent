@@ -1,12 +1,206 @@
 #!/usr/bin/env python3
-"""Quota-free Cursor fixture with realistic assistant/tool/result stream-json."""
+"""Quota-free Cursor fixture: stream-json (-p) or interactive /usage TUI (no -p)."""
 import json
 import os
-from pathlib import Path
+import select
+import signal
 import sys
+import time
+from pathlib import Path
 
 
 args = sys.argv[1:]
+
+# Interactive TUI branch for hybrid Cursor /usage reads (never -p).
+if "-p" not in args:
+    # Frames like the real TUI's (feedback/cursor-usage-capture-*.bin): each redraw
+    # erases the previous frame's lines (ESC[2K ESC[1A ... ESC[2K ESC[G), then rewrites.
+    PLACEHOLDER = (b' \x1b[48;5;233m \x1b[2m\xe2\x86\x92 \x1b[22m\x1b[7mP\x1b[27m'
+                   b'\x1b[2mlan, search, build anything\x1b[22m')
+    # The model name in the status line is a bare "Auto" (must not match gauges).
+    STATUS = b'  Ask (shift+tab to cycle)  Auto  /ws'
+    INPUT = b'  \xe2\x86\x92 '
+    ROW_USAGE_SELECTED = (b'   \xe2\x86\x92 \x1b[1m/usage\x1b[22m                    '
+                          b'\x1b[1mShow plan and on-demand usage\x1b[22m')
+    ROW_USAGE = (b'     \x1b[1m/usage\x1b[22m                    '
+                 b'\x1b[1mShow plan and on-demand usage\x1b[22m')
+    ROW_UPDATE_SELECTED = (b'   \xe2\x86\x92 \x1b[1m/update\x1b[22m                   '
+                           b'\x1b[1mCheck for updates\x1b[22m')
+    ROW_CONTEXT = b'     /context                  Show context usage breakdown'
+    LOADING = b'\r\n\r\n  \x1b[36mLoading usage data...\x1b[39m\r\n\x1b[2K\x1b[1A\x1b[2K'
+    RESETS = b'  Usage  \xe2\x80\xa2  Pro                         \x1b[2mResets 18 Nov\x1b[22m\r\n'
+    TABLE = (
+        b'Monthly plan and on-demand usage\r\n'
+        b'Category  Current  Usage\r\n'
+        b'Included        55% used      \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\r\n'
+        b'Auto            55% used      \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\r\n'
+        b'API             46% used      \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\r\n'
+        b'On-Demand  Disabled  \xe2\x80\x94\xe2\x80\x94\xe2\x80\x94\r\n'
+        b'On-demand usage is off\r\n'
+        b'View in dashboard:  cursor.com/dashboard?tab=usage\r\n'
+        b'Esc to close\r\n'
+    )
+    TABLE_NO_AUTO = (
+        b'Monthly plan and on-demand usage\r\n'
+        b'Category  Current  Usage\r\n'
+        b'Included        55% used\r\n'
+        b'API             46% used\r\n'
+        b'Esc to close\r\n'
+    )
+
+    case = os.environ.get("FAKE_CURSOR_TUI", "normal")
+    log_path = os.environ.get("FAKE_CURSOR_TUI_LOG")
+    env_log = os.environ.get("FAKE_CURSOR_TUI_ENV")
+    if env_log:
+        with Path(env_log).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({
+                "argv": args,
+                "cwd": os.getcwd(),
+                "LANG": os.environ.get("LANG"),
+                "LC_ALL": os.environ.get("LC_ALL"),
+                "TERM": os.environ.get("TERM"),
+            }) + "\n")
+
+    # The real TUI runs raw; in canonical mode typed keys wait for a newline.
+    import tty
+    tty.setraw(sys.stdin.fileno())
+
+    def log_bytes(data):
+        if not log_path or not data:
+            return
+        with Path(log_path).open("ab") as stream:
+            stream.write(data)
+
+    def emit(data):
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+
+    def read_available(timeout=0.05):
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not ready:
+            return b""
+        try:
+            chunk = os.read(sys.stdin.fileno(), 4096)
+        except OSError:
+            return b""
+        log_bytes(chunk)
+        return chunk
+
+    frame_height = [0]
+
+    def frame(*lines):
+        erase = b""
+        if frame_height[0]:
+            erase = b"\x1b[2K\x1b[1A" * (frame_height[0] - 1) + b"\x1b[2K\x1b[G"
+        frame_height[0] = len(lines) + 1
+        return erase + b"\r\n".join(lines) + b"\r\n"
+
+    def banner():
+        return b"\x1b[49m" + frame(b"", PLACEHOLDER, b"", STATUS)
+
+    def drain(seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            read_available(min(0.05, max(0, end - time.monotonic())))
+
+    if case == "ignore_signals":
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        child = os.fork()
+        if child == 0:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            while True:
+                time.sleep(60)
+        # Keep writing nothing useful; parent reader must kill the group.
+        emit(banner())
+        while True:
+            read_available(0.2)
+
+    if case == "hang_before_ready":
+        while True:
+            read_available(0.2)
+
+    if case == "login":
+        emit(b'\x1b[49m\r\nPlease log in to continue\r\n')
+        while True:
+            read_available(0.2)
+
+    if case == "flood":
+        emit(banner())
+        # Flood past the 1 MiB collector cap while the reader is still waiting/typing.
+        emit(b"x" * (2 * 1024 * 1024))
+        while True:
+            read_available(0.2)
+
+    emit(banner())
+    if case == "exit_early":
+        sys.exit(3)
+    typed = b""
+    saw_enter = False
+    while not saw_enter:
+        chunk = read_available(0.05)
+        if not chunk:
+            continue
+        for byte in chunk:
+            one = bytes([byte])
+            if one == b"\r":
+                saw_enter = True
+                break
+            typed += one
+            if typed in (b"/", b"/u", b"/us", b"/usa", b"/usag"):
+                # The real menu selects /usage from "/u" on, before the last character.
+                emit(frame(INPUT + typed, ROW_USAGE_SELECTED, ROW_CONTEXT, STATUS))
+            elif typed == b"/usage":
+                if case == "no_usage_menu":
+                    emit(frame(INPUT + typed, ROW_UPDATE_SELECTED, STATUS))
+                elif case == "other_row_selected":
+                    emit(frame(INPUT + typed, ROW_UPDATE_SELECTED, ROW_USAGE, STATUS))
+                elif case == "description_before_last_char":
+                    # The row selected at "/usag" is gone once "/usage" is typed.
+                    emit(frame(INPUT + typed, b"  (menu)", STATUS))
+                elif case == "menu_dismissed":
+                    # Selected row, then menu cleared and prompt restored, in one write.
+                    emit(frame(INPUT + typed, ROW_USAGE_SELECTED, ROW_CONTEXT, STATUS)
+                         + frame(b"", PLACEHOLDER, b"", STATUS))
+                elif case == "menu_dismissed_late":
+                    # The same, 20 ms apart: the reader may see the row alone first.
+                    emit(frame(INPUT + typed, ROW_USAGE_SELECTED, ROW_CONTEXT, STATUS))
+                    time.sleep(0.02)
+                    emit(frame(b"", PLACEHOLDER, b"", STATUS))
+                elif case == "menu_cleared_input_kept":
+                    # Menu gone, "/usage" still typed: Enter would send it as a prompt.
+                    emit(frame(INPUT + typed, ROW_USAGE_SELECTED, ROW_CONTEXT, STATUS)
+                         + frame(INPUT + typed, b"", STATUS))
+                else:
+                    emit(frame(INPUT + typed, ROW_USAGE_SELECTED, ROW_CONTEXT, STATUS))
+
+    if case == "hang_after_enter":
+        while True:
+            read_available(0.2)
+
+    emit(LOADING)
+    if case == "no_meters":
+        emit(b"\r\nEsc to close\r\n")
+        drain(30)
+        sys.exit(0)
+    if case == "late_meters":
+        emit(b"\r\nEsc to close\r\n")
+        time.sleep(0.5)
+        emit(RESETS + TABLE)
+        drain(30)
+        sys.exit(0)
+    if case == "no_auto_row":
+        emit(RESETS + TABLE_NO_AUTO)
+        drain(30)
+        sys.exit(0)
+    # normal and any unspecified case
+    emit(RESETS + TABLE)
+    drain(30)
+    sys.exit(0)
+
+
+# Existing stream-json fixture used by launch/review lifecycle tests.
 assert "-p" in args and args[args.index("--output-format") + 1] == "stream-json"
 if "--sandbox" in args and args[args.index("--sandbox") + 1] == "enabled":
     assert "--force" not in args

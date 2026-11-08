@@ -11,6 +11,10 @@ import quota
 
 TOL_S = 120
 DROP = 0.5
+# The one step from an exact openusage reading to a whole-percent /usage one: the
+# reset moves to midnight of the screen date and used rounds by up to one percent.
+CUTOVER_TOL_S = 36 * 3600
+CUTOVER_DROP = 1.0
 GAP_H = 1.0
 LAG = timedelta(minutes=30)
 ASK = timedelta(minutes=10)
@@ -69,14 +73,15 @@ def _reading_ts(row):
 
 
 def pool_readings(rows, pid):
-    """(ts, used_pct, resets_at) for pool pid, sorted by ts (file order for ties)."""
+    """(ts, used_pct, resets_at, whole_percent) for pool pid, sorted by ts (file order for ties)."""
     pts = []
     for row in rows:
         ts = _reading_ts(row)
         entry = good_entry(row, pid)
         if ts is None or entry is None:
             continue
-        pts.append((ts, entry[0], entry[1]))
+        whole = row["pools"][pid].get("whole_percent") is True
+        pts.append((ts, entry[0], entry[1], whole))
     # Stable sort: file order preserved for equal timestamps.
     indexed = list(enumerate(pts))
     indexed.sort(key=lambda it: (it[1][0], it[0]))
@@ -86,16 +91,25 @@ def pool_readings(rows, pid):
 def windows_for_pool(rows, pid, now):
     """Build closed/open windows for one pool, merging consecutive idle spans."""
     pts = pool_readings(rows, pid)
+    cycle = bool((quota.POOLS.get(pid) or {}).get("cycle"))
     raw = []
-    for ts, used, reset in pts:
+    last_whole = False
+    for ts, used, reset, whole in pts:
         cur = raw[-1] if raw else None
+        # Relax only the cutover step, so exact readings keep their early-refill split.
+        cutover = cycle and whole and not last_whole
+        tol_s, drop = (CUTOVER_TOL_S, CUTOVER_DROP) if cutover else (TOL_S, DROP)
+        last_whole = whole
         if (cur is not None
-                and abs((reset - cur["resets_at"]).total_seconds()) <= TOL_S
-                and used >= cur["last_used"] - DROP):
+                and abs((reset - cur["resets_at"]).total_seconds()) <= tol_s
+                and used >= cur["last_used"] - drop):
             cur["peak"] = max(cur["peak"], used)
             cur["last_used"] = used
             cur["last_seen"] = ts
             cur["readings"] += 1
+            if cutover:
+                # Later whole-percent readings compare against the midnight reset.
+                cur["resets_at"] = reset
         else:
             raw.append({
                 "start": ts, "last_seen": ts, "resets_at": reset,
@@ -249,12 +263,24 @@ def job_costs(quota_rows, run_rows, session_rows, catalog=None, since=None):
     busy = _busy_intervals(all_jobs, session_rows)
     samples = defaultdict(list)
     skip = Counter()
+
+    def _whole_percent(row, pool_ids):
+        entries = row.get("pools") if isinstance(row, dict) else None
+        if not isinstance(entries, dict):
+            return False
+        for pid in pool_ids:
+            entry = entries.get(pid)
+            if isinstance(entry, dict) and entry.get("whole_percent"):
+                return True
+        return False
+
     for j in jobs:
         pools = _pools_for_job(j, catalog)
         if not pools:
             skip["agent"] += 1
             continue
         cands = []
+        whole_launch = False
         for ts, row in qrows:
             if row.get("reason") != "launch" or row.get("run") != j["run"]:
                 continue
@@ -265,26 +291,37 @@ def job_costs(quota_rows, run_rows, session_rows, catalog=None, since=None):
                 pass
             else:
                 continue
+            if _whole_percent(row, pools):
+                whole_launch = True
+                continue
             if all(good_entry(row, p) for p in pools):
                 cands.append((ts, row))
         if not cands:
-            skip["no launch reading"] += 1
+            skip["whole percent" if whole_launch else "no launch reading"] += 1
             continue
         before_ts, before = min(cands, key=lambda t: abs((t[0] - j["start"]).total_seconds()))
         after = None
+        whole_after = False
         for ts, row in qrows:
             if (row.get("reason") == "job-end" and row.get("run") == j["run"]
-                    and row.get("job") == j["job"] and ts >= before_ts
-                    and all(good_entry(row, p) for p in pools)):
-                after = (ts, row)
-                break
-        if after is None:
-            for ts, row in qrows:
-                if j["end"] <= ts <= j["end"] + LAG and all(good_entry(row, p) for p in pools):
+                    and row.get("job") == j["job"] and ts >= before_ts):
+                if _whole_percent(row, pools):
+                    whole_after = True
+                    continue
+                if all(good_entry(row, p) for p in pools):
                     after = (ts, row)
                     break
         if after is None:
-            skip["no reading after"] += 1
+            for ts, row in qrows:
+                if j["end"] <= ts <= j["end"] + LAG:
+                    if _whole_percent(row, pools):
+                        whole_after = True
+                        continue
+                    if all(good_entry(row, p) for p in pools):
+                        after = (ts, row)
+                        break
+        if after is None:
+            skip["whole percent" if whole_after else "no reading after"] += 1
             continue
         after_ts, after_row = after
         lo, hi = before_ts, after_ts

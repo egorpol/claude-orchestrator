@@ -572,11 +572,13 @@ class HybridTests(unittest.TestCase):
         self.calls = self.tmp / "openusage.calls"
         self.codex_calls = self.tmp / "codex.calls"
         self.claude_calls = self.tmp / "claude.calls"
+        self.cursor_env_log = self.tmp / "cursor-env.jsonl"
+        self.cursor_tui_log = self.tmp / "cursor-tui.log"
         self.claude_config = self.tmp / "claude-config"
         self.claude_config.mkdir()
         self.env_log = self.tmp / "environ.jsonl"
         fakes = Path(__file__).parent / "fake_agents"
-        for name in ("codex", "openusage", "claude"):
+        for name in ("codex", "openusage", "claude", "cursor-agent"):
             path = self.bin / name
             path.write_text(f"#!{sys.executable}\n" + (fakes / name).read_text().split("\n", 1)[1])
             path.chmod(0o755)
@@ -589,11 +591,24 @@ class HybridTests(unittest.TestCase):
                     "CODEX_HOME": "hidden-codex", "DELEGATE_CATALOG_LOCAL": "",
                     "CLAUDE_CONFIG_DIR": str(self.claude_config),
                     "FAKE_OPENUSAGE_FILE": str(self.export), "FAKE_OPENUSAGE_LOG": str(self.calls),
-                    "FAKE_OPENUSAGE_ENV": str(self.env_log), "FAKE_CODEX_LOG": str(self.codex_calls)}
+                    "FAKE_OPENUSAGE_ENV": str(self.env_log), "FAKE_CODEX_LOG": str(self.codex_calls),
+                    "FAKE_CURSOR_TUI": "normal", "FAKE_CURSOR_TUI_ENV": str(self.cursor_env_log),
+                    "FAKE_CURSOR_TUI_LOG": str(self.cursor_tui_log)}
         patcher = mock.patch.dict(os.environ, self.env, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.set_claude_fake(mode="ok", log=str(self.claude_calls))
+
+    def clear_cursor_state(self):
+        path = quota._cursor_state_path(self.log)
+        path.unlink(missing_ok=True)
+        lock = Path(str(path) + ".lock")
+        lock.unlink(missing_ok=True)
+
+    def cursor_call_count(self):
+        if not self.cursor_env_log.exists():
+            return 0
+        return len(self.cursor_env_log.read_text().splitlines())
 
     def set_claude_fake(self, **kwargs):
         path = self.claude_config / "fake-claude.json"
@@ -756,18 +771,20 @@ class HybridTests(unittest.TestCase):
             (False, True, True),
             (True, True, True),
         )
-        for codex_fails, claude_fails, openusage_fails in cases:
-            with self.subTest(codex=codex_fails, claude=claude_fails, openusage=openusage_fails):
+        for codex_fails, claude_fails, cursor_fails in cases:
+            with self.subTest(codex=codex_fails, claude=claude_fails, cursor=cursor_fails):
                 self.log.unlink(missing_ok=True)
                 self.clear_claude_state()
+                self.clear_cursor_state()
                 self.claude_calls.unlink(missing_ok=True)
+                self.cursor_env_log.unlink(missing_ok=True)
                 env = {
                     "FAKE_CODEX_MODE": "rpc-error" if codex_fails else "ok",
-                    "FAKE_OPENUSAGE_EXIT": "7" if openusage_fails else "0",
+                    "FAKE_CURSOR_TUI": "no_meters" if cursor_fails else "normal",
                 }
                 with mock.patch.dict(os.environ, env), \
                         self.claude_fake(mode="fail" if claude_fails else "ok"):
-                    if codex_fails and claude_fails and openusage_fails:
+                    if codex_fails and claude_fails and cursor_fails:
                         with self.assertRaises(ValueError) as failure:
                             quota.pools(quota.fetch(log=self.log))
                         self.assertNotIn("secret", str(failure.exception))
@@ -775,71 +792,76 @@ class HybridTests(unittest.TestCase):
                         entries = quota.pools(quota.fetch(log=self.log))
                         self.assertEqual("error" in entries["codex-5h"], codex_fails)
                         self.assertEqual("error" in entries["claude-5h"], claude_fails)
-                        self.assertEqual("error" in entries["cursor-auto"], openusage_fails)
+                        self.assertEqual("error" in entries["cursor-auto"], cursor_fails)
                         if not claude_fails:
                             self.assertIn("left_pct", entries["claude-5h"])
-                        if openusage_fails and not claude_fails:
-                            self.assertIn("openusage", entries["cursor-auto"]["error"])
+                        if cursor_fails and not claude_fails:
+                            self.assertIn("cursor /usage", entries["cursor-auto"]["error"])
                             self.assertNotIn("error", entries["claude-5h"])
                 self.clear_claude_state()
+                self.clear_cursor_state()
                 with mock.patch.dict(os.environ, env), \
                         self.claude_fake(mode="fail" if claude_fails else "ok"):
                     row, _ = quota.record(log=self.log)
-                self.assertEqual("error" in row, codex_fails and claude_fails and openusage_fails)
+                self.assertEqual("error" in row, codex_fails and claude_fails and cursor_fails)
                 self.assertNotIn("secret", json.dumps(row))
                 self.clear_claude_state()
+                self.clear_cursor_state()
                 with mock.patch.dict(os.environ, env), \
                         self.claude_fake(mode="fail" if claude_fails else "ok"), \
                         redirect_stdout(io.StringIO()):
                     code = quota.snapshot(log=self.log)
-                self.assertEqual(code, int(codex_fails and claude_fails and openusage_fails))
+                self.assertEqual(code, int(codex_fails and claude_fails and cursor_fails))
 
     def test_partial_failure_does_not_suppress_next_attempt(self):
-        for settings in ({"FAKE_CODEX_MODE": "rpc-error"}, {"FAKE_OPENUSAGE_EXIT": "7"}):
-            with self.subTest(settings=settings), mock.patch.dict(os.environ, settings):
-                self.log.unlink(missing_ok=True)
-                self.calls.unlink(missing_ok=True)
-                self.codex_calls.unlink(missing_ok=True)
-                self.claude_calls.unlink(missing_ok=True)
-                self.clear_claude_state()
-                quota.record(log=self.log)
-                row = self.record_at(200)
-                self.assertNotIn("reused_from", row)
-                self.assertEqual(self.calls.read_text().splitlines(), ["direct", "direct"])
-                self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
-                # Second Claude call is past the 3-minute throttle.
-                self.assertEqual(self.claude_call_count(), 2)
+        # Codex always polls; Cursor's 30-minute cadence carries after a failed read.
+        self.log.unlink(missing_ok=True)
+        self.codex_calls.unlink(missing_ok=True)
+        self.claude_calls.unlink(missing_ok=True)
+        self.cursor_env_log.unlink(missing_ok=True)
+        self.clear_claude_state()
+        self.clear_cursor_state()
+        with mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": "rpc-error"}):
+            quota.record(log=self.log)
+            row = self.record_at(200)
+        self.assertNotIn("reused_from", row)
+        self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
+        self.assertEqual(self.claude_call_count(), 2)
+        self.assertEqual(self.cursor_call_count(), 1)  # second hybrid row carries Cursor
+        self.assertFalse(self.calls.exists())
 
-    def test_invalid_openusage_does_not_discard_codex_or_claude(self):
-        self.export.write_text("[]")
-        row, _ = quota.record(log=self.log)
+    def test_failed_cursor_does_not_discard_codex_or_claude(self):
+        with mock.patch.dict(os.environ, {"FAKE_CURSOR_TUI": "no_meters"}):
+            row, _ = quota.record(log=self.log)
         self.assertEqual(row["pools"]["codex-5h"]["used_pct"], 20)
         self.assertEqual(row["pools"]["claude-5h"]["used_pct"], 12.3457)
-        self.assertIn("invalid openusage", row["pools"]["cursor-auto"]["error"])
+        self.assertIn("cursor /usage", row["pools"]["cursor-auto"]["error"])
+        self.assertFalse(self.calls.exists())
 
     def test_hidden_home_links_drop_claude_and_keep_cursor(self):
+        # _openusage_env remains for plain openusage paths; hybrid no longer calls it.
         (self.home / ".codex").mkdir()
         for name in (".claude", ".cursor", ".config/Cursor"):
             (self.home / name).mkdir(parents=True)
         (self.home / ".claude.json").write_text("{}")
-        # Stale links from an older install must be removed on the next hybrid read.
         self.hidden.mkdir(parents=True)
         (self.hidden / ".config").mkdir(exist_ok=True)
         (self.hidden / ".claude").symlink_to(self.home / ".claude")
         (self.hidden / ".claude.json").symlink_to(self.home / ".claude.json")
-        quota.fetch(log=self.log)
+        env = quota._openusage_env()
+        self.assertEqual(env["HOME"], str(self.hidden))
         self.assertEqual(self.hidden.stat().st_mode & 0o777, 0o700)
         self.assertFalse((self.hidden / ".codex").exists())
         self.assertFalse((self.hidden / ".claude").exists())
         self.assertFalse((self.hidden / ".claude.json").exists())
-        self.assertEqual(json.loads(self.env_log.read_text()), {"HOME": str(self.hidden)})
         for name in (".cursor", ".config/Cursor"):
             self.assertEqual((self.hidden / name).readlink(), self.home / name)
         (self.hidden / ".cursor").unlink()
         (self.hidden / ".cursor").symlink_to(self.tmp / "wrong")
         (self.hidden / ".claude.json").write_text("regular file")
         (self.hidden / ".claude").symlink_to(self.home / ".claude")
-        quota.fetch(log=self.log)
+        env = quota._openusage_env()
+        self.assertEqual(env["HOME"], str(self.hidden))
         self.assertEqual((self.hidden / ".cursor").readlink(), self.home / ".cursor")
         self.assertFalse((self.hidden / ".claude").exists())
         self.assertTrue((self.hidden / ".claude.json").is_file())
@@ -874,11 +896,12 @@ class HybridTests(unittest.TestCase):
     def test_cli_defaults_and_source_choices(self):
         for args in (("--json",), ("--snapshot", "--reason", "manual", "--log", str(self.log))):
             result = subprocess.run([sys.executable, str(CLI), "quota", *args],
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("secret", result.stdout)
         self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
-        self.assertEqual(self.calls.read_text().splitlines(), ["direct", "direct"])
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(self.cursor_call_count(), 2)
         # --json uses the default log folder; --snapshot --log uses self.log — two state files.
         self.assertEqual(self.claude_call_count(), 2)
         self.assertEqual(self.rows()[0]["source"], "hybrid")
@@ -890,6 +913,7 @@ class HybridTests(unittest.TestCase):
         self.assertEqual(self.calls.read_text().splitlines()[-1], "auto")
         self.assertEqual(self.codex_calls.read_text().splitlines(), ["read", "read"])
         self.assertEqual(self.claude_call_count(), 2)
+        self.assertEqual(self.cursor_call_count(), 2)
         # Exercise route's parser and selected source without any ratings/network lookup.
         import runpy
         delegate = runpy.run_path(str(CLI))
@@ -987,11 +1011,12 @@ class HybridTests(unittest.TestCase):
             children = [subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         for _ in range(4)]
             for child in children:
-                stdout, stderr = child.communicate(timeout=8)
+                stdout, stderr = child.communicate(timeout=30)
                 self.assertEqual(child.returncode, 0, stdout + stderr)
         self.assertEqual(len(self.rows()), 4)
         self.assertEqual(sum("reused_from" in row for row in self.rows()), 3)
-        self.assertEqual(self.calls.read_text().splitlines(), ["direct"])
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(self.cursor_call_count(), 1)
         self.assertEqual(self.codex_calls.read_text().splitlines(), ["read"])
         self.assertEqual(self.claude_call_count(), 1)
         self.assertTrue(all(row["pools"] == self.rows()[0]["pools"] for row in self.rows()))
@@ -1327,7 +1352,7 @@ class HybridTests(unittest.TestCase):
         self.assertIn("used_pct", row["pools"]["claude-7d"])
         self.assertIn("used_pct", row["pools"]["codex-5h"])
         self.assertIn("used_pct", row["pools"]["cursor-auto"])
-        # Date-only Cursor reset from openusage: pool numbers stay, no TypeError.
+        # Date-only Cursor reset (openusage-shaped fixture): pool numbers stay, no TypeError.
         self.clear_claude_state()
         self.log.unlink(missing_ok=True)
         envelope = fixture(self.now)
@@ -1475,10 +1500,9 @@ class HybridTests(unittest.TestCase):
 
     def test_no_usable_pool_is_total_failure(self):
         self.clear_claude_state()
-        empty = {"provider_id": "cursor", "status": "error", "timestamp": self.now.isoformat(),
-                 "metrics": {}, "resets": {}}
-        self.export.write_text(json.dumps({"snapshots": [empty]}))
-        with self.claude_fake(mode="fail"), mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": "rpc-error"}):
+        self.clear_cursor_state()
+        with self.claude_fake(mode="fail"), mock.patch.dict(os.environ, {
+                "FAKE_CODEX_MODE": "rpc-error", "FAKE_CURSOR_TUI": "no_meters"}):
             result = subprocess.run(
                 [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
                  "--log", str(self.log)],
@@ -1488,8 +1512,8 @@ class HybridTests(unittest.TestCase):
         self.assertIn("error", row)
         # Usable Cursor keeps exit 0 even when Codex and Claude fail.
         self.clear_claude_state()
+        self.clear_cursor_state()
         self.log.unlink(missing_ok=True)
-        self.export.write_text(json.dumps(fixture(self.now)))
         with self.claude_fake(mode="fail"), mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": "rpc-error"}):
             result = subprocess.run(
                 [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
@@ -1509,7 +1533,6 @@ class HybridTests(unittest.TestCase):
                            "usage_seven_day": (self.now + timedelta(days=2)).isoformat()}}
         quota._claude_state_path(self.log).write_text(json.dumps({
             "last_attempt_at": self.now.isoformat(), "failures": 0, "last_good": good}))
-        self.export.write_text(json.dumps({"snapshots": [empty]}))
         with mock.patch.dict(os.environ, {"FAKE_CODEX_MODE": "rpc-error"}):
             result = subprocess.run(
                 [sys.executable, str(CLI), "quota", "--snapshot", "--reason", "manual",
@@ -1519,6 +1542,7 @@ class HybridTests(unittest.TestCase):
         row = json.loads(result.stdout)
         self.assertNotIn("error", row)
         self.assertEqual(row["pools"]["claude-5h"].get("carried"), "throttle")
+        self.assertIn("used_pct", row["pools"]["cursor-auto"])
 
     def test_quota_change_needs_two_observations(self):
         import report

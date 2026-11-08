@@ -511,7 +511,7 @@ class CliPlumbingTests(unittest.TestCase):
                         f"print(pathlib.Path({str(export)!r}).read_text())\n")
         fake.chmod(0o755)
         fakes = Path(__file__).parent / "fake_agents"
-        for name in ("codex", "claude"):
+        for name in ("codex", "claude", "cursor-agent"):
             path = bin_dir / name
             path.write_text(f"#!{sys.executable}\n" + fakes.joinpath(name).read_text().split("\n", 1)[1])
             path.chmod(0o755)

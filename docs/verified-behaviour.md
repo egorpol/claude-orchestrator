@@ -2,6 +2,14 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-11-08
+
+- **The scripted Cursor `/usage` reader is live.** Run `cursor-reader` applied at 03:09:43 UTC, replacing openusage for Cursor. One manual `delegate quota` at 03:09:50 UTC: exit 0 in 5.5 s, all six pools fresh; the Cursor step took 2.1 s (attempt stamp 03:09:53.1, reading 03:09:55.2). The screen gave 56% Auto and 46% API used, matching openusage's 56.2756 and 46.1333 at 03:00:46 UTC (this pair can't tell rounding down from rounding to nearest), with the reset at 2026-11-18T00:00 UTC. `cursor-usage.json` is 326 bytes, mode 600, with only `failures`, `last_attempt_at` and `last_good`, and `last_good` holds only `metrics`, `resets` and `timestamp`. The read left one stub chat (`meta.json` 157 bytes, `prompt_history.json` 14 bytes) and an empty `cursor-usage-ws`. First row with `reader` `codex-app-server+claude-usage+cursor-usage`: the timer's at 03:10:17 UTC, 26 s later, with Claude and Cursor carried as `throttle`, so neither reader ran.
+- **`rounds_left` survives the cutover.** That read still printed "cursor-auto 0.18555 → about 237 left", from the 32 exact rounds before it; whole-percent rows add no per-job samples (`check-cursor-reader.py` on the real log, with exact rows as the positive control).
+- **Cursor's date follows the locale:** the captures in `feedback/` read `Resets 18 Nov` under en_GB and `Resets Nov 18` under en_US, so the reader pins en_GB.
+- **The Enter guard on real screens:** on both captures, `_cursor_usage_selected`, tested at every 8-byte cut, is true in one unbroken byte range that ends at the Enter point and false from `Loading usage data` on. Erase to the left (`ESC[1K`) clears the cursor cell too; the replay had kept that cell, so a redraw that erased the row's arrow still counted as selected (review 2 of the run, fixed with a test).
+- **Midnight edge:** the screen gives only a date, so the reader puts the reset at 00:00 UTC, while openusage put it at 01:53:54 UTC (2026-11-07 and 11-08 readings). For about 1 h 54 min each month, a fresh reading's reset has already passed.
+
 ## 2026-11-07
 
 - **Hybrid quota reader is the default** for `delegate quota`, `delegate quota --snapshot`, `delegate route` and the read `delegate report` does. Codex comes from `codex app-server --stdio` (JSON-RPC method `account/rateLimits/read`, codex-cli 0.159.1). Claude and Cursor come from `openusage export --source direct` under a private HOME, `~/.cache/claude-delegate/openusage-home`, which links `.claude`, `.claude.json`, `.cursor` and `.config/Cursor` and leaves out `.codex`, so openusage skips Codex. `--source auto|direct|daemon` remain as plain openusage reads. If one side fails, the other side's pools are still read and the failed pools carry a per-pool `error`; only when both fail does the row get a top-level `error`.
