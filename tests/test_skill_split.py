@@ -21,6 +21,7 @@ class SkillSplitTests(unittest.TestCase):
     def test_trigger_frontmatter_is_unchanged(self):
         # The first four lines, including line endings, as shipped on 2026-11-06;
         # re-pinned 2026-11-08 when "(openusage)" left the description (reader removed).
+        # Guards the 2026-11-18 field count; drop or re-pin with a dated note after it.
         frontmatter = b"".join(CORE.read_bytes().splitlines(keepends=True)[:4])
         self.assertEqual(hashlib.sha256(frontmatter).hexdigest(),
                          "863aa609e6da5cd6c8f25c5df6200859bb904bc8ce2d208d0e9c57bc9d5e5f65")

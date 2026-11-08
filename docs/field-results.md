@@ -431,7 +431,7 @@ Closed with `/field-report`; folded in on 2026-11-04. It started inside the prer
 
 ## Still open
 
-- Control sessions: USD per finished item needs many more items per arm before the arms can be compared. Re-read `delegate cost --by-mode` as sessions accumulate.
+- Control sessions: per-arm outcomes are read once, at the freeze, with `delegate prereg --outcomes` ([preregistration](preregistration.md)); no by-arm view before it.
 
 - Re-measure on the next long session with `delegate cost --session latest`.
 - Picker replies still bypass the context guard's idle hold. Attention notices may shorten the wait; re-measure picker idle rebuilds as sessions accumulate.
