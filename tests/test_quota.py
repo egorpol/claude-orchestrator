@@ -1280,6 +1280,38 @@ class HybridTests(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertIsNone(error)
 
+    def test_unsaved_attempt_stamp_carries_without_calling(self):
+        good = {"timestamp": self.now.isoformat(),
+                "metrics": {"usage_five_hour": {"limit": 100, "used": 5, "remaining": 95},
+                            "usage_seven_day": {"limit": 100, "used": 68, "remaining": 32}},
+                "resets": {"usage_five_hour": (self.now + timedelta(hours=3)).isoformat(),
+                           "usage_seven_day": (self.now + timedelta(days=2)).isoformat()}}
+        path = quota._claude_state_path(self.log)
+        stale = (self.now - timedelta(hours=2)).isoformat()
+        full = OSError(28, "No space left on device")
+        # Positive control: the same stale stamp with a working save makes one call.
+        path.write_text(json.dumps({"last_attempt_at": stale, "failures": 0, "last_good": good}))
+        self.claude_calls.write_text("")
+        quota._claude_snapshot(log=self.log)
+        self.assertEqual(self.claude_call_count(), 1)
+        # A failed save with a saved reading carries it and never calls.
+        path.write_text(json.dumps({"last_attempt_at": stale, "failures": 0, "last_good": good}))
+        self.claude_calls.write_text("")
+        with mock.patch.object(quota, "_save_claude_state", side_effect=full):
+            first = quota._claude_snapshot(log=self.log)
+            second = quota._claude_snapshot(log=self.log)
+        self.assertEqual(self.claude_call_count(), 0)
+        self.assertEqual(first[1:], ("failed", None))
+        self.assertEqual(first[0]["metrics"]["usage_five_hour"]["used"], 5)
+        self.assertEqual(first, second)
+        # With nothing saved it still reads (decided 2026-11-07: nothing persists there).
+        path.write_text(json.dumps({"last_attempt_at": stale, "failures": 0, "last_good": None}))
+        with mock.patch.object(quota, "_save_claude_state", side_effect=full):
+            snap, reason, error = quota._claude_snapshot(log=self.log)
+        self.assertEqual(self.claude_call_count(), 1)
+        self.assertIsNotNone(snap)
+        self.assertEqual((reason, error), (None, None))
+
     def test_concurrent_claude_readers_call_once(self):
         self.clear_claude_state()
         self.claude_calls.unlink(missing_ok=True)

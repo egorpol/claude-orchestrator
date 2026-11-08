@@ -755,7 +755,11 @@ def _claude_snapshot(timeout=20, log=None):
             # Mark the attempt before the call so a kill mid-read still throttles.
             _save_claude_state(state_path, attempt)
         except OSError:
-            pass
+            # An unsaved stamp would let the next call read again at once: carry the
+            # last good reading. With none saved, read anyway (nothing persists here).
+            carried = _claude_carry_from_state(attempt, "failed")
+            if carried:
+                return (*carried, None)
         try:
             snap = _claude_call(timeout, state_path.parent)
         except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError,
