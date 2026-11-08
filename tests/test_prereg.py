@@ -166,20 +166,20 @@ class PreregTests(unittest.TestCase):
     def test_stale_for_more_and_fewer_prompts_and_summary_else_start_path(self):
         rows = [start(transcript=str(self.transcript)), summary(transcript=None), rating(prompts=2)]
         records = self.records(rows)
-        counts, _ = p.read_transcript_inputs(records, ({}, None))
+        counts, _, _ = p.read_transcript_inputs(records, ({}, None))
         self.assertEqual(counts, {"s": 1})
         self.assertEqual(p.analysis_sessions(records, counts)[0]["status"], "stale")
         write(self.transcript, [user(), user(), user()])
-        counts, _ = p.read_transcript_inputs(records, ({}, None))
+        counts, _, _ = p.read_transcript_inputs(records, ({}, None))
         self.assertEqual(p.analysis_sessions(records, counts)[0]["status"], "stale")
 
     def test_transcript_gone_null_missing_unreadable(self):
         for path in (None, str(self.root / "missing"), str(self.root)):
             rows = [start(), summary(transcript=path), rating()]
-            counts, _ = p.read_transcript_inputs(self.records(rows), ({}, None))
+            counts, _, _ = p.read_transcript_inputs(self.records(rows), ({}, None))
             self.assertEqual(p.analysis_sessions(self.records(rows), counts)[0]["status"], "transcript_gone")
         with mock.patch.object(rate, "json_rows", side_effect=PermissionError):
-            counts, _ = p.read_transcript_inputs(self.records([start(), summary(), rating()]), ({}, None))
+            counts, _, _ = p.read_transcript_inputs(self.records([start(), summary(), rating()]), ({}, None))
             self.assertIsNone(counts["s"])
 
     def test_ratio_edges_nearest_rank_infinity_share_and_zero_over_zero(self):
@@ -256,14 +256,14 @@ class PreregTests(unittest.TestCase):
         items = [item(continuation=True), item(start=1, type="field-report", continuation=True), item(start=2)]
         rows = [start(), summary(transcript=str(self.transcript), usd_list_price=9),
                 rating(prompts=3, prompt_ts=[r["timestamp"] for r in transcript[:3]], items=items)]
-        counts, costs = p.read_transcript_inputs(self.records(rows), ({}, {"models": {"fake": {
+        counts, costs, _ = p.read_transcript_inputs(self.records(rows), ({}, {"models": {"fake": {
             "input": 2, "cache_read": 0, "cache_write_5m": 0, "cache_write_1h": 0, "output": 0}}}))
         sessions = p.analysis_sessions(self.records(rows), counts)
         kept, excluded = p.no_continuations(sessions, costs)
         self.assertEqual((kept[0]["usd"], kept[0]["finished"]), (7, 1))
         self.assertFalse(excluded["claude-only"])
         with mock.patch.object(rate, "item_costs", side_effect=ValueError("bad")):
-            counts, costs = p.read_transcript_inputs(self.records(rows), ({}, None))
+            counts, costs, _ = p.read_transcript_inputs(self.records(rows), ({}, None))
         self.assertEqual(p.analysis_sessions(self.records(rows), counts)[0]["status"], "analysed")
         self.assertEqual(p.no_continuations(sessions, costs)[1]["claude-only"], {"item_costs_failed": 1})
         costs["s"] = [{"usd": None}, {"usd": None}, {"usd": 2}]
@@ -421,7 +421,7 @@ class PreregTests(unittest.TestCase):
         runs = [{"run": "worker", "ts": "2026-11-05T00:00:00Z", "session": "o1", "agent": "codex",
                  "rounds": [{"usage": {"input": 100, "cached_input": 40, "output": 20}}],
                  "reviews": [{"agent": "cursor", "usage": {"input": 60}}]}]
-        counts, costs = p.read_transcript_inputs(self.records(rows), ({}, None))
+        counts, costs, _ = p.read_transcript_inputs(self.records(rows), ({}, None))
         result = p.outcomes(rows, p.HARD_CLOSE, counts, costs, runs, {"available": True, "per_usd": .5}, None)
         self.assertEqual(result["delegate_tokens_per_orchestrator_session"]["codex"]["input"], 50)
         self.assertEqual(result["delegate_tokens_per_orchestrator_session"]["cursor"]["input"], 30)
@@ -555,6 +555,455 @@ class SplitCommitTests(unittest.TestCase):
         result = p.outcomes(rows, p.HARD_CLOSE, counts, costs, [], {"available": False}, split)
         self.assertEqual(result["sensitivity"]["split"]["before"]["h1"]["observed"], 1)
         self.assertEqual(result["sensitivity"]["split"]["after"]["h1"]["observed"], 1)
+
+
+class Amendment1108Tests(PreregTests):
+    def next_command(self, args=""):
+        body = f"<command-name>/next</command-name><command-args>{args}</command-args>"
+        if args:
+            body += f"\nextra typed"
+        return {"type": "user", "timestamp": "2026-11-02T12:00:00Z",
+                "message": {"content": body}}
+
+    def test_crossover_links_window_gap_repo_source_and_tiebreak(self):
+        donor_ts = "2026-11-02T12:00:00Z"
+        forced_ok = "2026-11-02T12:50:00Z"   # 50 min after last_call at 12:00 → within 60
+        forced_edge = "2026-11-02T13:00:00Z"  # exactly 60
+        forced_late = "2026-11-02T13:01:00Z"  # 61
+        rows = [
+            start("d1", repo_dir="/repo/a", ts=donor_ts),
+            summary("d1", last_call="2026-11-02T12:00:00Z"), rating("d1"),
+            start("d2", mode="vanilla", repo_dir="/repo/a", ts="2026-11-02T12:10:00Z"),
+            summary("d2", last_call="2026-11-02T12:40:00Z"), rating("d2"),
+            start("d-other", repo_dir="/repo/b", ts=donor_ts),
+            summary("d-other", last_call="2026-11-02T12:50:00Z"), rating("d-other"),
+            start("d-empty", repo_dir="", ts=donor_ts),
+            summary("d-empty", last_call="2026-11-02T12:50:00Z"), rating("d-empty"),
+            start("d-orch", mode="orchestrator", repo_dir="/repo/a", ts=donor_ts),
+            summary("d-orch", last_call="2026-11-02T12:50:00Z"), rating("d-orch"),
+            start("pre", repo_dir="/repo/a", ts=p.iso(p.T0)),
+            summary("pre", last_call="2026-11-02T12:50:00Z"), rating("pre"),
+            start("f-ok", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/a", ts=forced_ok, u=None),
+            summary("f-ok", last_call=forced_ok),
+            start("f-edge", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/a", ts=forced_edge, u=None),
+            summary("f-edge", last_call=forced_edge),
+            start("f-late", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/a", ts=forced_late, u=None),
+            summary("f-late", last_call=forced_late),
+            start("f-clear", mode="orchestrator", forced=True, source="clear",
+                  repo_dir="/repo/a", ts="2026-11-02T12:55:00Z", u=None),
+            summary("f-clear", last_call="2026-11-02T12:55:00Z"),
+        ]
+        records = p.session_records(rows)
+        links, without, _ = p.crossover_links(records, p.T0, p.HARD_CLOSE)
+        # f-ok picks latest donor first-start among d1/d2 → d2; f-edge then takes d1
+        self.assertEqual(links["d2"], "f-ok")
+        self.assertEqual(links["d1"], "f-edge")
+        self.assertNotIn("d-other", links)
+        # Donor last_call after the forced start still qualifies
+        rows_b = [
+            start("d-other", repo_dir="/repo/b", ts=donor_ts),
+            summary("d-other", last_call="2026-11-02T12:50:00Z"), rating("d-other"),
+            start("f-after", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/b", ts="2026-11-02T12:30:00Z", u=None),
+            summary("f-after", last_call="2026-11-02T12:30:00Z"),
+        ]
+        links_b, _, _ = p.crossover_links(p.session_records(rows_b), p.T0, p.HARD_CLOSE)
+        self.assertEqual(links_b, {"d-other": "f-after"})
+        links_late, without_late, _ = p.crossover_links(
+            p.session_records([
+                start("d1", repo_dir="/repo/a", ts=donor_ts),
+                summary("d1", last_call="2026-11-02T12:00:00Z"), rating("d1"),
+                start("f-late", mode="orchestrator", forced=True, source="startup",
+                      repo_dir="/repo/a", ts=forced_late, u=None),
+                summary("f-late"),
+                start("f-clear", mode="orchestrator", forced=True, source="clear",
+                      repo_dir="/repo/a", ts="2026-11-02T12:30:00Z", u=None),
+                summary("f-clear"),
+            ]), p.T0, p.HARD_CLOSE)
+        self.assertEqual(links_late, {})
+        self.assertEqual(without_late["startup"], 1)
+        self.assertEqual(without_late["not_startup"], 1)
+        # Second forced can't steal an already-linked donor; another candidate wins
+        rows_tie = [
+            start("early", repo_dir="/repo/a", ts="2026-11-02T11:00:00Z"),
+            summary("early", last_call="2026-11-02T12:50:00Z"), rating("early"),
+            start("late", repo_dir="/repo/a", ts="2026-11-02T11:30:00Z"),
+            summary("late", last_call="2026-11-02T12:50:00Z"), rating("late"),
+            start("f1", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/a", ts="2026-11-02T12:00:00Z", u=None),
+            summary("f1"),
+            start("f2", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/a", ts="2026-11-02T12:10:00Z", u=None),
+            summary("f2"),
+        ]
+        links_tie, _, _ = p.crossover_links(p.session_records(rows_tie), p.T0, p.HARD_CLOSE)
+        self.assertEqual(links_tie["late"], "f1")
+        self.assertEqual(links_tie["early"], "f2")
+        # Same first-start: larger session id wins
+        rows_id = [
+            start("aaa", repo_dir="/repo/a", ts="2026-11-02T11:00:00Z"),
+            summary("aaa", last_call="2026-11-02T12:50:00Z"), rating("aaa"),
+            start("zzz", repo_dir="/repo/a", ts="2026-11-02T11:00:00Z"),
+            summary("zzz", last_call="2026-11-02T12:50:00Z"), rating("zzz"),
+            start("f", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/a", ts="2026-11-02T12:00:00Z", u=None),
+            summary("f"),
+        ]
+        self.assertEqual(
+            p.crossover_links(p.session_records(rows_id), p.T0, p.HARD_CLOSE)[0],
+            {"zzz": "f"})
+
+    def test_crossovers_credited_and_unanalysable(self):
+        donor = {"session": "d", "mode": "claude-only", "ts": p.instant("2026-11-02T12:00:00Z"),
+                 "usd": 2.0, "finished": 1, "status": "analysed"}
+        forced_ok = {"session": "f", "mode": "orchestrator", "usd": 3.0, "finished": 2, "status": "analysed"}
+        credited, arms = p.crossovers_credited(
+            [donor], {"d": "f"}, {"f": forced_ok}, {"d": "claude-only"})
+        self.assertEqual((credited[0]["usd"], credited[0]["finished"]), (5.0, 3))
+        self.assertEqual(arms["claude-only"],
+                         {"donors": 1, "donors_analysed": 1, "forced_unanalysable": 0})
+        # Hand-computed H1 change: primary with donor only vs credited
+        orch = {"session": "o", "mode": "orchestrator", "ts": p.instant("2026-11-03T00:00:00Z"),
+                "usd": 3.0, "finished": 1, "status": "analysed"}
+        van = {"session": "v", "mode": "vanilla", "ts": p.instant("2026-11-03T00:00:00Z"),
+               "usd": 1.0, "finished": 1, "status": "analysed"}
+        base = p.estimate([donor, orch, van])
+        credited_sessions, _ = p.crossovers_credited(
+            [donor, orch, van], {"d": "f"}, {"f": forced_ok}, {"d": "claude-only"})
+        # usd_c 2→5, finished_c 1→3; H1 = (uo*fc)/(uc*fo) = (3*3)/(5*1) = 1.8 vs (3*1)/(2*1)=1.5
+        self.assertEqual(base["h1"]["observed"], 1.5)
+        self.assertEqual(p.estimate(credited_sessions)["h1"]["observed"], 1.8)
+        stale = {**forced_ok, "status": "stale", "usd": 0, "finished": 0}
+        credited2, arms2 = p.crossovers_credited(
+            [donor, orch, van], {"d": "f"}, {"f": stale}, {"d": "claude-only"})
+        self.assertEqual(credited2[0]["usd"], 2.0)
+        self.assertEqual(arms2["claude-only"]["forced_unanalysable"], 1)
+        # Non-analysed donor contributes nothing
+        credited3, arms3 = p.crossovers_credited(
+            [orch, van], {"d": "f"}, {"f": forced_ok}, {"d": "claude-only"})
+        self.assertEqual(arms3["claude-only"]["donors"], 1)
+        self.assertEqual(arms3["claude-only"]["donors_analysed"], 0)
+        self.assertEqual([s["usd"] for s in credited3 if s["session"] == "o"], [3.0])
+
+    def test_no_handoffs_drops_continuation_and_partial_once(self):
+        items = [item(continuation=True), item(start=1, status="partial"),
+                 item(start=2, continuation=True, status="partial"),
+                 item(start=3, type="field-report", status="partial"),
+                 item(start=4)]
+        rows = [start(), summary(usd_list_price=20),
+                rating(prompts=5, items=items,
+                       prompt_ts=[f"2026-11-02T1{i}:00:00Z" for i in range(5)])]
+        sessions = self.analysed(rows)
+        costs = {"s": [{"usd": 2}, {"usd": 3}, {"usd": 4}, {"usd": 5}, {"usd": 6}]}
+        kept, excluded = p.no_handoffs(sessions, costs)
+        # Drop cont(2) + partial(3) + partial-cont(4) once each; keep field-report and finished item
+        self.assertEqual((kept[0]["usd"], kept[0]["finished"]), (20 - 9, 1))
+        self.assertFalse(excluded["claude-only"])
+        no_cont, _ = p.no_continuations(sessions, costs)
+        self.assertEqual(kept[0]["finished"], no_cont[0]["finished"])
+        self.assertEqual(p.no_handoffs(sessions, {})[1]["claude-only"]["item_costs_failed"], 1)
+        costs_bad = {"s": [{"usd": None}, {"usd": 3}, {"usd": 4}, {"usd": 5}, {"usd": 6}]}
+        self.assertEqual(p.no_handoffs(sessions, costs_bad)[1]["claude-only"]["continuation_unpriced"], 1)
+        costs_partial = {"s": [{"usd": 2}, {"usd": None}, {"usd": 4}, {"usd": 5}, {"usd": 6}]}
+        self.assertEqual(p.no_handoffs(sessions, costs_partial)[1]["claude-only"]["partial_unpriced"], 1)
+        # Partial continuation labelled continuation_unpriced
+        costs_pc = {"s": [{"usd": 2}, {"usd": 3}, {"usd": None}, {"usd": 5}, {"usd": 6}]}
+        self.assertEqual(p.no_handoffs(sessions, costs_pc)[1]["claude-only"]["continuation_unpriced"], 1)
+        # Both unpriced categories: continuation wins
+        costs_both = {"s": [{"usd": None}, {"usd": None}, {"usd": 4}, {"usd": 5}, {"usd": 6}]}
+        self.assertEqual(p.no_handoffs(sessions, costs_both)[1]["claude-only"],
+                         {"continuation_unpriced": 1})
+
+    def test_crossover_post_close_links_and_without_donor_window_only(self):
+        close = p.HARD_CLOSE
+        post = p.iso(close + timedelta(minutes=15))
+        donor_last = p.iso(close - timedelta(minutes=10))
+        rows = [
+            start("d", repo_dir="/repo/post", ts=p.iso(close - timedelta(hours=1))),
+            summary("d", last_call=donor_last, transcript=str(self.transcript), usd_list_price=2),
+            rating("d"),
+            start("f-post", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/post", ts=post, u=None),
+            summary("f-post", last_call=post, transcript=str(self.transcript), usd_list_price=4),
+            rating("f-post"),
+            start("f-lonely", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/nowhere", ts=post, u=None),
+            summary("f-lonely", last_call=post),
+            start("o", "orchestrator", ts=p.iso(close - timedelta(hours=2))),
+            summary("o", transcript=str(self.transcript), usd_list_price=3), rating("o"),
+            start("v", "vanilla", ts=p.iso(close - timedelta(hours=2))),
+            summary("v", transcript=str(self.transcript), usd_list_price=1), rating("v"),
+        ]
+        links, without, _ = p.crossover_links(p.session_records(rows), p.T0, close)
+        self.assertEqual(links, {"d": "f-post"})
+        self.assertEqual(without, {"startup": 0, "not_startup": 0, "total": 0})
+        counts = {"d": 1, "f-post": 1, "o": 1, "v": 1}
+        out = p.outcomes(rows, close, counts, {s: [{"usd": 0}] for s in counts},
+                         [], {"available": False}, None)
+        self.assertEqual(out["crossovers"]["arms"]["claude-only"]["donors"], 1)
+        self.assertEqual(out["crossovers"]["forced_without_donor"]["total"], 0)
+        # primary: uc=2,fc=1,uo=3,fo=1 → 1.5; credited uc=6,fc=2 → (3*2)/(6*1)=1
+        self.assertEqual(out["primary"]["h1"]["observed"], 1.5)
+        self.assertEqual(out["sensitivity"]["crossovers_credited"]["h1"]["observed"], 1.0)
+
+        other = self.root / "post-close.jsonl"
+        guess_log = self.root / "post-guesses.jsonl"
+        stripped = [r for r in rows if not (r.get("event") == "rating" and r.get("session") == "f-post")]
+        write(other, stripped)
+
+        def fake_rate_packet(packet, n, agent, model, timeout, report_starts=()):
+            return [item()] if n else []
+
+        with mock.patch.object(rate, "rate_packet", side_effect=fake_rate_packet), \
+                mock.patch("blinding.guess_packet", return_value="C"):
+            code, out, err = self.invoke("--prepare", "--session-log", str(other),
+                                         "--guess-log", str(guess_log), now=AFTER)
+        self.assertEqual(code, 0, err)
+        forced_ratings = [json.loads(line) for line in other.read_text().splitlines()
+                          if json.loads(line).get("event") == "rating"
+                          and json.loads(line).get("session") == "f-post"]
+        self.assertEqual(len(forced_ratings), 1)
+
+    def test_next_share_bare_next_args_and_typed(self):
+        write(self.transcript, [self.next_command()])
+        rows = [start("next"), summary("next", transcript=str(self.transcript)), rating("next")]
+        counts, _, first = p.read_transcript_inputs(self.records(rows), ({}, None))
+        self.assertEqual(first["next"], True)
+        # /next ARGS still renders as NEXT_PROMPT (args dropped) when no remaining text
+        t2 = self.root / "t2.jsonl"
+        write(t2, [{"type": "user", "timestamp": "2026-11-02T12:00:00Z",
+                    "message": {"content":
+                        "<command-name>/next</command-name><command-args>focus</command-args>"}}])
+        rows = [start("args"), summary("args", transcript=str(t2)), rating("args")]
+        _, _, first = p.read_transcript_inputs(self.records(rows), ({}, None))
+        self.assertEqual(first["args"], True)
+        # /next followed by typed remaining text is not bare
+        t3 = self.root / "t3.jsonl"
+        write(t3, [self.next_command("focus")])
+        rows = [start("extra"), summary("extra", transcript=str(t3)), rating("extra")]
+        _, _, first = p.read_transcript_inputs(self.records(rows), ({}, None))
+        self.assertEqual(first["extra"], False)
+        t4 = self.root / "t4.jsonl"
+        write(t4, [user()])
+        rows = [start("typed"), summary("typed", transcript=str(t4)), rating("typed")]
+        _, _, first = p.read_transcript_inputs(self.records(rows), ({}, None))
+        self.assertEqual(first["typed"], False)
+        t5 = self.root / "t5.jsonl"
+        t5.write_text("")
+        rows = [start("empty"), summary("empty", transcript=str(t5)),
+                rating("empty", prompts=0, items=[], prompt_ts=[])]
+        counts, _, first = p.read_transcript_inputs(self.records(rows), ({}, None))
+        self.assertEqual(counts["empty"], 0)
+        self.assertIsNone(first["empty"])
+
+    def test_prepare_guard_and_guess_rating_totals(self):
+        write(self.log, self.dry_rows())
+        with mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": str(self.log)}):
+            with mock.patch.object(p, "cmd_prepare", side_effect=AssertionError("prepared")):
+                code, out, err = self.invoke("--prepare")
+            self.assertNotEqual(code, 0)
+            self.assertIn("close is provisional at", err)
+        # Other log: append guesses for analysed sessions; rate linked forced
+        other = self.root / "other.jsonl"
+        forced_t = self.root / "forced.jsonl"
+        write(forced_t, [user()])
+        rows = self.dry_rows() + [
+            start("donor", repo_dir="/repo/x", ts="2026-11-02T11:00:00Z"),
+            summary("donor", transcript=str(self.transcript), last_call="2026-11-02T12:00:00Z",
+                    usd_list_price=2),
+            rating("donor"),
+            start("forced1", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/x", ts="2026-11-02T12:30:00Z", u=None),
+            summary("forced1", transcript=str(forced_t), last_call="2026-11-02T12:40:00Z",
+                    usd_list_price=1),
+        ]
+        # Point dry_rows transcripts at self.transcript (already set)
+        write(other, rows)
+        guess_log = self.root / "arm-guesses.jsonl"
+        calls = {"rate": 0, "guess": 0}
+
+        def fake_rate_packet(packet, n, agent, model, timeout, report_starts=()):
+            calls["rate"] += 1
+            return [item()] if n else []
+
+        def fake_guess(packet, model="auto", timeout=600):
+            calls["guess"] += 1
+            return "B"
+
+        with mock.patch.object(rate, "rate_packet", side_effect=fake_rate_packet), \
+                mock.patch("blinding.guess_packet", side_effect=fake_guess):
+            code, out, err = self.invoke("--prepare", "--session-log", str(other),
+                                         "--guess-log", str(guess_log), now=AFTER)
+        self.assertEqual(code, 0, err)
+        self.assertIn("prepare:", out)
+        self.assertNotRegex(out + err, r"\b(orchestrator|claude-only|vanilla)\b.*forced1")
+        self.assertNotIn('"guess"', out)
+        self.assertNotIn("/repo/x", out + err)
+        self.assertGreaterEqual(calls["guess"], 1)
+        self.assertEqual(calls["rate"], 1)
+        guesses = [json.loads(line) for line in guess_log.read_text().splitlines()]
+        self.assertTrue(all(row["event"] == "arm_guess" for row in guesses))
+        self.assertTrue(all(row["guess"] == "B" for row in guesses))
+        # Forced rating row appeared
+        forced_ratings = [json.loads(line) for line in other.read_text().splitlines()
+                          if json.loads(line).get("event") == "rating"
+                          and json.loads(line).get("session") == "forced1"]
+        self.assertEqual(len(forced_ratings), 1)
+        self.assertEqual(forced_ratings[0]["rubric"], "v2")
+        # Second run: no new calls
+        calls["rate"] = calls["guess"] = 0
+        with mock.patch.object(rate, "rate_packet", side_effect=fake_rate_packet), \
+                mock.patch("blinding.guess_packet", side_effect=fake_guess):
+            code, out, err = self.invoke("--prepare", "--session-log", str(other),
+                                         "--guess-log", str(guess_log), now=AFTER)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((calls["rate"], calls["guess"]), (0, 0))
+        self.assertIn("guess_present", out)
+
+    def test_prepare_failure_retries_next_run(self):
+        other = self.root / "copy.jsonl"
+        write(other, self.dry_rows())
+        guess_log = self.root / "g.jsonl"
+
+        def boom(*_a, **_k):
+            raise ValueError("nope")
+
+        with mock.patch("blinding.guess_packet", side_effect=boom):
+            code, out, err = self.invoke("--prepare", "--session-log", str(other),
+                                         "--guess-log", str(guess_log), now=AFTER)
+        self.assertEqual(code, 1)
+        self.assertFalse(guess_log.exists())
+        self.assertIn("prereg:", err)
+        self.assertIn("ValueError", err)
+        self.assertNotIn("nope", err)
+
+        with mock.patch("blinding.guess_packet", return_value="A"):
+            code, out, err = self.invoke("--prepare", "--session-log", str(other),
+                                         "--guess-log", str(guess_log), now=AFTER)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(guess_log.exists())
+        self.assertGreater(len(guess_log.read_text().splitlines()), 0)
+
+    def test_prepare_oserror_hides_path(self):
+        other = self.root / "oserr.jsonl"
+        private = "/repo/private-project/transcript.jsonl"
+        rows = [
+            start("donor", repo_dir="/repo/x", ts="2026-11-02T11:00:00Z"),
+            summary("donor", transcript=str(self.transcript), last_call="2026-11-02T12:00:00Z"),
+            rating("donor"),
+            start("forced-i", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/x", ts="2026-11-02T12:30:00Z", u=None),
+            summary("forced-i", transcript=str(self.transcript), last_call="2026-11-02T12:40:00Z",
+                    usd_list_price=1),
+            start("c1"), summary("c1", transcript=str(self.transcript)), rating("c1"),
+            start("o1", "orchestrator"), summary("o1", transcript=str(self.transcript)), rating("o1"),
+            start("v1", "vanilla"), summary("v1", transcript=str(self.transcript)), rating("v1"),
+        ]
+        write(other, rows)
+        guess_log = self.root / "oserr-guesses.jsonl"
+
+        def boom_select(*_a, **_k):
+            # Plain OSError: errno 2 would become FileNotFoundError on construction.
+            raise OSError(f"cannot read {private}")
+
+        with mock.patch.object(rate, "select_sessions", side_effect=boom_select):
+            code, out, err = self.invoke("--prepare", "--session-log", str(other),
+                                         "--guess-log", str(guess_log), now=AFTER)
+        self.assertEqual(code, 1)
+        self.assertRegex(err, r"prereg: forced-i: OSError")
+        self.assertNotIn(private, err)
+        self.assertNotIn("private-project", err)
+        self.assertNotIn("cannot read", err)
+
+    def test_prepare_skips_unrated_forced_with_gone_transcript(self):
+        # It would fail transcript_gone even if rated, so it is no rating failure
+        # and does not keep --prepare exiting 1 on every rerun.
+        other = self.root / "gone.jsonl"
+        rows = [
+            start("donor", repo_dir="/repo/x", ts="2026-11-02T11:00:00Z"),
+            summary("donor", transcript=str(self.transcript), last_call="2026-11-02T12:00:00Z"),
+            rating("donor"),
+            start("forced-g", mode="orchestrator", forced=True, source="startup",
+                  repo_dir="/repo/x", ts="2026-11-02T12:30:00Z", u=None),
+            summary("forced-g", transcript=str(self.root / "gone-transcript.jsonl"),
+                    last_call="2026-11-02T12:40:00Z", usd_list_price=1),
+            start("c1"), summary("c1", transcript=str(self.transcript)), rating("c1"),
+            start("o1", "orchestrator"), summary("o1", transcript=str(self.transcript)), rating("o1"),
+            start("v1", "vanilla"), summary("v1", transcript=str(self.transcript)), rating("v1"),
+        ]
+        write(other, rows)
+        links, _, _ = p.crossover_links(p.session_records(rows), p.T0, p.HARD_CLOSE)
+        self.assertEqual(links, {"donor": "forced-g"})
+        record = p.session_records(rows)["forced-g"]
+        self.assertFalse(p._prepare_needs_rating(record, {"forced-g": None}))
+        self.assertTrue(p._prepare_needs_rating(record, {"forced-g": 3}))
+        with mock.patch.object(rate, "rate_packet", side_effect=AssertionError("rated")), \
+                mock.patch("blinding.guess_packet", return_value="A"):
+            code, out, err = self.invoke("--prepare", "--session-log", str(other),
+                                         "--guess-log", str(self.root / "gone-guesses.jsonl"),
+                                         now=AFTER)
+        self.assertEqual(code, 0, err)
+        self.assertIn("rated 0, rating_failed 0", out)
+
+    def test_outcomes_next_share_per_arm(self):
+        t_next = self.root / "ns-next.jsonl"
+        t_args = self.root / "ns-args.jsonl"
+        t_extra = self.root / "ns-extra.jsonl"
+        t_empty = self.root / "ns-empty.jsonl"
+        write(t_next, [self.next_command()])
+        write(t_args, [{"type": "user", "timestamp": "2026-11-02T12:00:00Z",
+                        "message": {"content":
+                            "<command-name>/next</command-name><command-args>focus</command-args>"}}])
+        write(t_extra, [self.next_command("focus")])
+        t_empty.write_text("")
+        rows = [
+            start("c-next"), summary("c-next", transcript=str(t_next)), rating("c-next"),
+            start("c-args"), summary("c-args", transcript=str(t_args)), rating("c-args"),
+            start("o-extra", "orchestrator"), summary("o-extra", transcript=str(t_extra)),
+            rating("o-extra"),
+            start("v-empty", "vanilla"), summary("v-empty", transcript=str(t_empty)),
+            rating("v-empty", prompts=0, items=[], prompt_ts=[]),
+        ]
+        counts, costs, first = p.read_transcript_inputs(self.records(rows), ({}, None))
+        self.assertEqual(first["c-next"], True)
+        self.assertEqual(first["c-args"], True)
+        self.assertEqual(first["o-extra"], False)
+        self.assertIsNone(first["v-empty"])
+        out = p.outcomes(rows, p.HARD_CLOSE, counts, costs, [], {"available": False}, None,
+                         first_prompts=first)
+        nxt = out["blinding"]["next_share"]
+        self.assertEqual(nxt["claude-only"], {"with_prompts": 2, "next": 2, "share": 1.0})
+        self.assertEqual(nxt["orchestrator"], {"with_prompts": 1, "next": 0, "share": 0.0})
+        self.assertEqual(nxt["vanilla"], {"with_prompts": 0, "next": 0, "share": None})
+
+    def test_outcomes_json_new_keys_and_privacy(self):
+        rows = self.dry_rows()
+        private = ("secret-repo-dir", "secret-owner/repo", "/fakehome/private-working-directory")
+        for row in rows:
+            if row["event"] == "start":
+                row.update(repo_dir=private[0], repo=private[1], cwd=private[2])
+        write(self.log, rows)
+        code, out, err = self.invoke("--outcomes", "--json", "--session-log", str(self.log))
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)["outcomes"]
+        self.assertIn("no_handoffs", data["sensitivity"])
+        self.assertIn("crossovers_credited", data["sensitivity"])
+        self.assertIn("crossovers", data)
+        self.assertIn("blinding", data)
+        self.assertIn("arm_guess", data["blinding"])
+        self.assertIn("next_share", data["blinding"])
+        for secret in private:
+            self.assertNotIn(secret, out + err)
+        text_code, text_out, text_err = self.invoke("--outcomes", "--session-log", str(self.log))
+        self.assertEqual(text_code, 0, text_err)
+        self.assertIn("Crossovers", text_out)
+        self.assertIn("Blinding: arm guess", text_out)
+        self.assertIn("Blinding: first prompt /next", text_out)
+        for secret in private:
+            self.assertNotIn(secret, text_out + text_err)
 
 
 if __name__ == "__main__":

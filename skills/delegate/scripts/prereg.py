@@ -136,9 +136,9 @@ def transcript_path(record):
 
 
 def read_transcript_inputs(records, catalog_cost):
-    """Read typed-prompt counts and pinned item_costs; errors contain no private paths."""
+    """Read typed-prompt counts, /next flags and pinned item_costs; errors omit private paths."""
     import rate
-    counts, costs = {}, {}
+    counts, costs, first_prompts = {}, {}, {}
     for record in records:
         if preliminary_status(record) is not None:
             continue
@@ -146,7 +146,10 @@ def read_transcript_inputs(records, catalog_cost):
         try:
             if path is None:
                 raise FileNotFoundError()
-            counts[session] = len(rate.typed_prompts(rate.json_rows(path)))
+            prompts = rate.typed_prompts(rate.json_rows(path))
+            counts[session] = len(prompts)
+            first_prompts[session] = (None if not prompts
+                                      else prompts[0]["text"] == rate.NEXT_PROMPT)
         except (OSError, ValueError, TypeError):
             counts[session] = None
             continue
@@ -157,7 +160,7 @@ def read_transcript_inputs(records, catalog_cost):
         except Exception:
             # A failure leaves this sensitivity only; never expose an exception's path/message.
             costs[session] = None
-    return counts, costs
+    return counts, costs, first_prompts
 
 
 def analysis_sessions(records, prompt_counts):
@@ -294,6 +297,140 @@ def no_continuations(sessions, item_cost_results):
     return kept, excluded
 
 
+def no_handoffs(sessions, item_cost_results):
+    """Drop continuation and partial USD once; finished matches no_continuations."""
+    import rate
+    kept = []
+    excluded = {mode: Counter() for mode in ARMS}
+    for session in sessions:
+        costs = item_cost_results.get(session["session"])
+        if costs is None:
+            excluded[session["mode"]]["item_costs_failed"] += 1
+            continue
+        items = session["record"]["rating"]["items"]
+        cont_unpriced = partial_unpriced = False
+        dropped = []
+        for item, spent in zip(items, costs):
+            if item.get("type") == rate.FIELD_REPORT:
+                continue
+            continuation = bool(item.get("continuation"))
+            partial = item.get("status") == "partial"
+            if not continuation and not partial:
+                continue
+            usd = spent["usd"]
+            if usd is None:
+                if continuation:
+                    cont_unpriced = True
+                else:
+                    partial_unpriced = True
+            else:
+                dropped.append(usd)
+        if cont_unpriced:
+            excluded[session["mode"]]["continuation_unpriced"] += 1
+            continue
+        if partial_unpriced:
+            excluded[session["mode"]]["partial_unpriced"] += 1
+            continue
+        kept.append({**session, "usd": session["usd"] - math.fsum(dropped),
+                     "finished": sum(item.get("status") == "finished" for item in session["items"]
+                                     if not item.get("continuation"))})
+    return kept, excluded
+
+
+CROSSOVER_GAP = timedelta(minutes=60)
+
+
+def crossover_links(records, window, close):
+    """Link forced startups after T0 to window donors; without-donor is window-only.
+
+    A forced session may start after the close; only its donor must be in the window.
+    """
+    all_records = list(records.values()) if isinstance(records, dict) else list(records)
+    by_session = {r["session"]: r for r in all_records}
+    forced, donors = [], []
+    for record in all_records:
+        start = record.get("start") or {}
+        ts = instant(start.get("ts"))
+        if ts is None or not (ts > window):
+            continue
+        if start.get("forced"):
+            forced.append(record)
+            continue
+        if (window < ts < close and cost.is_drawn(start)
+                and start.get("mode") in ("claude-only", "vanilla") and start.get("repo_dir")):
+            donors.append(record)
+    forced.sort(key=lambda r: (instant(r["start"]["ts"]), r["session"]))
+    linked_donors = set()
+    links = {}  # donor session -> forced session
+    without = {"startup": 0, "not_startup": 0, "total": 0}
+    for record in forced:
+        start = record["start"]
+        forced_ts = instant(start["ts"])
+        in_window = window < forced_ts < close
+
+        def count_without(kind):
+            if in_window:
+                without[kind] += 1
+                without["total"] += 1
+
+        if start.get("source") != "startup":
+            count_without("not_startup")
+            continue
+        repo = start.get("repo_dir")
+        if not repo:
+            count_without("startup")
+            continue
+        candidates = []
+        for donor in donors:
+            if donor["session"] in linked_donors:
+                continue
+            dstart = donor["start"]
+            if dstart.get("repo_dir") != repo:
+                continue
+            donor_ts = instant(dstart["ts"])
+            if donor_ts is None or not donor_ts < forced_ts:
+                continue
+            summary = donor.get("summary") or {}
+            last = instant(summary.get("last_call"))
+            if last is None or forced_ts > last + CROSSOVER_GAP:
+                continue
+            candidates.append(donor)
+        if not candidates:
+            count_without("startup")
+            continue
+        chosen = max(candidates, key=lambda d: (instant(d["start"]["ts"]), d["session"]))
+        links[chosen["session"]] = record["session"]
+        linked_donors.add(chosen["session"])
+    return links, without, by_session
+
+
+def crossovers_credited(analysed, links, forced_status, donor_modes):
+    """Add each analysable linked forced session's USD and finished to its donor.
+
+    forced_status maps forced session id -> analysis_sessions entry.
+    donor_modes maps donor session id -> arm name.
+    """
+    analysed_ids = {s["session"]: dict(s) for s in analysed}
+    arms = {mode: {"donors": 0, "donors_analysed": 0, "forced_unanalysable": 0} for mode in ARMS}
+    for donor_id, forced_id in links.items():
+        donor_mode = donor_modes.get(donor_id)
+        if donor_mode not in arms:
+            continue
+        arms[donor_mode]["donors"] += 1
+        if donor_id in analysed_ids:
+            arms[donor_mode]["donors_analysed"] += 1
+        forced = forced_status.get(forced_id)
+        if forced is None or forced.get("status") != "analysed":
+            arms[donor_mode]["forced_unanalysable"] += 1
+            continue
+        if donor_id not in analysed_ids:
+            continue
+        credited = analysed_ids[donor_id]
+        credited["usd"] = credited["usd"] + forced["usd"]
+        credited["finished"] = credited["finished"] + forced["finished"]
+    return list(analysed_ids.values()), arms
+
+
 def under_8h(sessions):
     kept = []
     counts = {mode: {"over_8h": 0, "no_call_times": 0} for mode in ARMS}
@@ -394,9 +531,14 @@ def read_split_commit(close, *, repo_dir=None, provisional=False):
     return choose_split(commits, close, provisional=provisional), None
 
 
-def outcomes(rows, close, prompt_counts, item_cost_results, run_rows, calibration, split_commit):
+def outcomes(rows, close, prompt_counts, item_cost_results, run_rows, calibration, split_commit,
+             *, first_prompts=None, guesses=None):
     """Pure confirmatory calculation; caller alone decides whether to permit an outcome look."""
-    records = window_records(session_records(rows), close)
+    import blinding
+    first_prompts = first_prompts or {}
+    guesses = guesses or {}
+    all_records = session_records(rows)
+    records = window_records(all_records, close)
     sessions = analysis_sessions(records, prompt_counts)
     analysed = [s for s in sessions if s["status"] == "analysed"]
     arms = {}
@@ -420,11 +562,23 @@ def outcomes(rows, close, prompt_counts, item_cost_results, run_rows, calibratio
                       "by_size": dict(sorted(Counter(item["size"] for item in items).items())),
                       "continuation_share": ratio(sum(bool(item.get("continuation")) for item in items), len(items))}
     no_cont, no_cont_excluded = no_continuations(analysed, item_cost_results)
+    no_hand, no_hand_excluded = no_handoffs(analysed, item_cost_results)
     short, duration_counts = under_8h(analysed)
+    links, without_donor, _ = crossover_links(all_records, T0, close)
+    donor_modes = {donor: all_records[donor]["start"]["mode"] for donor in links}
+    forced_status = {}
+    for forced_id in links.values():
+        forced_record = all_records.get(forced_id)
+        if forced_record is None:
+            continue
+        forced_status[forced_id] = analysis_sessions([forced_record], prompt_counts)[0]
+    credited, cross_arms = crossovers_credited(analysed, links, forced_status, donor_modes)
     sensitivity = {"unclear_as_finished": estimate(analysed, "finished_or_unclear"),
                    "size_weighted": estimate(analysed, "size_weighted"),
                    "project_days": estimate(analysed, project_days=True),
                    "no_continuations": {**estimate(no_cont), "excluded": no_cont_excluded},
+                   "no_handoffs": {**estimate(no_hand), "excluded": no_hand_excluded},
+                   "crossovers_credited": estimate(credited),
                    "under_8h": {**estimate(short), "counts": duration_counts}, "split": None}
     if split_commit is not None:
         at = instant(split_commit["committed_at"])
@@ -450,9 +604,37 @@ def outcomes(rows, close, prompt_counts, item_cost_results, run_rows, calibratio
     if pool.get("available"):
         pool["per_finished"] = {m: (ratio(arms[m]["usd"], arms[m]["finished"]) * pool["per_usd"]
                                      if arms[m]["usd_per_finished"] is not None else None) for m in ARMS}
+    rating_packet = {}
+    for row in rows:
+        if row.get("event") == "rating" and isinstance(row.get("session"), str):
+            rating_packet[row["session"]] = row.get("packet_sha256")
+    pairs, no_guess, packet_changed = [], {mode: 0 for mode in ARMS}, {mode: 0 for mode in ARMS}
+    for session in analysed:
+        row = guesses.get(session["session"])
+        if row is None:
+            no_guess[session["mode"]] += 1
+            continue
+        guessed = blinding.LETTERS.get(row.get("guess"))
+        if guessed is None:
+            no_guess[session["mode"]] += 1
+            continue
+        pairs.append((session["mode"], guessed))
+        if row.get("packet_sha256") != rating_packet.get(session["session"]):
+            packet_changed[session["mode"]] += 1
+    next_share = {}
+    for mode in ARMS:
+        live = [s for s in analysed if s["mode"] == mode]
+        with_prompts = [s for s in live if first_prompts.get(s["session"]) is not None]
+        bare_next = sum(first_prompts.get(s["session"]) is True for s in with_prompts)
+        next_share[mode] = {"with_prompts": len(with_prompts), "next": bare_next,
+                            "share": ratio(bare_next, len(with_prompts))}
     return {"arms": arms, "primary": estimate(analysed), "sensitivity": sensitivity,
             "allocation": allocation(records), "pool_points": pool,
-            "delegate_tokens_per_orchestrator_session": tokens, "projects": projects}
+            "delegate_tokens_per_orchestrator_session": tokens, "projects": projects,
+            "crossovers": {"arms": cross_arms, "forced_without_donor": without_donor},
+            "blinding": {"arm_guess": {**blinding.summarise(pairs), "no_guess": no_guess,
+                                      "packet_changed": packet_changed},
+                         "next_share": next_share}}
 
 
 def json_safe(value):
@@ -535,13 +717,151 @@ def render(result, *, as_json=False):
         for key in ("by_type", "by_size") for group, count in arm[key].items()])
     lines += ["", "Projects"] + cost._table_lines([("PROJECT", "H1", "DEFINED")] + [
         (project["project"], fmt(project["h1"]), str(project["defined"])) for project in out["projects"]])
+    cross = out["crossovers"]
+    lines += ["", "Crossovers"] + cost._table_lines(
+        [("MODE", "DONORS", "DONORS ANALYSED", "FORCED UNANALYSABLE")] + [
+            (mode, str(cross["arms"][mode]["donors"]), str(cross["arms"][mode]["donors_analysed"]),
+             str(cross["arms"][mode]["forced_unanalysable"])) for mode in ARMS])
+    without = cross["forced_without_donor"]
+    lines.append(f"forced without donor: {without['total']} "
+                 f"(startup {without['startup']}, not startup {without['not_startup']})")
+    guess = out["blinding"]["arm_guess"]
+    guess_header = ("TRUE\\GUESS",) + ARMS
+    guess_rows = [guess_header] + [
+        (arm, *(str(guess["table"][arm][g]) for g in ARMS)) for arm in ARMS]
+    lines += ["", "Blinding: arm guess"] + cost._table_lines(guess_rows)
+    lines.append(f"n={guess['n']}; accuracy={fmt(guess['accuracy'])}; "
+                 f"majority={fmt(guess['majority_accuracy'])}; kappa={fmt(guess['kappa'])}")
+    lines += cost._table_lines([("MODE", "NO GUESS", "PACKET CHANGED")] + [
+        (mode, str(guess["no_guess"][mode]), str(guess["packet_changed"][mode])) for mode in ARMS])
+    nxt = out["blinding"]["next_share"]
+    lines += ["", "Blinding: first prompt /next"] + cost._table_lines(
+        [("MODE", "WITH PROMPTS", "NEXT", "SHARE")] + [
+            (mode, str(nxt[mode]["with_prompts"]), str(nxt[mode]["next"]), fmt(nxt[mode]["share"]))
+            for mode in ARMS])
     lines += ["", "Sensitivity exclusions"] + cost._table_lines(
-        [("MODE", "ITEM COSTS FAILED", "CONT UNPRICED", "OVER 8H", "NO CALL TIMES")] + [
-            (mode, str(out["sensitivity"]["no_continuations"]["excluded"][mode].get("item_costs_failed", 0)),
+        [("MODE", "ITEM COSTS FAILED", "CONT UNPRICED", "NH ITEM COSTS", "NH CONT UNPRICED",
+          "NH PARTIAL UNPRICED", "OVER 8H", "NO CALL TIMES")] + [
+            (mode,
+             str(out["sensitivity"]["no_continuations"]["excluded"][mode].get("item_costs_failed", 0)),
              str(out["sensitivity"]["no_continuations"]["excluded"][mode].get("continuation_unpriced", 0)),
+             str(out["sensitivity"]["no_handoffs"]["excluded"][mode].get("item_costs_failed", 0)),
+             str(out["sensitivity"]["no_handoffs"]["excluded"][mode].get("continuation_unpriced", 0)),
+             str(out["sensitivity"]["no_handoffs"]["excluded"][mode].get("partial_unpriced", 0)),
              str(out["sensitivity"]["under_8h"]["counts"][mode]["over_8h"]),
              str(out["sensitivity"]["under_8h"]["counts"][mode]["no_call_times"])) for mode in ARMS])
     return "\n".join(lines)
+
+
+def default_guess_log(session_log):
+    return Path(session_log).resolve().parent / "arm-guesses.jsonl"
+
+
+def _prepare_needs_rating(record, prompt_counts):
+    """True when a linked forced session fails analysis only for rating currency."""
+    status = preliminary_status(record)
+    if status in ("pending", "ghost", "unpriced"):
+        return False
+    if status == "unrated":
+        # A gone transcript (probe count None) would still fail as transcript_gone.
+        return prompt_counts.get(record["session"]) is not None
+    if status is not None:
+        return False
+    count = prompt_counts.get(record["session"])
+    if count is None:
+        return False  # transcript_gone: not a rating-only failure
+    return count != record["rating"]["prompts"]
+
+
+def cmd_prepare(args, log, rows, result, experiment_log):
+    import ask
+    import blinding
+    import rate
+    close = instant(result["close"])
+    all_records = session_records(rows)
+    window = window_records(all_records, close)
+    links, _, _ = crossover_links(all_records, T0, close)
+    catalog_cost = cost.load_catalog_cost()
+    forced_records = [all_records[fid] for fid in links.values() if fid in all_records]
+    counts, _, _ = read_transcript_inputs([*window, *forced_records], catalog_cost)
+    # Unrated forced sessions are skipped by read_transcript_inputs; probe their transcripts too.
+    for record in forced_records:
+        session = record["session"]
+        if session in counts or preliminary_status(record) not in (None, "unrated"):
+            continue
+        path = transcript_path(record) if record.get("summary") is not None else None
+        try:
+            if path is None:
+                raise FileNotFoundError()
+            counts[session] = len(rate.typed_prompts(rate.json_rows(path)))
+        except (OSError, ValueError, TypeError):
+            counts[session] = None
+
+    rated = rating_failed = rating_present = 0
+    failed = False
+    for donor_id, forced_id in sorted(links.items(), key=lambda pair: pair[1]):
+        record = all_records.get(forced_id)
+        if record is None or not _prepare_needs_rating(record, counts):
+            if record is not None and preliminary_status(record) is None:
+                count = counts.get(forced_id)
+                if count is not None and count == record.get("rating", {}).get("prompts"):
+                    rating_present += 1
+            continue
+        try:
+            selected = rate.select_sessions(rows, [forced_id])
+            if not selected:
+                raise ValueError("session not selectable")
+            sel = selected[0]
+            if "error" in sel:
+                raise ValueError(sel["error"])
+            packet = rate.build_packet(sel)
+            n = len(sel["prompts"])
+            items = (rate.rate_packet(packet, n, "cursor", "auto", 600,
+                                      rate.field_report_prompts(sel["prompts"])) if n else [])
+            rate.append_rating(log, rate.rating_row(sel, packet, items, "cursor", "auto"))
+            rated += 1
+            rows = cost.load_jsonl(log)
+            all_records = session_records(rows)
+        except (ValueError, OSError, ask.AskFailed) as exc:
+            print(f"prereg: {forced_id[:8]}: {type(exc).__name__}", file=sys.stderr)
+            rating_failed += 1
+            failed = True
+
+    rows = cost.load_jsonl(log)
+    all_records = session_records(rows)
+    window = window_records(all_records, close)
+    forced_records = [all_records[fid] for fid in links.values() if fid in all_records]
+    counts, _, _ = read_transcript_inputs([*window, *forced_records], catalog_cost)
+    sessions = analysis_sessions(window, counts)
+    analysed = sorted((s for s in sessions if s["status"] == "analysed"),
+                      key=lambda s: (s["ts"], s["session"]))
+    guess_path = Path(args.guess_log) if args.guess_log else default_guess_log(log)
+    existing = blinding.read_guesses(guess_path)
+    guessed = guess_failed = guess_present = 0
+    for session in analysed:
+        if session["session"] in existing:
+            guess_present += 1
+            continue
+        try:
+            selected = rate.select_sessions(rows, [session["session"]])
+            if not selected:
+                raise ValueError("session not selectable")
+            sel = selected[0]
+            if "error" in sel:
+                raise ValueError(sel["error"])
+            packet = rate.build_packet(sel)
+            letter = blinding.guess_packet(packet, "auto", 600)
+            rate.append_rating(guess_path, blinding.guess_row(session["session"], letter, packet, "auto"))
+            guessed += 1
+            existing[session["session"]] = True
+        except (ValueError, OSError, ask.AskFailed) as exc:
+            print(f"prereg: {session['session'][:8]}: {type(exc).__name__}", file=sys.stderr)
+            guess_failed += 1
+            failed = True
+    print(f"prepare: rated {rated}, rating_failed {rating_failed}, rating_present {rating_present}, "
+          f"guessed {guessed}, guess_failed {guess_failed}, guess_present {guess_present}")
+    if failed:
+        sys.exit(1)
 
 
 def cmd_prereg(args):
@@ -553,18 +873,31 @@ def cmd_prereg(args):
     split, unavailable = read_split_commit(instant(result["close"]), repo_dir=args.repo_dir,
                                           provisional=result["close_provisional"])
     result.update(split_commit=split, split_unavailable=unavailable)
-    if args.outcomes and experiment_log and not result["freeze_reached"]:
+    gated = (args.outcomes or args.prepare) and experiment_log and not result["freeze_reached"]
+    if gated:
         print(render(result, as_json=args.json))
         if result["close_provisional"]:
             sys.exit("freeze not yet known: the close is provisional at " + result["close"])
-        sys.exit("outcomes held until freeze " + result["freeze"])
+        sys.exit(("outcomes" if args.outcomes else "prepare") + " held until freeze " + result["freeze"])
+    if args.prepare:
+        cmd_prepare(args, log, rows, result, experiment_log)
+        return
     if args.outcomes:
         import calibrate
-        records = window_records(session_records(rows), instant(result["close"]))
-        counts, costs = read_transcript_inputs(records, cost.load_catalog_cost())
+        import blinding
+        close = instant(result["close"])
+        all_records = session_records(rows)
+        window = window_records(all_records, close)
+        links, _, _ = crossover_links(all_records, T0, close)
+        forced_records = [all_records[fid] for fid in links.values() if fid in all_records]
+        counts, costs, first_prompts = read_transcript_inputs(
+            [*window, *forced_records], cost.load_catalog_cost())
         calibration = read_calibration(calibrate.saved_path(args.calibration, args.quota_log))
-        result["outcomes"] = outcomes(rows, instant(result["close"]), counts, costs,
-                                      cost.load_jsonl(args.log or cost.DEFAULT_LOG), calibration, split)
+        guess_path = Path(args.guess_log) if args.guess_log else default_guess_log(log)
+        guesses = blinding.read_guesses(guess_path)
+        result["outcomes"] = outcomes(rows, close, counts, costs,
+                                      cost.load_jsonl(args.log or cost.DEFAULT_LOG), calibration, split,
+                                      first_prompts=first_prompts, guesses=guesses)
         if experiment_log and not any(row.get("event") == "rating" and instant(row.get("ts")) is not None
                                       and instant(row["ts"]) >= instant(result["freeze"]) for row in rows):
             print("warning: no rating row at or after the freeze; run the last default delegate rate", file=sys.stderr)
@@ -572,7 +905,10 @@ def cmd_prereg(args):
 
 
 def _add_args(parser):
-    parser.add_argument("--outcomes", action="store_true")
+    exclusive = parser.add_mutually_exclusive_group()
+    exclusive.add_argument("--outcomes", action="store_true")
+    exclusive.add_argument("--prepare", action="store_true")
+    parser.add_argument("--guess-log", metavar="PATH")
     parser.add_argument("--json", action="store_true")
     for name in ("session-log", "log", "repo-dir", "calibration", "quota-log"):
         parser.add_argument("--" + name)

@@ -45,6 +45,8 @@ class _SecretGuardHarness:
         self.env.pop("CLAUDE_SESSION_LOG", None)
         self.env["HOME"] = str(self.tmp / "home")
         (self.tmp / "home").mkdir()
+        # A TMPDIR inside a git tree (a delegate verify's .delegate/tmp) must not lend self.tmp a repo.
+        self.env["GIT_CEILING_DIRECTORIES"] = str(self.tmp.parent)
 
     def run_hook(self, payload=None, argv=None, stdin_text=None, env=None, cwd=None):
         cmd = [sys.executable, str(HOOK), *(argv or [])]
