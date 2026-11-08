@@ -69,6 +69,7 @@ def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None, pref
         rows.append({"delegate": d, "metrics": metrics, "source": source,
                      "left": left, "pace": pace, "problems": problems,
                      "unknown_pools": unknown,
+                     "quota_read": left is not None and not unknown and not problems,
                      "preferred": d["id"] in pref_index})
 
     # normalise each metric to 0..1 against the best candidate. Speed and price
@@ -106,11 +107,10 @@ def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None, pref
         r["excluded"] = r["left"] is not None and r["left"] < min_quota
         r["score"] = 0.0 if r["excluded"] else 100 * r["quality"] * r["quota_factor"]
 
-    # Preferred delegates that clear the quota filter lead, in catalog/CLI order.
-    # Preference never resurrects an exhausted pool; those stay excluded and
-    # sort with everyone else by score (excluded → 0).
+    # Preference leads only with healthy readings for every pool and enough quota.
+    # Unread preferences sort by score; exhausted pools stay excluded (score → 0).
     def sort_key(r):
-        if r["preferred"] and not r["excluded"]:
+        if r["preferred"] and r["quota_read"] and not r["excluded"]:
             return (0, pref_index[r["delegate"]["id"]])
         return (1, -r["score"])
 
@@ -144,7 +144,7 @@ def render(task_name, task, rows):
         if r["excluded"]:
             tag += " (excluded)"
         elif r.get("preferred"):
-            tag += " (pref)"
+            tag += " (pref)" if r["quota_read"] else " (pref, quota ?)"
         rounds = r.get("rounds_left")
         table.append((
             tag,
@@ -161,7 +161,7 @@ def render(task_name, task, rows):
     out.append("")
     out.append("QUAL = weighted AA metrics vs the best candidate (speed^0.5, price^0.35 damped); "
                "SCORE = QUAL x sqrt(quota left) x pace bonus (<=+15%), x0.8 for Claude subagents (shared pool). "
-               "pref = catalog/CLI preference (outranks score when the pool clears min_quota). "
+               "pref = catalog/CLI preference (outranks score only when every pool was read and clears min_quota). "
                "QUOTA ? = unknown pool (neither excluded nor treated as full).")
     out.append("ROUNDS = rounds left in the delegate's tightest pool at its median per-round cost "
                "from the logs (n >= 3).")

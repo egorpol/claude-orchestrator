@@ -93,6 +93,7 @@ class SessionModeTests(unittest.TestCase):
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith("CLAUDE_SESSION_")}
         self.env.update({"CLAUDE_SESSION_LOG": str(self.log),
+                         "DELEGATE_CATALOG_LOCAL": "",
                          "CLAUDE_SESSION_MODE_CONFIG": str(self.config),
                          "CLAUDE_SESSION_RULES_DIR": str(self.rules),
                          "CLAUDE_SESSION_QUOTA": "0",

@@ -130,6 +130,53 @@ class TestPreferExclusion(unittest.TestCase):
         self.assertNotIn("cursor-auto (pref)", text)
 
 
+class TestPreferQuotaRead(unittest.TestCase):
+    def test_unread_first_preference_yields_to_read_preference(self):
+        for entry in (None, {"error": "reader off"}):
+            with self.subTest(entry=entry):
+                cat = _catalog()
+                pools = _pools_ok()
+                pools.pop("cursor-auto")
+                if entry is not None:
+                    pools["cursor-auto"] = entry
+                task, rows = route.rank("implement", cat, pools, {})
+                self.assertEqual(rows[0]["delegate"]["id"], "codex-sol")
+                cursor = next(r for r in rows if r["delegate"]["id"] == "cursor-auto")
+                self.assertFalse(cursor["excluded"])
+                self.assertEqual(cursor["quota_factor"], 0.7)
+                text = route.render("implement", task, rows)
+                self.assertIn("cursor-auto (pref, quota ?)", text)
+                self.assertIn("pick: codex-sol", text)
+                self.assertIn("only when every pool was read and clears min_quota", text)
+
+    def test_partially_read_preference_does_not_lead(self):
+        for entry in (None, {"error": "unavailable"}):
+            with self.subTest(entry=entry):
+                cat = _catalog()
+                cursor = next(d for d in cat["delegates"] if d["id"] == "cursor-auto")
+                cursor["pools"].append("cursor-premium")
+                pools = _pools_ok()
+                if entry is not None:
+                    pools["cursor-premium"] = entry
+                task, rows = route.rank("implement", cat, pools, {})
+                self.assertEqual(rows[0]["delegate"]["id"], "codex-sol")
+                row = next(r for r in rows if r["delegate"]["id"] == "cursor-auto")
+                self.assertEqual(row["left"], 70)
+                self.assertFalse(row["excluded"])
+                self.assertIn("cursor-auto (pref, quota ?)", route.render("implement", task, rows))
+
+    def test_all_preferences_unread_sort_by_score(self):
+        for prefer, pools in ((None, {}), (["cursor-auto", "cursor-grok"], {}),
+                              (["cursor-auto", "cursor-grok"],
+                               {"codex-5h": {"left_pct": 80, "pace": 1.0}})):
+            with self.subTest(prefer=prefer, pools=pools):
+                cat = _catalog()
+                _, rows = route.rank("implement", cat, pools, {}, prefer=prefer)
+                self.assertEqual(rows[0]["delegate"]["id"], "codex-astra")
+                self.assertEqual([r["score"] for r in rows],
+                                 sorted((r["score"] for r in rows), reverse=True))
+
+
 class TestUnknownPool(unittest.TestCase):
     def test_unknown_pool_is_neutral_not_excluded(self):
         cat = _catalog()
@@ -148,6 +195,10 @@ class TestUnknownPool(unittest.TestCase):
 
 
 class TestRealCatalog(unittest.TestCase):
+    def test_cursor_usage_reader_is_off_by_default(self):
+        cat = json.loads((SCRIPTS / "catalog.json").read_text())
+        self.assertIs(cat["cursor_usage_reader"], False)
+
     def test_catalog_has_prefer_and_grok(self):
         cat = json.loads((SCRIPTS / "catalog.json").read_text())
         self.assertEqual(cat["prefer"]["implement"], ["cursor-auto", "codex-sol"])

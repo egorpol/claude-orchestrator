@@ -1291,6 +1291,23 @@ def _cursor_snapshot(timeout=30, log=None):
                 pass
 
 
+def _cursor_usage_reader_error():
+    """Return an off diagnostic unless the merged catalog explicitly opts in."""
+    # Hooks load quota without the scripts dir on sys.path (see check_dispatch).
+    scripts = Path(__file__).resolve().parent
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import catalog as catalog_mod  # noqa: E402
+
+    off = ('cursor /usage reader is off; to opt in, set '
+           '"cursor_usage_reader": true in catalog.local.json')
+    try:
+        enabled = catalog_mod.load(scripts / "catalog.json").get("cursor_usage_reader") is True
+    except catalog_mod.CatalogError as exc:
+        return f"{off}; catalog problem: {exc}"
+    return None if enabled else off
+
+
 def _hybrid_snapshot(timeout, log=None):
     snapshots, errors, carried = [], {}, {}
     try:
@@ -1309,18 +1326,23 @@ def _hybrid_snapshot(timeout, log=None):
             errors["claude_code"] = "claude /usage unavailable"
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
         errors["claude_code"] = _fetch_error(exc, "claude /usage")
-    try:
-        snap, reason, error = _cursor_snapshot(timeout=min(30, timeout), log=log)
-        if snap is not None:
-            snapshots.append(snap)
-            if reason:
-                carried["cursor"] = reason
-        elif error:
-            errors["cursor"] = error
-        else:
-            errors["cursor"] = "cursor /usage unavailable"
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
-        errors["cursor"] = _fetch_error(exc, "cursor /usage")
+    cursor_error = _cursor_usage_reader_error()
+    if cursor_error:
+        # Do not touch the Cursor lock/state or carry an old reading while off.
+        errors["cursor"] = cursor_error
+    else:
+        try:
+            snap, reason, error = _cursor_snapshot(timeout=min(30, timeout), log=log)
+            if snap is not None:
+                snapshots.append(snap)
+                if reason:
+                    carried["cursor"] = reason
+            elif error:
+                errors["cursor"] = error
+            else:
+                errors["cursor"] = "cursor /usage unavailable"
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
+            errors["cursor"] = _fetch_error(exc, "cursor /usage")
     envelope = {"snapshots": snapshots, "_reader_errors": errors, "_carried": carried}
     # A provider present with empty metrics is not a usable reading.
     entries = pools(envelope)

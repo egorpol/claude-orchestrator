@@ -28,6 +28,7 @@ class InstallTests(unittest.TestCase):
         self.bin.mkdir()
         self.calls = self.tmp / "systemctl.calls"
         self.env = {"HOME": str(self.tmp / "home"),
+                    "DELEGATE_CATALOG_LOCAL": "",
                     "XDG_CONFIG_HOME": str(self.tmp / "config"),
                     "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"),
                     "PATH": f"{self.bin}:/usr/bin:/bin", "FAKE_SYSTEMCTL_CALLS": str(self.calls)}

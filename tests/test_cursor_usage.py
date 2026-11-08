@@ -55,6 +55,8 @@ class CursorUsageTests(unittest.TestCase):
         self.env_log = self.tmp / "tui-env.jsonl"
         self.claude_config = self.tmp / "claude-config"
         self.claude_config.mkdir()
+        self.catalog_local = self.tmp / "catalog.local.json"
+        self.catalog_local.write_text(json.dumps({"cursor_usage_reader": True}))
         self.claude_calls = self.tmp / "claude.calls"
         self.codex_calls = self.tmp / "codex.calls"
         self.openusage_calls = self.tmp / "openusage.calls"
@@ -80,7 +82,7 @@ class CursorUsageTests(unittest.TestCase):
             "XDG_CACHE_HOME": str(self.cache),
             "XDG_CONFIG_HOME": str(self.tmp / "config"),
             "CLAUDE_CONFIG_DIR": str(self.claude_config),
-            "DELEGATE_CATALOG_LOCAL": "",
+            "DELEGATE_CATALOG_LOCAL": str(self.catalog_local),
             "FAKE_CURSOR_TUI": "normal",
             "FAKE_CURSOR_TUI_LOG": str(self.tui_log),
             "FAKE_CURSOR_TUI_ENV": str(self.env_log),
@@ -557,14 +559,89 @@ class CursorUsageTests(unittest.TestCase):
         path = SCRIPTS / "quota.py"
         # Ensure scripts dir is not on sys.path for this load.
         cleaned = [p for p in sys.path if Path(p).resolve() != SCRIPTS.resolve()]
-        with mock.patch.object(sys, "path", cleaned):
+        with mock.patch.object(sys, "path", cleaned), mock.patch.dict(sys.modules):
+            sys.modules.pop("catalog", None)
             spec = importlib.util.spec_from_file_location("quota_hook_load", path)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            snap, reason, error = mod._cursor_snapshot(timeout=5, log=self.log)
-        self.assertIsNone(reason)
-        self.assertIsNone(error)
+            envelope = mod._hybrid_snapshot(timeout=5, log=self.log)
+        snap = next(s for s in envelope["snapshots"] if s["provider_id"] == "cursor")
+        self.assertNotIn("cursor", envelope["_reader_errors"])
         self.assertEqual(snap["metrics"]["plan_auto_percent_used"]["used"], 55)
+        self.assertEqual(mod.pools(envelope)["cursor-auto"]["left_pct"], 45)
+
+    def assert_hybrid_cursor_off(self, *diagnostics):
+        state = quota._cursor_state_path(self.log)
+        before = state.read_bytes() if state.exists() else None
+        # Reaching the reader's state path would also allow its lock and cache.
+        with mock.patch.object(quota, "_cursor_state_path",
+                               side_effect=AssertionError("off reader touched Cursor state")):
+            envelope = quota.fetch(source="hybrid", timeout=5, log=self.log)
+            entries = quota.pools(envelope)
+            row, _ = quota.record(log=self.log, timeout=5)
+        for result in (entries, row["pools"]):
+            for pid in ("cursor-auto", "cursor-premium"):
+                error = result[pid]["error"]
+                self.assertIn("off", error)
+                self.assertIn('"cursor_usage_reader": true', error)
+                self.assertIn("catalog.local.json", error)
+                for diagnostic in diagnostics:
+                    self.assertIn(diagnostic, error)
+                self.assertNotIn("left_pct", result[pid])
+                self.assertNotIn("used_pct", result[pid])
+            for pid in ("codex-5h", "codex-7d", "claude-5h", "claude-7d"):
+                self.assertNotIn("error", result[pid])
+        self.assertEqual(entries["codex-5h"]["left_pct"], 80)
+        self.assertEqual(row["pools"]["claude-5h"]["used_pct"], 12.3457)
+        self.assertTrue(self.codex_calls.exists())
+        self.assertTrue(self.claude_calls.exists())
+        self.assertFalse(self.env_log.exists())  # fake cursor-agent invocation log
+        self.assertEqual(self.tui_bytes(), b"")
+        self.assertEqual(state.read_bytes() if state.exists() else None, before)
+        self.assertFalse(Path(str(state) + ".lock").exists())
+
+    def test_hybrid_cursor_reader_is_off_by_default(self):
+        with mock.patch.dict(os.environ, {"DELEGATE_CATALOG_LOCAL": ""}):
+            self.assert_hybrid_cursor_off()
+        self.assertFalse(quota._cursor_state_path(self.log).exists())
+
+    @requires_pty
+    def test_hybrid_cursor_reader_opt_in_calls_agent(self):
+        envelope = quota.fetch(source="hybrid", timeout=5, log=self.log)
+        entries = quota.pools(envelope)
+        self.clear_cursor_state()  # Both entry points must launch the fake on opt-in.
+        row, _ = quota.record(log=self.log, timeout=5)
+        self.assertEqual(entries["cursor-auto"]["left_pct"], 45)
+        self.assertEqual(entries["cursor-premium"]["left_pct"], 54)
+        self.assertEqual(row["pools"]["cursor-auto"]["used_pct"], 55)
+        self.assertEqual(row["pools"]["cursor-premium"]["used_pct"], 46)
+        self.assertEqual(len(self.env_log.read_text().splitlines()), 2)
+        self.assertTrue(quota._cursor_state_path(self.log).exists())
+
+    def test_hybrid_cursor_reader_requires_json_boolean_true(self):
+        for value in ("true", 1, False, None, {}):
+            with self.subTest(value=value):
+                self.catalog_local.write_text(json.dumps({"cursor_usage_reader": value}))
+                self.assert_hybrid_cursor_off()
+
+    def test_hybrid_broken_catalog_keeps_cursor_off_and_other_readers_working(self):
+        for content, diagnostic in (("{", "invalid JSON"),
+                                    ('{"delegates": null}', "delegates must be a list")):
+            with self.subTest(content=content):
+                self.catalog_local.write_text(content)
+                self.assert_hybrid_cursor_off(str(self.catalog_local), diagnostic)
+
+    def test_hybrid_off_does_not_use_last_good_cursor_state(self):
+        state = quota._cursor_state_path(self.log)
+        state.write_text(json.dumps({
+            "last_attempt_at": self.now.isoformat(), "failures": 0,
+            "last_good": {"timestamp": self.now.isoformat(),
+                          "metrics": {"plan_auto_percent_used": {"used": 55},
+                                      "plan_api_percent_used": {"used": 17}},
+                          "resets": {"billing_cycle_end": "2026-11-18T01:53:54+00:00"}},
+        }))
+        with mock.patch.dict(os.environ, {"DELEGATE_CATALOG_LOCAL": ""}):
+            self.assert_hybrid_cursor_off()
 
     @requires_pty
     def test_hybrid_no_openusage_and_reader_string(self):

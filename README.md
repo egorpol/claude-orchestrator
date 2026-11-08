@@ -6,7 +6,7 @@ Claude Code as orchestrator, Codex CLI and Cursor's headless agent as workers. T
 
 This is my own workflow, tuned to my setup. Cursor is my IDE, Claude Code runs inside it as the main agent, and Codex CLI and Cursor's agent run on their own subscriptions. On Claude Pro, Claude's quota ran out first. So Claude orchestrates: it keeps design, data checks and review, and hands mechanical work to whichever pool has quota to spare. The rest of the repo cuts what Claude's own sessions cost, mostly by keeping them short.
 
-It is a snapshot, published in case parts of it are useful to someone else. It is not a general-purpose tool. It assumes Linux, [openusage](https://github.com/janekbaraniewski/openusage) for Cursor's quota data, and Codex and Cursor subscriptions, and it changes whenever my workflow does. Versions are in the [CHANGELOG](CHANGELOG.md).
+It is a snapshot, published in case parts of it are useful to someone else. It is not a general-purpose tool. It assumes Linux and Codex and Cursor subscriptions, and it changes whenever my workflow does. Versions are in the [CHANGELOG](CHANGELOG.md).
 
 ## What it achieved so far
 
@@ -29,7 +29,7 @@ The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysi
 
 | part | what it does |
 |---|---|
-| [`delegate`](skills/delegate/SKILL.md) skill and CLI | Hands work to **Codex CLI** or **Cursor's headless agent** (`cursor-agent --model auto`). Shows live quota per pool via `codex app-server`, `claude -p /usage` and openusage, and ranks models per task type with [Artificial Analysis](https://artificialanalysis.ai/) ratings. Each delegate runs in its own git worktree with a brief, a log and an optional check command. The other vendor reviews the result read-only, and fix rounds resume the same agent session. Claude reviews the diff and applies it uncommitted. |
+| [`delegate`](skills/delegate/SKILL.md) skill and CLI | Hands work to **Codex CLI** or **Cursor's headless agent** (`cursor-agent --model auto`). Shows live quota per pool via `codex app-server`, `claude -p /usage` and (when opted in) Cursor's interactive `/usage` screen, and ranks models per task type with [Artificial Analysis](https://artificialanalysis.ai/) ratings. Each delegate runs in its own git worktree with a brief, a log and an optional check command. The other vendor reviews the result read-only, and fix rounds resume the same agent session. Claude reviews the diff and applies it uncommitted. |
 | [`/field-report`](skills/field-report/SKILL.md) skill | Writes a field report on the current session from any project's chat: `delegate report` fills in the numbers, then Claude writes the narrative. |
 | [`hooks/context-guard.py`](hooks/context-guard.py) | Asks for a handoff before a new work item once context passes about 120k tokens. Holds the first prompt after an hour idle. In orchestrator sessions, nudges once toward `delegate` when spare pools remain unused. |
 | [`hooks/secret-guard.py`](hooks/secret-guard.py) | PreToolUse (Bash) and optional git pre-commit/pre-push: catches API tokens, private keys, home paths, key/env files, private names and added working files (`HANDOFF.md`, direct `feedback/*.md` or `*.jsonl`); also denies a sticking `cd`/`pushd` into a project subdirectory and notices a drifted shell `cwd`. Private literals go in `${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/private-names.txt`, one per line (blanks and `#` comments ignored); output masks names. Per-repo opt-outs: `git config secretGuard.homePaths false`, `git config secretGuard.privateNames false`, `git config secretGuard.workingFiles false`. |
@@ -66,9 +66,12 @@ Prerequisites (`--check` prints install hints):
 
 - `codex`, logged in with `codex login`
 - `cursor-agent`: `curl https://cursor.com/install -fsS | bash`, then `cursor-agent login`. The login needs a browser approval.
-- `openusage` for Cursor's quota data; Codex and Claude quota come from their own CLIs
 - optional: the [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) (needs Node 18.18+), which adds `/codex:review` and `/codex:adversarial-review` for the current checkout. Install it with `claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex`.
 - optional: `ARTIFICIAL_ANALYSIS_API_KEY` (free) for AA's official coding index. Without it, ratings are parsed from the public leaderboard page.
+
+### Cursor quota (opt-in)
+
+Codex quota comes from `codex app-server` and Claude from `claude -p /usage`. Cursor's Auto and premium pools come only from an opt-in reader: a scripted pty session of `cursor-agent`'s interactive `/usage` screen, at most once per 30 minutes, carrying the last good reading in between (never `cursor-agent -p /usage`). Cursor's [Terms of Service](https://cursor.com/terms-of-service) (Last updated September 3, 2026) say you may not "harvest, scrape, or extract data from the Service", and the [Acceptable Use Policy](https://cursor.com/acceptable-use-policy) (Last updated August 11, 2026), which controls over the Terms on acceptable use, lists as a violation "Accessing the Service through automated or non-human means, whether through a bot, script, or otherwise". I asked Cursor whether this reader is allowed; they have not answered clearly yet, so it ships off and turning it on is your own choice under their terms. Opt in with `{"cursor_usage_reader": true}` in `${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/catalog.local.json`. While off, both Cursor pools show `cursor /usage reader is off; to opt in, set "cursor_usage_reader": true in catalog.local.json`, and nothing launches.
 
 ### Desktop attention
 

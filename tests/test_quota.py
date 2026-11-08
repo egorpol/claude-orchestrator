@@ -576,6 +576,8 @@ class HybridTests(unittest.TestCase):
         self.cursor_tui_log = self.tmp / "cursor-tui.log"
         self.claude_config = self.tmp / "claude-config"
         self.claude_config.mkdir()
+        self.catalog_local = self.tmp / "catalog.local.json"
+        self.catalog_local.write_text(json.dumps({"cursor_usage_reader": True}))
         self.env_log = self.tmp / "environ.jsonl"
         fakes = Path(__file__).parent / "fake_agents"
         for name in ("codex", "openusage", "claude", "cursor-agent"):
@@ -588,7 +590,7 @@ class HybridTests(unittest.TestCase):
         self.env = {"HOME": str(self.home), "PATH": str(self.bin),
                     "XDG_CACHE_HOME": str(self.cache), "XDG_CONFIG_HOME": str(self.tmp / "config"),
                     "XDG_DATA_HOME": "hidden-data", "XDG_ANYTHING": "hidden-anything",
-                    "CODEX_HOME": "hidden-codex", "DELEGATE_CATALOG_LOCAL": "",
+                    "CODEX_HOME": "hidden-codex", "DELEGATE_CATALOG_LOCAL": str(self.catalog_local),
                     "CLAUDE_CONFIG_DIR": str(self.claude_config),
                     "FAKE_OPENUSAGE_FILE": str(self.export), "FAKE_OPENUSAGE_LOG": str(self.calls),
                     "FAKE_OPENUSAGE_ENV": str(self.env_log), "FAKE_CODEX_LOG": str(self.codex_calls),
