@@ -1,4 +1,5 @@
 """Confirmatory analysis: fake logs/transcripts and synthetic git objects only."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import hashlib
 import io
 import json

@@ -1,4 +1,5 @@
 """Tests for ask.py with fake cursor-agent and codex on PATH."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import json
 import os
 import signal

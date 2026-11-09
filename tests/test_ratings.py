@@ -1,4 +1,5 @@
 """Tests for ratings.from_page against a fake leaderboard payload."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import json
 import sys
 import tempfile

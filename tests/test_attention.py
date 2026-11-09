@@ -1,4 +1,5 @@
 """Subprocess hook tests: a private PATH can reach only our fake desktop tools."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import json
 import stat
 import subprocess

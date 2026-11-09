@@ -1,4 +1,5 @@
 """Table-driven tests for checks.masked_pipes / failure_line / find_brief_paths."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import sys
 import tempfile
 import unittest

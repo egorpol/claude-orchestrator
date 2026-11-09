@@ -1,4 +1,5 @@
 """Installer tests isolate home/config and fake cursor-agent and systemctl."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import configparser
 import json
 import os
@@ -31,7 +32,8 @@ class InstallTests(unittest.TestCase):
                     "DELEGATE_CATALOG_LOCAL": "",
                     "XDG_CONFIG_HOME": str(self.tmp / "config"),
                     "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"),
-                    "PATH": f"{self.bin}:/usr/bin:/bin", "FAKE_SYSTEMCTL_CALLS": str(self.calls)}
+                    "PATH": f"{self.bin}:{_env.BIN}:/usr/bin:/bin",
+                    "FAKE_SYSTEMCTL_CALLS": str(self.calls)}
         self.units = self.tmp / "config/systemd/user"
         self.service = self.units / "claude-delegate-quota.service"
         self.timer = self.units / "claude-delegate-quota.timer"

@@ -87,7 +87,7 @@ Most of the rules here started as a lesson from a real session. To log one, type
 python3 -m unittest discover -s tests
 ```
 
-The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota.
+The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota. Every `test*.py` module must start with `import _env`, which gives the run a temporary `HOME`/XDG, recording agent stubs, closed HTTP proxies, and an in-process block on non-loopback connects; a stub call or blocked network attempt fails the run and prints the record. Child subprocesses (CLI/hooks) only get the proxy variables, not the socket patches.
 
 ## Roadmap
 

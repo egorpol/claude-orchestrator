@@ -1,4 +1,5 @@
 """Tests for calibrate.py: snapshot pairs, NNLS, Codex rollouts and `cost --calibrate`."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import errno
 import hashlib
 import io

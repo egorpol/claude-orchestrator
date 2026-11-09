@@ -1,4 +1,5 @@
 """Automatic field-report dry runs: fake logs, transcripts and feedback only."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import io
 import json
 import os

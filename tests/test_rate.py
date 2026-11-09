@@ -1,4 +1,5 @@
 """Blinded item rating; only temporary logs, transcripts, repos and fake raters."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import hashlib
 import io
 import json

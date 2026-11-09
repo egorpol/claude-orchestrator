@@ -1,4 +1,5 @@
 """Exact AA matching and frontier reports, entirely from synthetic local data."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import importlib.machinery
 import importlib.util
 import io

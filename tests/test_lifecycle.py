@@ -1,4 +1,5 @@
 """End-to-end delegate lifecycle; no installed agents or agent quota required."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import argparse
 import contextlib
 import importlib.machinery
@@ -1753,21 +1754,27 @@ class LifecycleTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix="delegate-omit-names-")
         self.addCleanup(tmp.cleanup)
         repo = Path(tmp.name)
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=self.env)
-        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, env=self.env)
-        subprocess.run(["git", "config", "user.email", "t@e.invalid"], cwd=repo, check=True, env=self.env)
-        subprocess.run(["git", "config", "core.quotePath", "true"], cwd=repo, check=True, env=self.env)
+        # Drop ambient GIT_CONFIG_COUNT/KEY/VALUE (Cursor sandbox sets quotePath=false
+        # at command-line precedence, which beats `git config core.quotePath true`).
+        env = {k: v for k, v in self.env.items()
+               if k != "GIT_CONFIG_COUNT"
+               and not k.startswith("GIT_CONFIG_KEY_")
+               and not k.startswith("GIT_CONFIG_VALUE_")}
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "config", "user.email", "t@e.invalid"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "config", "core.quotePath", "true"], cwd=repo, check=True, env=env)
         (repo / "seed").write_text("s\n")
-        subprocess.run(["git", "add", "seed"], cwd=repo, check=True, env=self.env)
-        subprocess.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True, env=self.env)
-        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, env=self.env,
+        subprocess.run(["git", "add", "seed"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True, env=env)
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, env=env,
                               capture_output=True, text=True).stdout.strip()
         (repo / "a b.txt").write_bytes(b"s" * (210 * 1024))
         (repo / "café.txt").write_bytes(b"c" * (210 * 1024))
         subprocess.run(["git", "add", "-A", "-N", "--", "a b.txt", "café.txt"], cwd=repo,
-                       check=True, env=self.env)
+                       check=True, env=env)
         patch = subprocess.run(["git", "diff", "--binary", base], cwd=repo, check=True,
-                               capture_output=True, env=self.env).stdout.decode("utf-8", "surrogateescape")
+                               capture_output=True, env=env).stdout.decode("utf-8", "surrogateescape")
         self.assertIn("\t\n", patch)  # space-name +++ line ends with TAB before newline
         self.assertIn(r"\303\251", patch)  # café C-quoted
         trimmed, omitted = runs._trim_review_patch(patch, 200)

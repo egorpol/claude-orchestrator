@@ -1,4 +1,5 @@
 """Session-mode hook subprocess tests: assignment, controls, accounting, failures."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import hashlib
 import importlib.util
 import io

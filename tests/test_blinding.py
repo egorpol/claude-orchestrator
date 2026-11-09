@@ -1,4 +1,5 @@
 """Pure arm-guess helpers: no network, no real cursor-agent."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import hashlib
 import json
 import sys

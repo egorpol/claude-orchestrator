@@ -1,4 +1,5 @@
 """Cursor interactive /usage reader: pty TUI, throttle, hybrid cutover, monitor."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import importlib.util
 import json
 import os

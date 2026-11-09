@@ -1,4 +1,5 @@
 """Tests for cost.py run-log and session transcript summarisation."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import json
 import io
 import os

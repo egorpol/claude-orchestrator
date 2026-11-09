@@ -45,6 +45,7 @@ bash -n install.sh
 ```
 
 - **What the tests cover:**
+  - `tests/_env.py` isolates every `unittest` run (temp `HOME`/XDG, agent stubs, closed proxies, in-process network guard); every `test*.py` must `import _env` first, and `test_hermetic_env.py` guards that plus planted leak/network controls.
   - `tests/test_lifecycle.py` drives launch, the exit packet, followup, review, status, diff, apply, the run log and cleanup, using the fake `codex`/`cursor-agent` in `tests/fake_agents/`.
   - `test_route.py`, `test_cost.py`, `test_calibrate.py`, `test_ask.py` and `test_monitor.py` cover routing preferences, cost accounting, pool calibration, `ask`, and quota windows / per-job costs.
 - **Real-data checks** (read-only, maintainer's machine only):

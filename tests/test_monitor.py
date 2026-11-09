@@ -1,4 +1,5 @@
 """Synthetic-log tests for quota windows, per-job costs and --unused plumbing."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import io
 import json
 import os

@@ -1,4 +1,5 @@
 """Tests for hooks/secret-guard.py (PreToolUse, pre-push, --check)."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import ast
 import json
 import os

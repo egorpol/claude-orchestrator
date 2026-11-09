@@ -1,4 +1,5 @@
 """Unit tests for catalog.local.json merge, load, and `delegate catalog`."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import copy
 import importlib.util
 import io

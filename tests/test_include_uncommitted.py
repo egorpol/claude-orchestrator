@@ -1,4 +1,5 @@
 """delegate launch --include-uncommitted and apply --3way via a temp index."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import argparse
 import hashlib
 import json

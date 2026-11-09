@@ -1,4 +1,5 @@
 """delegate review --working-tree: snapshot of main-checkout dirty state."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import argparse
 import io
 import json

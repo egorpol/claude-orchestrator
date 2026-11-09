@@ -1,4 +1,5 @@
 """Tests for route.rank preferences and unknown pools."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import copy
 import json
 import os

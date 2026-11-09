@@ -1,4 +1,5 @@
 """Field-report collection, using fake Claude transcripts and no live quota."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import io
 import json
 import os

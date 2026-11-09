@@ -1,4 +1,5 @@
 """Guard the real delegate skill's small core and on-demand topic structure."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import hashlib
 from pathlib import Path
 import re

@@ -1,4 +1,5 @@
 """Tests for hooks/context-guard.py thresholds, idle block, and per-session dedupe."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import json
 import os
 import subprocess

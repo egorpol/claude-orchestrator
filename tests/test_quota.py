@@ -1,4 +1,5 @@
 """Quota collectors use scratch transcripts and hybrid fakes, never live data."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import importlib.machinery
 import importlib.util
 import io

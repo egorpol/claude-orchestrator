@@ -1,4 +1,5 @@
 """Secret masking for rater packets; patterns must stay equal to secret-guard's TOKEN_RULES."""
+import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import importlib.util
 import itertools
 import sys
