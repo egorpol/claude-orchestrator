@@ -10,6 +10,7 @@ from unittest import mock
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "delegate" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import frontier  # noqa: E402
 import ratings  # noqa: E402
 
 
@@ -61,14 +62,18 @@ class FromPageTest(unittest.TestCase):
 
 class CurrentPageFixtureTest(unittest.TestCase):
     """24 of the 282 model objects on the live page of 2026-11-08, between that payload
-    chunk's own head and tail. Its speed key is `outputSpeed`; the fake pages above keep
-    the older `medianOutputTokensPerSecond`."""
+    chunk's own head and tail, plus GPT-6.1 Terra (High) from the 2026-11-09 page, first in
+    the list. Its speed key is `outputSpeed`; the fake pages above keep the older
+    `medianOutputTokensPerSecond`."""
 
-    def test_current_layout_parses(self):
+    def models(self):
         page = (Path(__file__).resolve().parent / "fixtures" / "aa-leaderboard-2026-11-08.html")
         with mock.patch.object(ratings, "_get", return_value=page.read_text(encoding="utf-8")):
-            models = ratings.from_page()
-        self.assertEqual(len(models), 22)
+            return ratings.from_page()
+
+    def test_current_layout_parses(self):
+        models = self.models()
+        self.assertEqual(len(models), 23)
         for slug in ("jt-35b-flash", "nova-2-0-omni-reasoning-medium"):
             self.assertNotIn(slug, models)  # no speed key: skipped, as the old anchor did
         sol = models["gpt-6-1-sol-xhigh"]
@@ -80,6 +85,21 @@ class CurrentPageFixtureTest(unittest.TestCase):
         self.assertEqual(sol["price_blended"], 4.0)
         self.assertAlmostEqual(sol["cost_per_task"], 0.5, places=3)
         self.assertFalse(sol["deprecated"])
+
+    def test_fixture_rates_every_shipped_delegate(self):
+        """A slug AA dropped (gpt-5-6-terra by 2026-11-08) leaves its delegate unrated, and
+        the router then scores it 0. A Codex or named Cursor delegate's model and effort must
+        also spell its own slug, so an effort change can't keep another effort's rating."""
+        models = self.models()
+        index, warnings = frontier.aa_index(models)
+        self.assertEqual(warnings, [])
+        shipped = json.loads((SCRIPTS / "catalog.json").read_text())["delegates"]
+        for d in shipped:
+            with self.subTest(delegate=d["id"]):
+                self.assertIn(d["aa"], models)
+                if d["agent"] in ("codex", "cursor") and not d.get("aa_proxy"):
+                    self.assertEqual(frontier.match_aa(d["agent"], d["model"], d.get("effort"),
+                                                       models, index, {}), d["aa"])
 
 
 class CacheTest(unittest.TestCase):

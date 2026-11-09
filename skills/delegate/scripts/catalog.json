@@ -84,14 +84,14 @@
     {
       "id": "codex-terra",
       "agent": "codex",
-      "model": "gpt-5.6-terra",
-      "effort": "max",
-      "aa": "gpt-5-6-terra",
+      "model": "gpt-6.1-terra",
+      "effort": "high",
+      "aa": "gpt-6-1-terra-high",
       "pools": [
         "codex-5h",
         "codex-7d"
       ],
-      "notes": "Faster, cheaper OpenAI option for mechanical work."
+      "notes": "Faster, cheaper OpenAI option for mechanical work; its Codex pool drain is not measured yet. High, not max: blended price ignores effort, so Terra max would outrank Sol although it costs more per task. GPT-5.6 Terra is still offered but AA no longer rates it."
     },
     {
       "id": "cursor-auto",

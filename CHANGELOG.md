@@ -26,6 +26,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- Shipped catalog: `codex-terra` now runs `gpt-6.1-terra` at effort `high` (AA `gpt-6-1-terra-high`). AA no longer rates `gpt-5-6-terra`, so the old entry scored 0 and came last in every route. `tests/test_ratings.py` checks that every shipped delegate's AA slug is in the leaderboard fixture and that each Codex or named Cursor delegate's model and effort spell that slug; the fixture gains the GPT-6.1 Terra (High) object from the 2026-11-09 page.
 - Before the freeze, `delegate prereg --outcomes`/`--prepare` and `cost --by-mode` also treat a file whose first row matches the experiment log's as the experiment's log (freeze status from the live log); after the freeze a copy still computes, labelled "not the experiment's log".
 - Hybrid Cursor quota, when opted in, now comes from a scripted pty read of `cursor-agent`'s interactive `/usage` screen (30-minute cadence, carry last good; never `-p` / openusage); pool rows may set `whole_percent`, which `monitor` skips for per-job costs. `resets_at` is 00:00 UTC of the screen date; at the first whole-percent reading, `monitor` keeps the open window (36 h reset tolerance, 1-point drop).
 - Cursor `/usage` reader ships off (`"cursor_usage_reader": false`); opt in with `{"cursor_usage_reader": true}` in `catalog.local.json` (Cursor terms may restrict automated reads). Off, both Cursor pools show the off error and nothing launches.
