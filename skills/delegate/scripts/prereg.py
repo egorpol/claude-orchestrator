@@ -864,23 +864,87 @@ def cmd_prepare(args, log, rows, result, experiment_log):
         sys.exit(1)
 
 
+REGISTERED_WEIGHTS = {"orchestrator": 0.7, "claude-only": 0.15, "vanilla": 0.15}
+POST_CLOSE_WEIGHTS = {"orchestrator": 1.0, "claude-only": 0.0, "vanilla": 0.0}
+_WEIGHT_TOL = 1e-9
+
+
+def _weights_match(logged, expected):
+    if not isinstance(logged, dict):
+        return False
+    for mode, value in expected.items():
+        raw = logged.get(mode)
+        if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+            return False
+        if abs(float(raw) - value) > _WEIGHT_TOL:
+            return False
+    return True
+
+
+def warn_unregistered_weights(rows, close):
+    """Stderr line when drawn sessions since T0 logged weights other than the registered ones."""
+    first_ts = None
+    count = 0
+    for record in session_records(rows).values():
+        start = record.get("start", {})
+        if not cost.is_drawn(start):
+            continue
+        ts = instant(start.get("ts"))
+        if ts is None or ts < T0:
+            continue
+        weights = start.get("weights")
+        allowed = (_weights_match(weights, REGISTERED_WEIGHTS)
+                   or (ts >= close and _weights_match(weights, POST_CLOSE_WEIGHTS)))
+        if allowed:
+            continue
+        count += 1
+        if first_ts is None or ts < first_ts:
+            first_ts = ts
+    if count:
+        print(f"warning: {count} drawn sessions since T0 logged weights other than the registered "
+              f"ones (first at {iso(first_ts)})", file=sys.stderr)
+
+
 def cmd_prereg(args):
     log = runs.session_log_path(args.session_log)
     experiment_log = log.resolve() == runs.session_log_path().resolve()
+    gate_log = runs.matches_experiment_log(log)
     rows = cost.load_jsonl(log)
     now = _now()
     result = progress(rows, now, experiment_log=experiment_log)
+    # A copy's own appended fake ratings must not lift the early-look gate.
+    if gate_log and not experiment_log:
+        live_rows = cost.load_jsonl(runs.session_log_path())
+        freeze_info = progress(live_rows, now, experiment_log=True)
+        freeze_reached = freeze_info["freeze_reached"]
+        close_provisional = freeze_info["close_provisional"]
+        freeze_at, close_at = freeze_info["freeze"], freeze_info["close"]
+    else:
+        freeze_reached = result["freeze_reached"]
+        close_provisional = result["close_provisional"]
+        freeze_at, close_at = result["freeze"], result["close"]
     split, unavailable = read_split_commit(instant(result["close"]), repo_dir=args.repo_dir,
                                           provisional=result["close_provisional"])
     result.update(split_commit=split, split_unavailable=unavailable)
-    gated = (args.outcomes or args.prepare) and experiment_log and not result["freeze_reached"]
+    warn_unregistered_weights(rows, instant(result["close"]))
+    gated = (args.outcomes or args.prepare) and gate_log and not freeze_reached
     if gated:
         print(render(result, as_json=args.json))
-        if result["close_provisional"]:
-            sys.exit("freeze not yet known: the close is provisional at " + result["close"])
-        sys.exit(("outcomes" if args.outcomes else "prepare") + " held until freeze " + result["freeze"])
+        copy_note = ("; this file's first row matches the experiment's log"
+                     if not experiment_log else "")
+        if close_provisional:
+            sys.exit("freeze not yet known: the close is provisional at " + close_at + copy_note)
+        sys.exit(("outcomes" if args.outcomes else "prepare") + " held until freeze " + freeze_at
+                 + copy_note)
     if args.prepare:
-        cmd_prepare(args, log, rows, result, experiment_log)
+        import rate
+        with rate.hold_rate_lock(log, busy_ok=False, label="prereg"):
+            rows = cost.load_jsonl(log)
+            result = progress(rows, now, experiment_log=experiment_log)
+            split, unavailable = read_split_commit(instant(result["close"]), repo_dir=args.repo_dir,
+                                                  provisional=result["close_provisional"])
+            result.update(split_commit=split, split_unavailable=unavailable)
+            cmd_prepare(args, log, rows, result, experiment_log)
         return
     if args.outcomes:
         import calibrate

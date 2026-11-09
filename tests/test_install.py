@@ -540,7 +540,8 @@ class InstallTests(unittest.TestCase):
         environment = dict(value.split("=", 1) for value in shlex.split(service["Environment"]))
         # The fake cursor-agent rejects every call except prerequisite checks.
         result = subprocess.run(shlex.split(service["ExecStart"]),
-                                env={**self.env, **environment, "PYTHONDONTWRITEBYTECODE": "1"},
+                                env={**self.env, **environment, "PYTHONDONTWRITEBYTECODE": "1",
+                                     "DELEGATE_BACKUP_DIRS": ""},
                                 capture_output=True, text=True)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertEqual(log.read_bytes(), original)

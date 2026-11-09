@@ -945,8 +945,14 @@ def cmd_cost(a):
         rows = load_jsonl(log)
         import prereg  # here, not at the top: prereg imports cost
         until, cap = a.until, None
-        if log.resolve() == runs.session_log_path().resolve():
-            info = prereg.progress(rows, prereg._now(), experiment_log=True)
+        if runs.matches_experiment_log(log):
+            live = runs.session_log_path()
+            # Freeze status from the live experiment log; held-back counts from this file.
+            if log.resolve() == live.resolve():
+                info_rows = rows
+            else:
+                info_rows = load_jsonl(live)
+            info = prereg.progress(info_rows, prereg._now(), experiment_log=True)
             if not info["freeze_reached"]:
                 requested_upper, lower = _since_dt(until), _since_dt(a.since)
                 held = 0

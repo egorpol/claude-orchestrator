@@ -60,10 +60,16 @@ class RateTests(unittest.TestCase):
         self.summary = {"event": "summary", "session": SESSION, "last_call": "2026-10-13T10:00:00Z",
                         "transcript": str(self.transcript), "mode": "vanilla"}
         self.write_rows(self.log, [self.start, self.summary])
+        self.backup_a = self.root / "backup-a"
+        self.backup_b = self.root / "backup-b"
+        self.backup_a.mkdir()
+        self.backup_b.mkdir()
         patcher = mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": str(self.log),
                                               "CLAUDE_CONFIG_DIR": str(self.root / "claude"),
                                               "CLAUDE_CODE_SESSION_ID": "rater-parent",
-                                              "DELEGATE_CATALOG_LOCAL": ""})
+                                              "DELEGATE_CATALOG_LOCAL": "",
+                                              "DELEGATE_BACKUP_DIRS": os.pathsep.join(
+                                                  (str(self.backup_a), str(self.backup_b)))})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -577,7 +583,7 @@ class RateTests(unittest.TestCase):
         with mock.patch("ask.run_cursor", side_effect=error) as run:
             code, out, err = self.invoke("--session", SESSION)
         self.assertEqual(code, 1)
-        self.assertEqual(out, "")
+        self.assertTrue(all(line.startswith("rate: backup wrote ") for line in out.splitlines()))
         self.assertIn(SESSION[:8], err)
         self.assertIn(str(error), err)
         self.assertEqual(run.call_count, 1)
@@ -665,6 +671,367 @@ class RateTests(unittest.TestCase):
             self.assertEqual(self.invoke("--dry-run"), (0, "", ""))
         self.assertFalse(self.log.exists())
         run.assert_not_called()
+
+    def test_backup_whole_rows_prefix_fail_and_close_survives_prune(self):
+        import io
+        import tarfile
+        (self.root / "quota.jsonl").write_text('{"pool":"x"}\npartial', encoding="utf-8")
+        handoffs = self.root / "handoffs"
+        handoffs.mkdir()
+        (handoffs / "a.md").write_text("copy", encoding="utf-8")
+        with mock.patch("rate.rate_packet", return_value=[item()]):
+            code, out, err = self.invoke("--session", SESSION)
+        self.assertEqual(code, 0, err)
+        archives = list(self.backup_a.glob("*.tar.gz"))
+        self.assertEqual(len(archives), 1, out)
+        with tarfile.open(archives[0]) as tar:
+            sessions = tar.extractfile("sessions.jsonl").read()
+            quota = tar.extractfile("quota.jsonl").read()
+            self.assertIn("handoffs/a.md", tar.getnames())
+        self.assertTrue(sessions.endswith(b"\n"))
+        self.assertNotIn(b"partial", quota)
+        self.assertTrue(quota.endswith(b"\n"))
+        # Age and corrupt the only archive so the next run's prefix check fails.
+        archive = archives[0]
+        old_mtime = datetime.now(timezone.utc).timestamp() - 25 * 3600
+        os.utime(archive, (old_mtime, old_mtime))
+        with tarfile.open(archive, "w:gz") as tar:
+            data = b'{"event":"start","session":"not-a-prefix"}\n'
+            info = tarfile.TarInfo("sessions.jsonl")
+            info.size = len(data)
+            tar.addfile(info, fileobj=io.BytesIO(data))
+        os.utime(archive, (old_mtime, old_mtime))
+        before = list(self.backup_a.glob("*.tar.gz"))
+        with mock.patch("rate.rate_packet", return_value=[item()]), \
+                mock.patch.object(rate, "select_sessions", return_value=[]):
+            code, out, err = self.invoke("--force")
+        self.assertEqual(code, 1)
+        self.assertIn("not a prefix", err)
+        self.assertEqual(sorted(p.name for p in self.backup_a.glob("*.tar.gz")),
+                         sorted(p.name for p in before))
+        # Close archive survives pruning of ten daily copies.
+        good = sessions  # whole-rows snapshot from the first successful archive read above
+        # Rebuild a valid archive bytes for seeding backup_b.
+        valid = self.backup_a / "seed.tar.gz"
+        with tarfile.open(valid, "w:gz") as tar:
+            info = tarfile.TarInfo("sessions.jsonl")
+            info.size = len(good)
+            tar.addfile(info, fileobj=io.BytesIO(good))
+        # Restore backup_a cadence so later tests are unaffected; focus on backup_b.
+        for path in self.backup_b.glob("*"):
+            path.unlink()
+        close = self.backup_b / "close-2026-11-01.tar.gz"
+        close.write_bytes(valid.read_bytes())
+        # Close must not be the newest by mtime, or the 24h cadence skips prune.
+        os.utime(close, (old_mtime - 3600, old_mtime - 3600))
+        for i in range(10):
+            daily = self.backup_b / f"2026-10-{i + 1:02d}.tar.gz"
+            daily.write_bytes(valid.read_bytes())
+            os.utime(daily, (old_mtime - (10 - i) * 60, old_mtime - (10 - i) * 60))
+        newest = self.backup_b / "2026-10-10.tar.gz"
+        os.utime(newest, (old_mtime, old_mtime))
+        with mock.patch.dict(os.environ, {"DELEGATE_BACKUP_DIRS": str(self.backup_b)}), \
+                mock.patch.object(rate, "select_sessions", return_value=[]), \
+                mock.patch("prereg.progress", return_value={"close_provisional": True}):
+            code, out, err = self.invoke("--force")
+        self.assertEqual(code, 0, err)
+        self.assertIn("backup wrote", out)
+        self.assertTrue(close.exists())
+        self.assertEqual(len(list(self.backup_b.glob("close-*.tar.gz"))), 1)
+        self.assertLessEqual(len(rate._daily_archives(self.backup_b)), 7)
+
+    def test_backup_one_destination_failure_does_not_stop_other(self):
+        for path in self.backup_a.glob("*.tar.gz"):
+            path.unlink()
+        blocked = self.root / "blocked-file"
+        blocked.write_text("not-a-dir", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"DELEGATE_BACKUP_DIRS": os.pathsep.join(
+                (str(blocked), str(self.backup_a)))}):
+            with mock.patch.object(rate, "select_sessions", return_value=[]):
+                code, out, err = self.invoke("--force")
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(any(self.backup_a.glob("*.tar.gz")))
+        self.assertIn("backup", err)
+
+    def test_default_backup_dirs_use_checkout_feedback_when_present(self):
+        fake = self.root / "checkout"
+        (fake / "skills/delegate/scripts").mkdir(parents=True)
+        (fake / "feedback").mkdir()
+        (fake / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if k != "DELEGATE_BACKUP_DIRS"}
+        env["DELEGATE_BACKUP_DIRS"] = ""
+        env["XDG_STATE_HOME"] = str(self.root / "state")
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(rate._backup_dirs(), [])
+        env.pop("DELEGATE_BACKUP_DIRS")
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(rate, "__file__", str(fake / "skills/delegate/scripts/rate.py")):
+            dirs = rate._backup_dirs()
+        self.assertEqual(dirs[0], self.root / "state/claude-orchestrator/backup")
+        self.assertEqual(dirs[1], fake / "feedback/experiment-backup")
+
+    def test_rate_lock_busy_exits_0_without_rating(self):
+        lock = rate.rate_lock_path(self.log)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        holder = lock.open("a+", encoding="utf-8")
+        self.addCleanup(holder.close)
+        import fcntl
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        holder.write("99999 2026-11-08T00:00:00+00:00\n")
+        holder.flush()
+        with mock.patch("rate.rate_packet") as rater, mock.patch("ask.run_cursor") as run:
+            code, out, err = self.invoke("--session", SESSION)
+        self.assertEqual(code, 0)
+        self.assertIn("busy", err)
+        self.assertIn("rated nothing", err)
+        self.assertIn(str(lock), err)
+        self.assertEqual(out, "")  # busy exits before backup
+        rater.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual([r for r in rate.json_rows(self.log) if r.get("event") == "rating"], [])
+
+    def test_stale_lock_file_does_not_block(self):
+        lock = rate.rate_lock_path(self.log)
+        lock.write_text("1 2020-01-01T00:00:00+00:00\n", encoding="utf-8")
+        with mock.patch("rate.rate_packet", return_value=[item()]):
+            code, out, err = self.invoke("--session", SESSION)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(any(r.get("event") == "rating" for r in rate.json_rows(self.log)))
+
+    def test_truncated_archive_skips_destination_but_rates(self):
+        import tarfile
+        for path in list(self.backup_a.glob("*.tar.gz")) + list(self.backup_b.glob("*.tar.gz")):
+            path.unlink()
+        # Destination 1: aged truncated gzip. Destination 2: empty → should get a copy.
+        good = self.backup_a / "2026-10-01.tar.gz"
+        with tarfile.open(good, "w:gz") as tar:
+            data = self.log.read_bytes()
+            info = tarfile.TarInfo("sessions.jsonl")
+            info.size = len(data)
+            tar.addfile(info, fileobj=__import__("io").BytesIO(data))
+        raw = good.read_bytes()
+        good.write_bytes(raw[: max(20, len(raw) // 2)])
+        old = datetime.now(timezone.utc).timestamp() - 25 * 3600
+        os.utime(good, (old, old))
+        before = self.log.read_bytes()
+        with mock.patch("rate.rate_packet", return_value=[item()]) as rater:
+            code, out, err = self.invoke("--session", SESSION)
+        self.assertEqual(code, 1, err)
+        self.assertRegex(err, r"(EOFError|zlib\.error|BadGzipFile)")
+        self.assertTrue(any(self.backup_b.glob("*.tar.gz")), out)
+        self.assertEqual(len(list(self.backup_a.glob("*.tar.gz"))), 1)  # no new copy in a
+        self.assertTrue(rater.called)
+        self.assertTrue(self.log.read_bytes().startswith(before))
+        self.assertTrue(any(r.get("event") == "rating" for r in rate.json_rows(self.log)))
+
+    def test_unreadable_handoff_writes_without_prune(self):
+        if os.geteuid() == 0:
+            self.skipTest("mode 0 is readable as root")
+        import tarfile
+        for path in self.backup_a.glob("*.tar.gz"):
+            path.unlink()
+        handoffs = self.root / "handoffs"
+        handoffs.mkdir(exist_ok=True)
+        ok = handoffs / "ok.md"
+        bad = handoffs / "bad.md"
+        ok.write_text("readable", encoding="utf-8")
+        bad.write_text("secret", encoding="utf-8")
+        os.chmod(bad, 0)
+        self.addCleanup(lambda: os.chmod(bad, 0o600))
+        # Seed eight aged daily archives so a prune would drop the oldest.
+        seed = self.log.read_bytes()
+        old = datetime.now(timezone.utc).timestamp() - 25 * 3600
+        for i in range(8):
+            daily = self.backup_a / f"2026-09-{i + 1:02d}.tar.gz"
+            with tarfile.open(daily, "w:gz") as tar:
+                info = tarfile.TarInfo("sessions.jsonl")
+                info.size = len(seed)
+                tar.addfile(info, fileobj=__import__("io").BytesIO(seed))
+            os.utime(daily, (old - (8 - i) * 60, old - (8 - i) * 60))
+        oldest = self.backup_a / "2026-09-01.tar.gz"
+        with mock.patch.dict(os.environ, {"DELEGATE_BACKUP_DIRS": str(self.backup_a)}), \
+                mock.patch.object(rate, "select_sessions", return_value=[]):
+            code, out, err = self.invoke("--force")
+        self.assertEqual(code, 1, err)
+        self.assertIn("unreadable file", err)
+        self.assertIn("PermissionError", err)
+        self.assertIn("backup wrote", out)
+        self.assertTrue(oldest.exists())  # prune skipped
+        today = list(self.backup_a.glob(datetime.now(timezone.utc).date().isoformat() + ".tar.gz"))
+        self.assertEqual(len(today), 1)
+        with tarfile.open(today[0]) as tar:
+            names = tar.getnames()
+        self.assertIn("handoffs/ok.md", names)
+        self.assertNotIn("handoffs/bad.md", names)
+
+    def test_unlistable_handoff_subdir_is_incomplete(self):
+        if os.geteuid() == 0:
+            self.skipTest("mode 0 is listable as root")
+        import tarfile
+        for path in self.backup_a.glob("*.tar.gz"):
+            path.unlink()
+        handoffs = self.root / "handoffs"
+        handoffs.mkdir(exist_ok=True)
+        top = handoffs / "top.md"
+        locked = handoffs / "locked"
+        locked.mkdir()
+        (locked / "hidden.md").write_text("secret", encoding="utf-8")
+        top.write_text("readable", encoding="utf-8")
+        os.chmod(locked, 0)
+
+        def _unlock():
+            os.chmod(locked, 0o700)
+
+        self.addCleanup(_unlock)
+        seed = self.log.read_bytes()
+        old = datetime.now(timezone.utc).timestamp() - 25 * 3600
+        for i in range(8):
+            daily = self.backup_a / f"2026-06-{i + 1:02d}.tar.gz"
+            with tarfile.open(daily, "w:gz") as tar:
+                info = tarfile.TarInfo("sessions.jsonl")
+                info.size = len(seed)
+                tar.addfile(info, fileobj=__import__("io").BytesIO(seed))
+            os.utime(daily, (old - (8 - i) * 60, old - (8 - i) * 60))
+        oldest = self.backup_a / "2026-06-01.tar.gz"
+        with mock.patch.dict(os.environ, {"DELEGATE_BACKUP_DIRS": str(self.backup_a)}), \
+                mock.patch("prereg.progress", return_value={"close_provisional": False}), \
+                mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as err:
+            failed = rate.backup_experiment_data(self.log)
+            err_text = err.getvalue()
+        self.assertTrue(failed)
+        self.assertIn("PermissionError", err_text)
+        self.assertIn("1 unreadable file", err_text)
+        self.assertTrue(oldest.exists())
+        today = datetime.now(timezone.utc).date().isoformat()
+        self.assertTrue((self.backup_a / f"{today}.tar.gz").is_file())
+        self.assertFalse(list(self.backup_a.glob("close-*.tar.gz")))
+        with tarfile.open(self.backup_a / f"{today}.tar.gz") as tar:
+            names = tar.getnames()
+        self.assertIn("handoffs/top.md", names)
+        self.assertNotIn("handoffs/locked/hidden.md", names)
+
+    def test_handoff_file_not_found_still_prunes(self):
+        import tarfile
+        for path in self.backup_a.glob("*.tar.gz"):
+            path.unlink()
+        handoffs = self.root / "handoffs"
+        handoffs.mkdir(exist_ok=True)
+        gone = handoffs / "gone.md"
+        kept = handoffs / "kept.md"
+        gone.write_text("x", encoding="utf-8")
+        kept.write_text("y", encoding="utf-8")
+        seed = self.log.read_bytes()
+        old = datetime.now(timezone.utc).timestamp() - 25 * 3600
+        for i in range(8):
+            daily = self.backup_a / f"2026-08-{i + 1:02d}.tar.gz"
+            with tarfile.open(daily, "w:gz") as tar:
+                info = tarfile.TarInfo("sessions.jsonl")
+                info.size = len(seed)
+                tar.addfile(info, fileobj=__import__("io").BytesIO(seed))
+            os.utime(daily, (old - (8 - i) * 60, old - (8 - i) * 60))
+        oldest = self.backup_a / "2026-08-01.tar.gz"
+        real_read = Path.read_bytes
+
+        def read_bytes(self):
+            if self == gone:
+                raise FileNotFoundError(str(self))
+            return real_read(self)
+
+        with mock.patch.dict(os.environ, {"DELEGATE_BACKUP_DIRS": str(self.backup_a)}), \
+                mock.patch.object(Path, "read_bytes", read_bytes), \
+                mock.patch.object(rate, "select_sessions", return_value=[]):
+            code, out, err = self.invoke("--force")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("unreadable", err)
+        self.assertFalse(oldest.exists())  # pruned
+        self.assertLessEqual(len(rate._daily_archives(self.backup_a)), 7)
+
+    def test_disabled_backups_ignore_unreadable_quota(self):
+        quota = self.root / "quota.jsonl"
+        quota.write_text("{}\n", encoding="utf-8")
+        if os.geteuid() == 0:
+            self.skipTest("mode 0 is readable as root")
+        os.chmod(quota, 0)
+        self.addCleanup(lambda: os.chmod(quota, 0o600))
+        with mock.patch.dict(os.environ, {"DELEGATE_BACKUP_DIRS": ""}):
+            failed = rate.backup_experiment_data(self.log)
+        self.assertFalse(failed)
+        # No stderr from the helper when destinations are empty.
+        with mock.patch.dict(os.environ, {"DELEGATE_BACKUP_DIRS": ""}), \
+                mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as err:
+            self.assertFalse(rate.backup_experiment_data(self.log))
+            self.assertEqual(err.getvalue(), "")
+
+    def test_unreadable_quota_counts_as_incomplete_payload(self):
+        import tarfile
+        for path in self.backup_a.glob("*.tar.gz"):
+            path.unlink()
+        quota = self.root / "quota.jsonl"
+        quota.write_text("{}\n", encoding="utf-8")
+        if os.geteuid() == 0:
+            self.skipTest("mode 0 is readable as root")
+        os.chmod(quota, 0)
+        self.addCleanup(lambda: os.chmod(quota, 0o600))
+        seed = self.log.read_bytes()
+        old = datetime.now(timezone.utc).timestamp() - 25 * 3600
+        for i in range(8):
+            daily = self.backup_a / f"2026-07-{i + 1:02d}.tar.gz"
+            with tarfile.open(daily, "w:gz") as tar:
+                info = tarfile.TarInfo("sessions.jsonl")
+                info.size = len(seed)
+                tar.addfile(info, fileobj=__import__("io").BytesIO(seed))
+            os.utime(daily, (old - (8 - i) * 60, old - (8 - i) * 60))
+        oldest = self.backup_a / "2026-07-01.tar.gz"
+        with mock.patch.dict(os.environ, {"DELEGATE_BACKUP_DIRS": str(self.backup_a)}), \
+                mock.patch.object(rate, "select_sessions", return_value=[]):
+            code, out, err = self.invoke("--force")
+        self.assertEqual(code, 1, err)
+        self.assertIn("1 unreadable file", err)
+        self.assertIn("PermissionError", err)
+        self.assertIn("backup wrote", out)
+        self.assertTrue(oldest.exists())
+        today = list(self.backup_a.glob(datetime.now(timezone.utc).date().isoformat() + ".tar.gz"))
+        self.assertEqual(len(today), 1)
+        with tarfile.open(today[0]) as tar:
+            self.assertNotIn("quota.jsonl", tar.getnames())
+            self.assertIn("sessions.jsonl", tar.getnames())
+
+    def test_rate_lock_busy_via_subprocess(self):
+        lock = rate.rate_lock_path(self.log)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl, sys\n"
+             f"p = open({str(lock)!r}, 'a+')\n"
+             "fcntl.flock(p, fcntl.LOCK_EX)\n"
+             "p.write('child\\n'); p.flush()\n"
+             "sys.stdout.write('ready\\n'); sys.stdout.flush()\n"
+             "sys.stdin.read(1)\n"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def _reap_child():
+            if child.poll() is None:
+                child.kill()
+            for stream in (child.stdin, child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
+            child.wait(timeout=5)
+
+        self.addCleanup(_reap_child)
+        line = child.stdout.readline()
+        self.assertEqual(line, "ready\n")
+        with mock.patch("rate.rate_packet") as rater, mock.patch("ask.run_cursor") as run:
+            code, out, err = self.invoke("--session", SESSION)
+        self.assertEqual(code, 0)
+        self.assertIn("busy", err)
+        self.assertIn("rated nothing", err)
+        self.assertEqual(out, "")
+        rater.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual([r for r in rate.json_rows(self.log) if r.get("event") == "rating"], [])
+        child.stdin.write("x")
+        child.stdin.close()
+        self.assertEqual(child.wait(timeout=5), 0)
 
 
 class ItemCostTests(unittest.TestCase):

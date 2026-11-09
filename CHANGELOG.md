@@ -8,6 +8,9 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Added
 
+- `delegate rate`: masks API-token shapes and private-key blocks in the rater packet as `[secret]` (same seven token patterns as `hooks/secret-guard.py`, plus whole BEGIN…END key blocks) before mode-word redaction and before prompt/handoff truncation, and once more on the rendered packet; packets with no hit stay byte-identical.
+- `delegate rate`: before rating the experiment's log, takes a non-blocking lock on `<log>.rate.lock` and makes a daily `tar.gz` of `sessions.jsonl`, `quota.jsonl` and `handoffs/` into the state backup folder and, when present, `<checkout>/feedback/experiment-backup/` (`DELEGATE_BACKUP_DIRS` overrides; empty disables); keeps seven dated archives and the first post-close `close-*` copy; a prefix mismatch or a truncated previous archive writes no copy there; an incomplete payload (an unreadable quota log, or a handoff file or folder that can't be read or listed) is still written under the daily name, never `close-*`. Either prints one stderr line, still rates, skips the prune for that destination, and exits 1 after rating.
+- `delegate prereg --prepare` takes the same rate lock and re-reads the log under it; a busy lock exits nonzero. `delegate prereg` warns on stderr when drawn sessions since T0 logged weights other than the registered 0.7/0.15/0.15 (or 1/0/0 at or after the close).
 - `delegate prereg`: code for the 2026-11-08 amendments — crossover links and the crossovers-credited sensitivity, the no-handoffs sensitivity, arm-guess and `/next` blinding checks, and `prereg --prepare` (rates linked forced sessions and makes arm-guess calls; totals only).
 - `install.sh --timer` also installs an hourly default `delegate rate` user timer for drawn experiment sessions, with no overlap, timeout or wake backlog; stdout item counts are discarded before the freeze and stderr failures stay visible in `systemctl --user status claude-delegate-rate.service`.
 - `delegate prereg`: counts-only experiment progress and the registered confirmatory analysis, with strict eligibility, seeded bootstrap intervals, sensitivities, hashed projects and calibration provenance. Outcomes on the experiment’s log are held until the freeze.
@@ -23,6 +26,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Changed
 
+- Before the freeze, `delegate prereg --outcomes`/`--prepare` and `cost --by-mode` also treat a file whose first row matches the experiment log's as the experiment's log (freeze status from the live log); after the freeze a copy still computes, labelled "not the experiment's log".
 - Hybrid Cursor quota, when opted in, now comes from a scripted pty read of `cursor-agent`'s interactive `/usage` screen (30-minute cadence, carry last good; never `-p` / openusage); pool rows may set `whole_percent`, which `monitor` skips for per-job costs. `resets_at` is 00:00 UTC of the screen date; at the first whole-percent reading, `monitor` keeps the open window (36 h reset tolerance, 1-point drop).
 - Cursor `/usage` reader ships off (`"cursor_usage_reader": false`); opt in with `{"cursor_usage_reader": true}` in `catalog.local.json` (Cursor terms may restrict automated reads). Off, both Cursor pools show the off error and nothing launches.
 - `delegate route`: a preferred delegate leads only when every pool was read and clears `min_quota_pct`; with a pool unread it sorts by score, tagged `(pref, quota ?)`, and below `min_quota_pct` it stays `(excluded)`.

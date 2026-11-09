@@ -1278,9 +1278,18 @@ class TestUntilAndPreregCap(unittest.TestCase):
         self.write(self.session_log, self.rows())
         other = self.root / "copy"
         other.write_bytes(self.session_log.read_bytes())
+        # A byte-identical copy shares the first row and is capped before the freeze.
         payload = json.loads(self.invoke("--by-mode", "--session-log", str(other), "--json"))
+        self.assertEqual(payload["early_look"]["held_back"], 2)
+        self.assertEqual(len(payload["sessions"]), 1)
+        different = self.root / "different"
+        self.write(different, [{"event": "start", "session": "solo", "ts": "2026-11-02T00:00:00Z",
+                                "mode": "orchestrator", "u": .1},
+                               {"event": "summary", "session": "solo", "transcript": "/missing",
+                                "calls": 1, "usd_list_price": 1}])
+        payload = json.loads(self.invoke("--by-mode", "--session-log", str(different), "--json"))
         self.assertNotIn("early_look", payload)
-        self.assertEqual(len(payload["sessions"]), 3)
+        self.assertEqual(len(payload["sessions"]), 1)
         payload = json.loads(self.invoke("--by-mode", "--json", now=self.prereg.HARD_CLOSE + self.prereg.FREEZE_DELAY))
         self.assertNotIn("early_look", payload)
         self.assertEqual(len(payload["sessions"]), 3)

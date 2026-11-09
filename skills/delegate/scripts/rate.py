@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """Blindly segment and rate user-requested items in session-mode transcripts."""
 import argparse
+import fcntl
 import hashlib
+import io
 import json
 import math
+import os
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
+import zlib
 from bisect import bisect_right
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -18,7 +24,10 @@ if str(SCRIPTS) not in sys.path:
 
 import ask  # noqa: E402
 import cost  # noqa: E402
+import masking  # noqa: E402
 import runs  # noqa: E402
+
+HANDOFF_READ = 4096  # extra bytes past HANDOFF_LIMIT so a secret straddling the cut is whole
 
 RUBRIC = "v2"
 # Changes to this text require a new RUBRIC version.
@@ -164,7 +173,9 @@ def _typed_prompt_rows(rows):
             rendered = (NEXT_PROMPT
                         if name == "/next" else f"[command {name}{' ' + args if args else ''}]")
             text = rendered + ("\n" + remaining if remaining else "")
-        yield index, {"text": _truncate(text, PROMPT_LIMIT), "timestamp": row.get("timestamp")}
+        # Mask before the cut so a token straddling PROMPT_LIMIT leaves no prefix.
+        yield index, {"text": _truncate(masking.mask_secrets(text), PROMPT_LIMIT),
+                      "timestamp": row.get("timestamp")}
 
 
 def session_records(rows):
@@ -319,14 +330,17 @@ def build_packet(record):
     prompts, rows, start = record["prompts"], record["rows"], record["start"]
     cwd = start.get("cwd") or next((r["cwd"] for r in rows if r.get("cwd")), None)
     first, last = session_window(record)
-    commits = redact(session_commits(cwd, first, last))
+    # Mask before redact: redact would split a token that contains a mode word.
+    commits = redact(masking.mask_secrets(session_commits(cwd, first, last)))
 
     def read_copy(path):
         if not isinstance(path, str):
             return None
         try:
             with Path(path).open(encoding="utf-8", errors="replace") as stream:
-                text = redact(_truncate(stream.read(HANDOFF_LIMIT + 1), HANDOFF_LIMIT))
+                # Read past the cut so a token or key block straddling it is whole when masked.
+                raw = stream.read(HANDOFF_LIMIT + HANDOFF_READ)
+                text = redact(_truncate(masking.mask_secrets(raw), HANDOFF_LIMIT))
         except (OSError, ValueError):
             return None
         # Quoted, so a copy's own headings can't pass for packet sections.
@@ -337,7 +351,7 @@ def build_packet(record):
         end = "(no end-state copy was saved)"
     elif end == handoff:
         end = "(unchanged from the start copy)"
-    texts = [_truncate(redact(p["text"]), PROMPT_LIMIT) for p in prompts]
+    texts = [_truncate(redact(masking.mask_secrets(p["text"])), PROMPT_LIMIT) for p in prompts]
     if handoff is None:
         texts = [NEXT_PROMPT_NO_COPY + t[len(NEXT_PROMPT):] if t.startswith(NEXT_PROMPT) else t
                  for t in texts]
@@ -356,7 +370,7 @@ def build_packet(record):
             parts.append("## HANDOFF.md at session start\n" + handoff)
         parts.append("## HANDOFF.md at session end\n" + end)
         parts.append("## Commits in the session window\n" + commits)
-        return redact("\n\n".join(parts) + "\n")
+        return redact(masking.mask_secrets("\n\n".join(parts) + "\n"))
 
     packet = render()
     if len(packet) > PACKET_LIMIT:
@@ -368,7 +382,7 @@ def build_packet(record):
         # Extremely many prompt labels or enormous commit subjects can exceed the
         # cap even with all prompt text removed. Keep the notice and cap those too.
         packet = _truncate(packet, PACKET_LIMIT)
-    return packet
+    return redact(masking.mask_secrets(packet))
 
 
 def parse_reply(text, prompt_count, report_starts=()):
@@ -585,6 +599,232 @@ def attach_items(result, rows, weights, prices):
     return result
 
 
+def rate_lock_path(log):
+    """Separate from sessions.jsonl.lock: report holds that one across summary writes."""
+    return Path(str(Path(log).resolve()) + ".rate.lock")
+
+
+@contextmanager
+def hold_rate_lock(log, *, busy_ok=False, label="rate"):
+    """Non-blocking exclusive flock on <log>.rate.lock. busy_ok: exit 0 when held elsewhere."""
+    path = rate_lock_path(log)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.seek(0)
+        meta = lock.read().strip() or "(unknown holder)"
+        print(f"{label}: busy: {path} held by {meta}; this run rated nothing and is not a "
+              f"completed run", file=sys.stderr)
+        lock.close()
+        sys.exit(0 if busy_ok else 1)
+    try:
+        started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        lock.seek(0)
+        lock.truncate()
+        lock.write(f"{os.getpid()} {started}\n")
+        lock.flush()
+        yield
+    finally:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock.close()
+
+
+def _whole_rows_bytes(path):
+    """Read size bytes then cut after the last newline so the archive holds whole rows only."""
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        data = stream.read(size)
+    cut = data.rfind(b"\n")
+    return data[:cut + 1] if cut >= 0 else b""
+
+
+def _backup_dirs():
+    if "DELEGATE_BACKUP_DIRS" in os.environ:
+        raw = os.environ["DELEGATE_BACKUP_DIRS"]
+        if not raw:
+            return []
+        return [Path(part) for part in raw.split(os.pathsep) if part]
+    state = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local/state"))
+    dirs = [state / "claude-orchestrator/backup"]
+    # skills/delegate/scripts/ → checkout root is three levels above that folder.
+    checkout = Path(__file__).resolve().parents[3]
+    if (checkout / "install.sh").is_file() and (checkout / "feedback").is_dir():
+        dirs.append(checkout / "feedback/experiment-backup")
+    return dirs
+
+
+def _list_archives(folder):
+    return sorted(folder.glob("*.tar.gz"), key=lambda p: p.stat().st_mtime)
+
+
+def _daily_archives(folder):
+    return sorted(p for p in folder.glob("*.tar.gz")
+                  if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.tar.gz", p.name))
+
+
+def _archive_member_bytes(archive, name):
+    with tarfile.open(archive, "r:gz") as tar:
+        member = tar.getmember(name)
+        extracted = tar.extractfile(member)
+        if extracted is None:
+            raise tarfile.TarError(f"missing member {name}")
+        return extracted.read()
+
+
+def _write_backup_archive(dest_path, members):
+    """Atomic write: temp in the same folder, fsync, verify, then replace."""
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest_path.parent / ("." + dest_path.name + f".{os.getpid()}.tmp")
+    try:
+        with tmp.open("wb") as stream:
+            with tarfile.open(fileobj=stream, mode="w:gz") as tar:
+                for name, data in members:
+                    info = tarfile.TarInfo(name=name)
+                    info.size = len(data)
+                    info.mtime = int(datetime.now(timezone.utc).timestamp())
+                    tar.addfile(info, fileobj=io.BytesIO(data))
+            stream.flush()
+            os.fsync(stream.fileno())
+        with tarfile.open(tmp, "r:gz") as tar:
+            names = set(tar.getnames())
+            expected = {name for name, _ in members}
+            if names != expected:
+                raise tarfile.TarError(f"archive members {sorted(names)} != {sorted(expected)}")
+            for name, data in members:
+                got = tar.extractfile(tar.getmember(name)).read()
+                if name == "sessions.jsonl" and hashlib.sha256(got).digest() != hashlib.sha256(data).digest():
+                    raise tarfile.TarError("sessions.jsonl hash mismatch after write")
+                if got != data:
+                    raise tarfile.TarError(f"{name} content mismatch after write")
+        os.replace(tmp, dest_path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def backup_experiment_data(log):
+    """Daily tar.gz of sessions/quota/handoffs beside the experiment log. Never raises to stop rating."""
+    import prereg  # prereg imports rate inside its functions
+
+    destinations = _backup_dirs()
+    if not destinations:
+        return False
+
+    failed = False
+    try:
+        sessions_data = _whole_rows_bytes(log) if log.is_file() else None
+    except OSError as exc:
+        print(f"rate: backup: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return True
+    if sessions_data is None:
+        return False
+    quota_path = log.parent / "quota.jsonl"
+    handoffs_path = log.parent / "handoffs"
+    members = [("sessions.jsonl", sessions_data)]
+    quota_exc = None
+    try:
+        if quota_path.is_file():
+            members.append(("quota.jsonl", _whole_rows_bytes(quota_path)))
+    except OSError as exc:
+        quota_exc = exc
+    try:
+        rows = json_rows(log) if log.is_file() else []
+        close_provisional = prereg.progress(rows, prereg._now()).get("close_provisional", True)
+    except (OSError, ValueError):
+        close_provisional = True
+    utc_date = datetime.now(timezone.utc).date().isoformat()
+    archive_read_errors = (KeyError, tarfile.TarError, OSError, EOFError, zlib.error)
+    for folder in destinations:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            archives = _list_archives(folder)
+            if archives:
+                newest = archives[-1]
+                age = datetime.now(timezone.utc).timestamp() - newest.stat().st_mtime
+                if age <= 24 * 3600:
+                    continue
+                try:
+                    previous = _archive_member_bytes(newest, "sessions.jsonl")
+                except archive_read_errors as exc:
+                    print(f"rate: backup {folder}: cannot read previous sessions.jsonl "
+                          f"({type(exc).__name__}: {exc})", file=sys.stderr)
+                    failed = True
+                    continue
+                live = log.read_bytes() if log.is_file() else b""
+                if not live.startswith(previous):
+                    print(f"rate: backup {folder}: previous sessions.jsonl is not a prefix of the "
+                          f"live log; no copy and no prune", file=sys.stderr)
+                    failed = True
+                    continue
+            payload = list(members)
+            unreadable = 0
+            unreadable_exc = quota_exc
+            if quota_exc is not None:
+                unreadable += 1
+            if handoffs_path.is_dir():
+                # rglob silently skips unlistable dirs; walk with onerror so they
+                # count as incomplete (one per error). FileNotFoundError: skip.
+                found = []
+
+                def _on_walk_error(err):
+                    nonlocal unreadable, unreadable_exc
+                    if isinstance(err, FileNotFoundError):
+                        return
+                    unreadable += 1
+                    if unreadable_exc is None:
+                        unreadable_exc = err
+
+                for root, _dirs, filenames in os.walk(handoffs_path, onerror=_on_walk_error):
+                    for name in filenames:
+                        found.append(Path(root) / name)
+                # Same order as sorted(handoffs_path.rglob("*")) for reachable files.
+                for path in sorted(found):
+                    if not path.is_file():
+                        continue
+                    rel = path.relative_to(log.parent).as_posix()
+                    try:
+                        payload.append((rel, path.read_bytes()))
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        unreadable += 1
+                        if unreadable_exc is None:
+                            unreadable_exc = exc
+            incomplete = unreadable > 0
+            has_close = any(p.name.startswith("close-") for p in folder.glob("close-*.tar.gz"))
+            # Incomplete payloads keep the daily name so a later complete run can write close-*.
+            if not incomplete and not close_provisional and not has_close:
+                name = f"close-{utc_date}.tar.gz"
+            else:
+                name = f"{utc_date}.tar.gz"
+            dest = folder / name
+            _write_backup_archive(dest, payload)
+            print(f"rate: backup wrote {dest}")
+            if unreadable:
+                print(f"rate: backup {folder}: {type(unreadable_exc).__name__}: "
+                      f"{unreadable} unreadable file{'s' if unreadable != 1 else ''}",
+                      file=sys.stderr)
+                failed = True
+            if incomplete:
+                failed = True
+            else:
+                daily = _daily_archives(folder)
+                for stale in daily[:-7] if len(daily) > 7 else []:
+                    stale.unlink()
+        except (OSError, tarfile.TarError, ValueError, EOFError, zlib.error) as exc:
+            print(f"rate: backup {folder}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            failed = True
+    return failed
+
+
 def cmd_rate(args):
     if args.agent == "codex":
         sys.exit(f"rate: {CODEX_REFUSED}")
@@ -595,37 +835,50 @@ def cmd_rate(args):
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         sys.exit("rate: --timeout must be a finite, positive number")
     path = runs.session_log_path(args.session_log)
-    try:
-        rows = json_rows(path) if path.exists() else []
-        selected = select_sessions(rows, args.session, args.min_age, args.since, args.force)
-    except (OSError, ValueError) as exc:
-        print(f"rate: {exc}", file=sys.stderr)
-        sys.exit(2)
-    model = args.model or "auto"
-    failed = False
-    for record in selected:
-        session = record["session"]
+    backup_failed = False
+
+    def run():
+        nonlocal backup_failed
+        if (not args.dry_run
+                and path.resolve() == runs.session_log_path().resolve()):
+            backup_failed = backup_experiment_data(path)
         try:
-            if "error" in record:
-                raise ValueError(record["error"])
-            packet = build_packet(record)
-            n = len(record["prompts"])
-            if args.dry_run:
-                mode = record["start"].get("mode") or record["summary"].get("mode") or "unknown"
-                print(f"{session[:8]} mode={mode} prompts={n} packet={len(packet)} chars "
-                      f"end_state={record.get('end_source') or '-'}")
-                if args.print_packet:
-                    print(packet, end="")
-                continue
-            items = (rate_packet(packet, n, args.agent, model, args.timeout,
-                                 field_report_prompts(record["prompts"])) if n else [])
-            append_rating(path, rating_row(record, packet, items, args.agent, model))
-            print(f"{session[:8]}: rated {len(items)} items from {n} prompts")
-        except (ValueError, OSError, ask.AskFailed) as exc:
-            print(f"rate: {session[:8]}: {exc}", file=sys.stderr)
-            failed = True
-    if failed:
-        sys.exit(1)
+            rows = json_rows(path) if path.exists() else []
+            selected = select_sessions(rows, args.session, args.min_age, args.since, args.force)
+        except (OSError, ValueError) as exc:
+            print(f"rate: {exc}", file=sys.stderr)
+            sys.exit(2)
+        model = args.model or "auto"
+        failed = backup_failed
+        for record in selected:
+            session = record["session"]
+            try:
+                if "error" in record:
+                    raise ValueError(record["error"])
+                packet = build_packet(record)
+                n = len(record["prompts"])
+                if args.dry_run:
+                    mode = record["start"].get("mode") or record["summary"].get("mode") or "unknown"
+                    print(f"{session[:8]} mode={mode} prompts={n} packet={len(packet)} chars "
+                          f"end_state={record.get('end_source') or '-'}")
+                    if args.print_packet:
+                        print(packet, end="")
+                    continue
+                items = (rate_packet(packet, n, args.agent, model, args.timeout,
+                                     field_report_prompts(record["prompts"])) if n else [])
+                append_rating(path, rating_row(record, packet, items, args.agent, model))
+                print(f"{session[:8]}: rated {len(items)} items from {n} prompts")
+            except (ValueError, OSError, ask.AskFailed) as exc:
+                print(f"rate: {session[:8]}: {exc}", file=sys.stderr)
+                failed = True
+        if failed:
+            sys.exit(1)
+
+    if args.dry_run:
+        run()
+    else:
+        with hold_rate_lock(path, busy_ok=True):
+            run()
 
 
 def _add_args(parser):

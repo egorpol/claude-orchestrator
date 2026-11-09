@@ -320,7 +320,16 @@ class PreregTests(unittest.TestCase):
                     self.assertNotIn(forbidden, (out + err).lower())
             other = self.root / "copy"
             other.write_bytes(self.log.read_bytes())
-            code, out, err = self.invoke("--outcomes", "--session-log", str(other))
+            with mock.patch.object(p, "outcomes", side_effect=AssertionError("outcome computed")), \
+                    mock.patch.object(p, "read_transcript_inputs", side_effect=AssertionError("transcript opened")):
+                code, out, err = self.invoke("--outcomes", "--session-log", str(other))
+            self.assertNotEqual(code, 0)
+            self.assertIn("first row matches the experiment's log", err)
+            for forbidden in ("usd", "$", "finished"):
+                self.assertNotIn(forbidden, (out + err).lower())
+            different = self.root / "different"
+            write(different, [start("other-first"), summary("other-first"), rating("other-first")])
+            code, out, err = self.invoke("--outcomes", "--session-log", str(different))
             self.assertEqual(code, 0, err)
             self.assertIn("not the experiment's log", out)
             self.assertIn("USD", out)
@@ -1004,6 +1013,58 @@ class Amendment1108Tests(PreregTests):
         self.assertIn("Blinding: first prompt /next", text_out)
         for secret in private:
             self.assertNotIn(secret, text_out + text_err)
+
+    def test_unregistered_weights_warning(self):
+        registered = {"orchestrator": 0.7, "claude-only": 0.15, "vanilla": 0.15}
+        fallback = {"orchestrator": 0.5, "claude-only": 0.25, "vanilla": 0.25}
+        post = {"orchestrator": 1.0, "claude-only": 0.0, "vanilla": 0.0}
+        close = p.HARD_CLOSE
+        rows = [
+            start("ok", weights=registered),
+            summary("ok", transcript=str(self.transcript)),
+            start("bad", weights=fallback, ts="2026-11-02T13:00:00Z"),
+            summary("bad", transcript=str(self.transcript)),
+        ]
+        write(self.log, rows)
+        code, out, err = self.invoke("--session-log", str(self.log))
+        self.assertEqual(code, 0, err)
+        self.assertIn("1 drawn sessions since T0 logged weights other than the registered ones", err)
+        self.assertIn("2026-11-02T13:00:00Z", err)
+        # 1/0/0 after the close is allowed; inside the window it warns.
+        rows = [
+            start("post", weights=post, ts=p.iso(close + timedelta(hours=1))),
+            summary("post", transcript=str(self.transcript)),
+        ]
+        write(self.log, rows)
+        code, out, err = self.invoke("--session-log", str(self.log), now=close + timedelta(days=1))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("logged weights other than", err)
+        rows = [
+            start("early-post", weights=post, ts="2026-11-02T14:00:00Z"),
+            summary("early-post", transcript=str(self.transcript)),
+        ]
+        write(self.log, rows)
+        code, out, err = self.invoke("--session-log", str(self.log))
+        self.assertEqual(code, 0, err)
+        self.assertIn("1 drawn sessions since T0 logged weights other than the registered ones", err)
+
+    def test_prepare_lock_busy_exits_nonzero(self):
+        import fcntl
+        write(self.log, self.sixty() + self.dry_rows())
+        lock = rate.rate_lock_path(self.log)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        holder = lock.open("a+", encoding="utf-8")
+        self.addCleanup(holder.close)
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        holder.write("4242 2026-11-08T00:00:00+00:00\n")
+        holder.flush()
+        with mock.patch.dict(os.environ, {"CLAUDE_SESSION_LOG": str(self.log)}):
+            with mock.patch.object(rate, "rate_packet") as rater:
+                code, out, err = self.invoke("--prepare", now=AFTER)
+        self.assertNotEqual(code, 0)
+        self.assertIn("busy", err)
+        self.assertIn("rated nothing", err)
+        rater.assert_not_called()
 
 
 if __name__ == "__main__":

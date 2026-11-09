@@ -49,6 +49,31 @@ def session_log_path(explicit=None):
     return Path(os.environ.get("CLAUDE_SESSION_LOG") or cache / "claude-delegate/sessions.jsonl")
 
 
+def _first_line_bytes(path):
+    """Bytes up to and including the first newline, or empty if the file has none."""
+    with Path(path).open("rb") as stream:
+        return stream.readline()
+
+
+def matches_experiment_log(path):
+    """True for the early-look gate: path identity, or equal non-empty first lines.
+
+    Path identity still decides the 'experiment's log' label and progress(). Before
+    the freeze, a copy whose first row matches the live log is gated the same way.
+    """
+    live = session_log_path().resolve()
+    resolved = Path(path).expanduser().resolve()
+    if resolved == live:
+        return True
+    try:
+        if not resolved.is_file() or not live.is_file():
+            return False
+        first, other = _first_line_bytes(resolved), _first_line_bytes(live)
+    except OSError:
+        return False
+    return bool(first) and first == other
+
+
 def log_delegation(command, **fields):
     """Record launch/followup/review/ask under the calling Claude session, for the session summary."""
     session = os.environ.get("CLAUDE_CODE_SESSION_ID")
