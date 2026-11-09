@@ -22,6 +22,19 @@ import quota
 CLI = SCRIPTS / "delegate"
 
 
+def guard_stdout(test):
+    """Error a test that prints to the suite's stdout.
+
+    quota.snapshot() prints its row. Uncaptured, the row sits in the block
+    buffer of a redirected stdout and lands in every verify log after OK.
+    """
+    stray = io.StringIO()
+    patcher = mock.patch("sys.stdout", stray)
+    patcher.start()
+    test.addCleanup(lambda: test.assertEqual(stray.getvalue(), "", "test wrote to stdout"))
+    test.addCleanup(patcher.stop)
+
+
 def nano_iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%S") + ".001441512Z"
 
@@ -47,6 +60,7 @@ def fixture(now):
 
 class DispatchCheckTests(unittest.TestCase):
     def setUp(self):
+        guard_stdout(self)
         patcher = mock.patch.dict(os.environ, {"DELEGATE_CATALOG_LOCAL": ""})
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -98,6 +112,7 @@ class DispatchCheckTests(unittest.TestCase):
 
 class QuotaTests(unittest.TestCase):
     def setUp(self):
+        guard_stdout(self)
         temp = tempfile.TemporaryDirectory(prefix="quota-test-")
         self.addCleanup(temp.cleanup)
         self.tmp = Path(temp.name)
@@ -408,22 +423,29 @@ class QuotaTests(unittest.TestCase):
         self.assertEqual(self.call_count(), 1)
 
     def test_log_precedence_and_xdg_and_home_fallbacks(self):
+        def bare_snapshot():
+            # No log argument, so the env, XDG and home order picks the file.
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(quota.snapshot(reason="manual"), 0)
+            self.assertEqual(json.loads(output.getvalue())["reason"], "manual")
+
         env_path = self.tmp / "env/quota.jsonl"
         with mock.patch.dict(os.environ, {"CLAUDE_DELEGATE_QUOTA_LOG": str(env_path)}):
             self.collect("--reason", "manual")
             self.assertTrue(self.log.exists())
             self.assertFalse(env_path.exists())
-            quota.snapshot(reason="manual")
+            bare_snapshot()
             self.assertTrue(env_path.exists())
         with mock.patch.dict(os.environ, {"CLAUDE_DELEGATE_QUOTA_LOG": ""}):
             # Fresh clock so reuse does not skip the XDG/home writes.
             with mock.patch.object(quota, "datetime", wraps=datetime) as clock:
                 clock.now.return_value = self.now + timedelta(seconds=20)
-                quota.snapshot(reason="manual")
+                bare_snapshot()
                 self.assertTrue((self.tmp / "cache/claude-delegate/quota.jsonl").exists())
                 clock.now.return_value = self.now + timedelta(seconds=40)
                 with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": ""}):
-                    quota.snapshot(reason="manual")
+                    bare_snapshot()
                 self.assertTrue((self.tmp / ".cache/claude-delegate/quota.jsonl").exists())
 
     def test_reason_required_and_internal_reasons_cannot_be_supplied(self):
@@ -640,6 +662,7 @@ PTY_OK = _pty_available()
 
 class HybridTests(unittest.TestCase):
     def setUp(self):
+        guard_stdout(self)
         temporary = tempfile.TemporaryDirectory(prefix="hybrid-quota-")
         self.addCleanup(temporary.cleanup)
         self.tmp = Path(temporary.name)

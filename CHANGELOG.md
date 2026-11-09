@@ -68,6 +68,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - `delegate ask --agent both` finds a Cursor `Pick:` glued to a status line that ends in a colon (`…re-saving:**Pick: B**`); the `## picks` block printed "no Pick line found" for these.
 - `hooks/secret-guard.py` reads heredocs as a shell does for commit/push analysis: a body is data unless a shell reads it (so prose that only mentions commit-then-push is no longer denied), and an apostrophe in a body no longer hides a real commit-then-push after it.
 - `hooks/session-mode.py` reads heredocs as a shell does: a quoted delimiter's body is data, an unquoted one's is scanned for substitutions only, and a body fed to a shell stays commands. Prose in a heredoc no longer blocks a Bash call, and an apostrophe in a body no longer hides the command after it.
+- The test suite no longer prints to stdout. `test_log_precedence_and_xdg_and_home_fallbacks` called `quota.snapshot()` uncaptured (3 quota rows, since 2026-11-08) and `test_unlistable_handoff_subdir_is_incomplete` let one `rate: backup wrote` line through. With stdout redirected to a file, the lines flushed at exit, so every verify log showed them after unittest's `OK`. Each test in `tests/test_quota.py` and `tests/test_rate.py` now errors if it writes to stdout.
 
 ## [0.2.0] - 2026-10-30
 

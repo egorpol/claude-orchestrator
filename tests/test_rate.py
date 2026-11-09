@@ -25,6 +25,19 @@ OTHER = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 NOW = datetime(2026, 10, 13, 12, tzinfo=timezone.utc)
 
 
+def guard_stdout(test):
+    """Error a test that prints to the suite's stdout.
+
+    rate prints its progress lines. Uncaptured, a line sits in the block
+    buffer of a redirected stdout and lands in every verify log after OK.
+    """
+    stray = io.StringIO()
+    patcher = mock.patch("sys.stdout", stray)
+    patcher.start()
+    test.addCleanup(lambda: test.assertEqual(stray.getvalue(), "", "test wrote to stdout"))
+    test.addCleanup(patcher.stop)
+
+
 def user(text="do the work", ts="2026-10-13T09:00:00Z", **fields):
     return {"type": "user", "message": {"content": text}, "timestamp": ts, **fields}
 
@@ -48,6 +61,7 @@ def assistant(mid, ts, model="test-model", **fields):
 
 class RateTests(unittest.TestCase):
     def setUp(self):
+        guard_stdout(self)
         tmp = tempfile.TemporaryDirectory(prefix="rate-test-")
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
@@ -895,7 +909,8 @@ class RateTests(unittest.TestCase):
         oldest = self.backup_a / "2026-06-01.tar.gz"
         with mock.patch.dict(os.environ, {"DELEGATE_BACKUP_DIRS": str(self.backup_a)}), \
                 mock.patch("prereg.progress", return_value={"close_provisional": False}), \
-                mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as err:
+                mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as err, \
+                redirect_stdout(io.StringIO()) as out:
             failed = rate.backup_experiment_data(self.log)
             err_text = err.getvalue()
         self.assertTrue(failed)
@@ -903,6 +918,7 @@ class RateTests(unittest.TestCase):
         self.assertIn("1 unreadable file", err_text)
         self.assertTrue(oldest.exists())
         today = datetime.now(timezone.utc).date().isoformat()
+        self.assertEqual(out.getvalue(), f"rate: backup wrote {self.backup_a / today}.tar.gz\n")
         self.assertTrue((self.backup_a / f"{today}.tar.gz").is_file())
         self.assertFalse(list(self.backup_a.glob("close-*.tar.gz")))
         with tarfile.open(self.backup_a / f"{today}.tar.gz") as tar:
@@ -1036,6 +1052,7 @@ class RateTests(unittest.TestCase):
 
 class ItemCostTests(unittest.TestCase):
     def setUp(self):
+        guard_stdout(self)
         tmp = tempfile.TemporaryDirectory(prefix="item-cost-test-")
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
