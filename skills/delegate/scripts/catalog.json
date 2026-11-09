@@ -6,7 +6,7 @@
     "aa_aliases: explicit CLI-to-AA overrides; keys cursor:<id> or codex:<model>@<effort>, values AA slugs. Only add exact model/version/effort aliases.",
     "prefer: list (all tasks) or {task: [delegate ids...]}; preferred delegates whose pools were read and clear min_quota rank first in listed order.",
     "cursor_usage_reader: enables the Cursor /usage reader; turning it on is the user's choice under Cursor's terms.",
-    "tasks[].weights apply to intelligence, coding, speed (output tok/s) and price (cheaper scores higher; inside a subscription it approximates how fast a model drains its pool).",
+    "tasks[].weights apply to intelligence, coding, speed (output tok/s) and price (cheaper scores higher; AA cost per task in USD per Intelligence Index task, verbosity included, approximating how fast a model drains its pool; $/1M blended for the whole table when a priced delegate lacks a task cost).",
     "orchestrator_cost.list_prices: dated standard/global API list prices in USD per million tokens, used as a subscription accounting unit, not a bill; unsplit cache writes use the 5m rate."
   ],
   "aa_aliases": {},

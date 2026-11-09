@@ -97,6 +97,9 @@ class CurrentPageFixtureTest(unittest.TestCase):
         for d in shipped:
             with self.subTest(delegate=d["id"]):
                 self.assertIn(d["aa"], models)
+                cpt = models[d["aa"]].get("cost_per_task")
+                self.assertIsNotNone(cpt)
+                self.assertGreater(cpt, 0)
                 if d["agent"] in ("codex", "cursor") and not d.get("aa_proxy"):
                     self.assertEqual(frontier.match_aa(d["agent"], d["model"], d.get("effort"),
                                                        models, index, {}), d["aa"])

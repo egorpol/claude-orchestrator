@@ -1,14 +1,17 @@
 """Tests for route.rank preferences and unknown pools."""
+import copy
 import json
 import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "delegate" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 os.environ["DELEGATE_CATALOG_LOCAL"] = ""
 
+import ratings  # noqa: E402
 import route  # noqa: E402
 
 
@@ -229,6 +232,177 @@ class TestRoundsColumn(unittest.TestCase):
         text2 = route.render("implement", task, rows)
         self.assertIn("ROUNDS", text2)
         self.assertIn("-", text2)
+
+
+def _aa_fixture_models():
+    page = Path(__file__).resolve().parent / "fixtures" / "aa-leaderboard-2026-11-08.html"
+    with mock.patch.object(ratings, "_get", return_value=page.read_text(encoding="utf-8")):
+        return ratings.from_page()
+
+
+def _shipped_catalog():
+    return json.loads((SCRIPTS / "catalog.json").read_text())
+
+
+def _half_quota_pools(cat):
+    return {p: {"left_pct": 50.0, "pace": 1.0}
+            for p in ("codex-5h", "codex-7d", "cursor-auto", "claude-5h", "claude-7d")}
+
+
+class TestPriceUnit(unittest.TestCase):
+    def test_all_priced_rows_use_cost_per_task(self):
+        cat = _shipped_catalog()
+        models = _aa_fixture_models()
+        _, rows = route.rank("bulk-label", cat, _half_quota_pools(cat), models, prefer=[])
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual(r["price_unit"], "cost_per_task")
+            slug = r["delegate"].get("aa")
+            self.assertEqual(r["metrics"]["price"], models[slug]["cost_per_task"])
+
+    def test_one_priced_row_lacking_task_cost_falls_back_to_blended(self):
+        cat = _shipped_catalog()
+        models = copy.deepcopy(_aa_fixture_models())
+        models["claude-haiku-5-5"]["cost_per_task"] = None
+        # HEAD blended scores: rank with only blended available (no task costs at all).
+        models_blended = copy.deepcopy(models)
+        for m in models_blended.values():
+            m["cost_per_task"] = None
+        _, want_rows = route.rank(
+            "bulk-label", cat, _half_quota_pools(cat), models_blended, prefer=[])
+        want = {r["delegate"]["id"]: r["score"] for r in want_rows}
+        _, rows = route.rank("bulk-label", cat, _half_quota_pools(cat), models, prefer=[])
+        for r in rows:
+            self.assertEqual(r["price_unit"], "price_blended")
+            self.assertAlmostEqual(r["score"], want[r["delegate"]["id"]])
+            slug = r["delegate"].get("aa")
+            self.assertEqual(r["metrics"]["price"], models[slug]["price_blended"])
+
+    def test_prior_with_cost_per_task_keeps_per_task_unit(self):
+        cat = _shipped_catalog()
+        cat["delegates"] = list(cat["delegates"]) + [{
+            "id": "prior-x", "agent": "codex", "model": "x", "pools": ["codex-5h"],
+            "prior": {"intelligence": 45, "coding": 40, "tps": 60,
+                      "price_blended": 1.0, "cost_per_task": 0.2},
+        }]
+        models = _aa_fixture_models()
+        _, rows = route.rank("implement", cat, _half_quota_pools(cat), models, prefer=[])
+        for r in rows:
+            self.assertEqual(r["price_unit"], "cost_per_task")
+        prior = next(r for r in rows if r["delegate"]["id"] == "prior-x")
+        self.assertEqual(prior["metrics"]["price"], 0.2)
+
+    def test_unrated_delegate_does_not_block_per_task_unit(self):
+        cat = _shipped_catalog()
+        cat["delegates"] = list(cat["delegates"]) + [{
+            "id": "unrated-z", "agent": "codex", "model": "z", "pools": ["codex-5h"],
+        }]
+        models = _aa_fixture_models()
+        _, rows = route.rank("implement", cat, _half_quota_pools(cat), models, prefer=[])
+        for r in rows:
+            self.assertEqual(r["price_unit"], "cost_per_task")
+        unrated = next(r for r in rows if r["delegate"]["id"] == "unrated-z")
+        self.assertIsNone(unrated["metrics"]["price"])
+
+    def test_agents_filter_drops_blended_only_prior(self):
+        cat = _shipped_catalog()
+        cat["delegates"] = list(cat["delegates"]) + [{
+            "id": "prior-y", "agent": "codex", "model": "y", "pools": ["codex-5h"],
+            "prior": {"intelligence": 45, "coding": 40, "tps": 60, "price_blended": 1.0},
+        }]
+        models = _aa_fixture_models()
+        pools = _half_quota_pools(cat)
+        _, mixed = route.rank("implement", cat, pools, models, prefer=[])
+        for r in mixed:
+            self.assertEqual(r["price_unit"], "price_blended")
+        # Filter out the codex prior; remaining shipped rows all have task costs.
+        _, filtered = route.rank(
+            "implement", cat, pools, models, prefer=[], agents={"cursor", "claude-subagent"})
+        self.assertTrue(filtered)
+        self.assertFalse(any(r["delegate"]["id"] == "prior-y" for r in filtered))
+        for r in filtered:
+            self.assertEqual(r["price_unit"], "cost_per_task")
+
+    def test_render_price_header_and_fallback_line(self):
+        cat = _shipped_catalog()
+        models = _aa_fixture_models()
+        pools = _half_quota_pools(cat)
+        task, rows = route.rank("bulk-label", cat, pools, models, prefer=[])
+        text = route.render("bulk-label", task, rows)
+        self.assertIn("$/TASK", text.splitlines()[1])
+        self.assertNotIn("price: $/1M blended for the whole table", text)
+        self.assertIn("price is AA cost per task", text)
+
+        models2 = copy.deepcopy(models)
+        models2["claude-haiku-5-5"]["cost_per_task"] = None
+        task2, rows2 = route.rank("bulk-label", cat, pools, models2, prefer=[])
+        text2 = route.render("bulk-label", task2, rows2)
+        self.assertIn("$/1M", text2.splitlines()[1])
+        self.assertIn(
+            "price: $/1M blended for the whole table; no AA cost per task for: claude-haiku",
+            text2)
+
+        # Priors with only blended (no task cost anywhere) fall back quietly.
+        task3, rows3 = route.rank("implement", _catalog(), _pools_ok(), {}, prefer=[])
+        text3 = route.render("implement", task3, rows3)
+        self.assertIn("$/1M", text3.splitlines()[1])
+        self.assertNotIn("price: $/1M blended for the whole table", text3)
+
+    def test_bad_prior_cost_per_task_falls_back_to_blended(self):
+        pools = {"codex-5h": {"left_pct": 50.0, "pace": 1.0}}
+        base = {
+            "min_quota_pct": 10,
+            "orchestrator_pool_penalty": 0.8,
+            "tasks": {"implement": {
+                "desc": "new features", "mode": "write",
+                "weights": {"intelligence": 0.4, "coding": 0.5, "speed": 0.05, "price": 0.05},
+            }},
+        }
+        valid = {
+            "id": "prior-ok", "agent": "codex", "model": "ok", "pools": ["codex-5h"],
+            "prior": {"intelligence": 45, "coding": 40, "tps": 60,
+                      "price_blended": 2.0, "cost_per_task": 0.3},
+        }
+        for bad in (-0.5, "0.5", True, float("nan"), 0):
+            with self.subTest(bad=bad):
+                cat = dict(base)
+                cat["delegates"] = [
+                    valid,
+                    {"id": "prior-bad", "agent": "codex", "model": "bad", "pools": ["codex-5h"],
+                     "prior": {"intelligence": 45, "coding": 40, "tps": 60,
+                               "price_blended": 2.0, "cost_per_task": bad}},
+                ]
+                task, rows = route.rank("implement", cat, pools, {}, prefer=[])
+                for r in rows:
+                    self.assertEqual(r["price_unit"], "price_blended")
+                text = route.render("implement", task, rows)
+                self.assertIn(
+                    "price: $/1M blended for the whole table; no AA cost per task for: prior-bad",
+                    text)
+
+    def test_bad_only_price_blended_does_not_block_per_task_unit(self):
+        cat = {
+            "min_quota_pct": 10,
+            "orchestrator_pool_penalty": 0.8,
+            "delegates": [
+                {"id": "prior-ok", "agent": "codex", "model": "ok", "pools": ["codex-5h"],
+                 "prior": {"intelligence": 45, "coding": 40, "tps": 60,
+                           "price_blended": 2.0, "cost_per_task": 0.3}},
+                {"id": "prior-neg", "agent": "codex", "model": "neg", "pools": ["codex-5h"],
+                 "prior": {"intelligence": 45, "coding": 40, "tps": 60,
+                           "price_blended": -1}},
+            ],
+            "tasks": {"implement": {
+                "desc": "new features", "mode": "write",
+                "weights": {"intelligence": 0.4, "coding": 0.5, "speed": 0.05, "price": 0.05},
+            }},
+        }
+        pools = {"codex-5h": {"left_pct": 50.0, "pace": 1.0}}
+        _, rows = route.rank("implement", cat, pools, {}, prefer=[])
+        for r in rows:
+            self.assertEqual(r["price_unit"], "cost_per_task")
+        neg = next(r for r in rows if r["delegate"]["id"] == "prior-neg")
+        self.assertIsNone(neg["metrics"]["price"])
 
 
 if __name__ == "__main__":
