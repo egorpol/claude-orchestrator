@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -169,6 +170,7 @@ class TestReport(unittest.TestCase):
                                  "max": summary["context_max"]},
             "cost_units": round(summary["cost_units"]),
             "idle_rebuilds": summary["idle_rebuilds"], "quota_end": None,
+            "quota_lag_min": None,
             "usd_list_price": None, "subagent_calls": 0, "prices_as_of": "2026-10-06",
             "prompts": [
                 {"timestamp": "2026-10-10T20:59:00Z", "context": 1201010, "guard": None},
@@ -877,25 +879,60 @@ class TestReport(unittest.TestCase):
         self.assertEqual(json.loads(out)["row"]["session"], OTHER_SESSION)
 
     def test_quota_failure_records_error_and_still_writes(self):
-        with mock.patch("quota.fetch", side_effect=RuntimeError("openusage\nmissing")) as fetch:
+        with mock.patch("quota.fetch", side_effect=RuntimeError("openusage\nmissing")) as fetch, \
+                mock.patch("report.quota_lag_min", return_value=3):
             code, _, err = self.invoke("--session", SESSION, "--feedback-dir", str(self.feedback), defaults=False)
         self.assertEqual((code, err), (0, ""))
         fetch.assert_called_once_with()
-        self.assertEqual(self.usage_row()["quota_end"], {"error": "openusage missing"})
+        row = self.usage_row()
+        self.assertEqual(row["quota_end"], {"error": "openusage missing"})
+        self.assertIsNone(row["quota_lag_min"])  # not measured, so no lag (review 2026-11-10)
         self.assertTrue(self.skeleton().is_file())
         self.assertIn("Quota at the end: not measured.", self.skeleton().read_text(encoding="utf-8"))
 
     def test_quota_success_uses_shared_pool_function(self):
         envelope = {"snapshots": []}
+        # Pin lag to 5 min so the heading stays "Quota at the end".
         with mock.patch("quota.fetch", return_value=envelope), \
                 mock.patch("quota.pools", return_value={"claude-5h": {"left_pct": 86.5},
                                                        "claude-7d": {"left_pct": 98},
-                                                       "codex-5h": {"error": "missing"}}) as pools:
+                                                       "codex-5h": {"error": "missing"}}) as pools, \
+                mock.patch("report.quota_lag_min", return_value=5):
             code, _, err = self.invoke("--session", SESSION, "--feedback-dir", str(self.feedback), defaults=False)
         self.assertEqual((code, err), (0, ""))
         pools.assert_called_once_with(envelope)
-        self.assertEqual(self.usage_row()["quota_end"], {"claude-5h": 86.5, "claude-7d": 98})
+        row = self.usage_row()
+        self.assertEqual(row["quota_end"], {"claude-5h": 86.5, "claude-7d": 98})
+        self.assertEqual(row["quota_lag_min"], 5)
         self.assertIn("Quota at the end: claude-5h 86.5%, claude-7d 98%.", self.skeleton().read_text(encoding="utf-8"))
+
+    def test_quota_lag_heading_boundary(self):
+        """10 min stays end-of-session; 11 min switches to report-time."""
+        last = datetime(2026, 10, 10, 23, 0, tzinfo=timezone.utc)
+        self.assertEqual(report.quota_lag_min(last, now=last + timedelta(minutes=10)), 10)
+        self.assertEqual(report.quota_lag_min(last, now=last + timedelta(minutes=11)), 11)
+        self.assertEqual(report.quota_heading(10), "Quota at the end")
+        self.assertEqual(report.quota_heading(0), "Quota at the end")
+        self.assertEqual(report.quota_heading(None), "Quota at the end")
+        self.assertEqual(
+            report.quota_heading(11),
+            "Quota at report time (11 min after the last call)")
+        row = {
+            "item": "Lag", "date": "2026-10-11", "session": SESSION,
+            "model": "claude-z-sonnet", "api_calls": 1, "cache_read": 0,
+            "cache_write": 0, "output": 0, "cost_units": 1, "prompts": [],
+            "quota_end": {"claude-5h": 50.0}, "quota_lag_min": 11,
+        }
+        summary = {"cost_units": 1, "cost_parts": {"cache_read": 0, "cache_write": 0, "output": 1},
+                   "idle_rebuilds": [], "idle_rebuild_units": 0,
+                   "context_first": 1000, "context_last": 1000}
+        text = report.render_skeleton(row, summary, [])
+        self.assertIn(
+            "Quota at report time (11 min after the last call): claude-5h 50%.", text)
+        self.assertNotIn("Quota at the end:", text)
+        row["quota_lag_min"] = 10
+        text = report.render_skeleton(row, summary, [])
+        self.assertIn("Quota at the end: claude-5h 50%.", text)
 
     def test_repo_name_remote_and_fallbacks(self):
         for remote in ("https://github.com/owner/name.git", "git@github.com:owner/name.git",

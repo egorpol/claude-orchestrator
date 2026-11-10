@@ -120,6 +120,34 @@ class FailureLineTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(checks.failure_line(text))
 
+    def test_label_value_vs_count_first(self):
+        """A label-value pair is not a failure count; label-first non-zero counts are."""
+        hits = [
+            "signs 10 errors 2",
+            "errors 2",
+            "failures=3",
+            "failures: 1",
+            "3 errors",
+            "1 failed, 2 passed",
+            "FAILED (failures=1)",
+        ]
+        for line in hits:
+            with self.subTest(line=line):
+                self.assertEqual(checks.failure_line(line), line)
+        misses = [
+            "triage 576 signs 10 errors 0",
+            "crops 76 hits 10 errors 0",
+            "0 failed",
+            "errors 0",
+            "failures=0",
+            "error 404",
+            "Ran 340 tests in 280s",
+            "OK (skipped=2)",
+        ]
+        for line in misses:
+            with self.subTest(line=line):
+                self.assertIsNone(checks.failure_line(line))
+
     def test_long_line_cut_to_160(self):
         line = "FAILED " + ("x" * 200)
         hit = checks.failure_line(line)

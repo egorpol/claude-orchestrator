@@ -167,6 +167,25 @@ def quota_end(no_quota):
         return {"error": message[:200]}
 
 
+def quota_lag_min(last_call, now=None):
+    """Whole minutes from the last main call to `now`, or None when last_call is missing."""
+    if last_call is None:
+        return None
+    now = now if now is not None else datetime.now(timezone.utc)
+    if last_call.tzinfo is None:
+        last_call = last_call.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return max(0, int((now - last_call).total_seconds() // 60))
+
+
+def quota_heading(lag_min):
+    """Skeleton label: end-of-session vs report-time when lag exceeds 10 minutes."""
+    if lag_min is not None and lag_min > 10:
+        return f"Quota at report time ({lag_min} min after the last call)"
+    return "Quota at the end"
+
+
 def matching_runs(directory, first_call):
     rows = cost.load_run_log(cost.DEFAULT_LOG, since=first_call.isoformat())
     tops = {}
@@ -480,6 +499,7 @@ def render_skeleton(row, summary, runs, asks=()):
     measured = row["quota_end"]
     quota_text = ", ".join(f"{pool} {left:g}%" for pool, left in measured.items()) \
         if measured and "error" not in measured else "not measured"
+    quota_line = f"{quota_heading(row.get('quota_lag_min'))}: {quota_text}."
     run_text = "none"
     if runs:
         lines = []
@@ -522,7 +542,7 @@ Session up to this log: {row['api_calls']} calls, {_fmt_tokens(row['cache_read']
 
 {render_prompt_contexts(row['prompts'])}
 
-Quota at the end: {quota_text}.
+{quota_line}
 
 Delegate runs: {run_text}.
 
@@ -591,6 +611,7 @@ def cmd_report(a):
         runs_path = _output_path(directory, "runs.jsonl")
         weights, prices = cost.load_catalog_cost()
         summary = cost.summarise_session(calls, weights, prices)
+        measured = quota_end(a.no_quota)
         row = {
             "date": date, "repo": repo, "item": a.item,
             "kind": "orchestrator_session", "session": session_id(path),
@@ -601,7 +622,9 @@ def cmd_report(a):
             "context_per_call": {"first": summary["context_first"], "last": summary["context_last"],
                                  "max": summary["context_max"]},
             "cost_units": round(summary["cost_units"]),
-            "idle_rebuilds": summary["idle_rebuilds"], "quota_end": quota_end(a.no_quota),
+            "idle_rebuilds": summary["idle_rebuilds"], "quota_end": measured,
+            # null whenever quota was not measured (--no-quota or a failed read)
+            "quota_lag_min": quota_lag_min(last) if measured and "error" not in measured else None,
             "usd_list_price": round(summary["usd"], 4) if summary["usd"] is not None else None,
             "subagent_calls": summary["subagent_calls"], "prices_as_of": summary["prices_as_of"],
             "prompts": prompt_contexts(path, calls),

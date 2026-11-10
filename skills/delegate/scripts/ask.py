@@ -421,18 +421,50 @@ def _normalize_pick_prefix(line):
     return s.replace("**", "").replace("__", "").strip()
 
 
+_Q_PICK = re.compile(r"(?i)^Q(\d+)[.):]?\s+Pick\s*:(.*)$")
+_Q_PICK_GLUED = re.compile(r"(?i)[.!?:]\s*Q(\d+)[.):]?\s+Pick\s*:(.*)$")
+# An option letter standing alone (`**A**`, `**B (cheaper)**`), not a bold word (`**Because**`).
+_BOLD_OPTION = re.compile(r"(?:^|(?<=[.!?:]))\s*\*\*([A-H](?![A-Za-z])[^*]*)\*\*", re.M)
+_WHY_LINE = re.compile(r"(?i)^why\s*:")
+_WHY_GLUED = re.compile(r"(?i)[.!?:]\s*Why\s*:")
+
+
 def extract_pick(answer):
-    """First Pick: value in answer, or None. Tolerates markdown wrappers around Pick,
-    and a Pick glued to a preamble sentence or a status line ending in a colon (Cursor's
-    result joins its messages without a newline)."""
+    """First Pick: value in answer, or None.
+
+    Tolerates markdown wrappers around Pick, a Pick glued to a preamble sentence
+    or a status line ending in a colon (Cursor joins messages without a newline),
+    numbered `Q1 Pick: A` / `Q2 Pick: B` (returned as `Q1 A; Q2 B`), and a bold
+    option letter A–H before the first Why: when no Pick: line is present.
+    """
     if not answer:
         return None
-    for line in answer.splitlines():
+    lines = answer.splitlines()
+    for line in lines:
         s = _normalize_pick_prefix(line)
+        if _Q_PICK.match(s) or _Q_PICK_GLUED.search(s):
+            continue  # `Q1. Pick: A` is numbered, not a plain Pick glued to a sentence
         m = re.match(r"(?i)^pick\s*:(.*)$", s) or re.search(r"[.!?:]\s*Pick\s*:(.*)$", s)
         if m:
             return m.group(1).strip()
-    return None
+    numbered = []
+    for line in lines:
+        s = _normalize_pick_prefix(line)
+        m = _Q_PICK.match(s) or _Q_PICK_GLUED.search(s)
+        if m:
+            numbered.append(f"Q{m.group(1)} {m.group(2).strip()}")
+    if numbered:
+        return "; ".join(numbered)
+    before_why = []
+    for line in lines:
+        s = _normalize_pick_prefix(line)
+        if _WHY_LINE.match(s) or _WHY_GLUED.search(s):
+            break
+        before_why.append(line)
+    if not before_why:
+        return None
+    m = _BOLD_OPTION.search("\n".join(before_why))
+    return m.group(1).strip() if m else None
 
 
 def _fallback_for_both(a, prefix="ask"):

@@ -309,9 +309,22 @@ def _fmt_k(n):
     return str(n)
 
 
+def _fresh_start_tokens(path, summary):
+    """Median first-call context of peer sessions, or None. Uses summary when set."""
+    if "fresh_start" in summary:
+        return summary["fresh_start"]
+    try:
+        import fresh_start as fs
+        return fs.median_fresh_start(Path(path).parent, exclude=Path(path))
+    except Exception:
+        return None
+
+
 def render_session(path, summary, as_json=False):
+    fresh = _fresh_start_tokens(path, summary)
+    payload = {**summary, "fresh_start": fresh}
     if as_json:
-        return json.dumps({"path": str(path), **summary}, indent=2)
+        return json.dumps({"path": str(path), **payload}, indent=2)
     lines = [f"session: {path.name}  ({', '.join(summary['models']) or 'unknown model'})"]
     lines.append(f"calls: {summary['calls']}")
     lines.append(
@@ -361,6 +374,13 @@ def render_session(path, summary, as_json=False):
             f"({gaps} min; {_fmt_k(written)} written, {pct:.1f}% of cost units)"
         )
     lines.append(f"next call re-reads ≈ {_fmt_k(summary['context_last'])} tokens")
+    if fresh is None:
+        lines.append("fresh session here starts ≈ unknown")
+    else:
+        lines.append(
+            f"fresh session here starts ≈ {_fmt_k(fresh)} "
+            f"(median of up to 5 newest other sessions)"
+        )
     return "\n".join(lines)
 
 

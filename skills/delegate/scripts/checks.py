@@ -25,11 +25,15 @@ _FAILURE_RES = [re.compile(p) for p in (
     r"^FAIL[:\s]",
     r"^ERROR[:\s]",
     r"Traceback \(most recent call last\)",
-    r"\b[1-9]\d* (?:failed|failures?|errors?)\b",
     r"\b[1-9]\d* failure\(s\)",
     r"^not ok\b",
     r"\bAssertionError\b",
 )]
+# Count-first (`3 errors`) vs label-first (`errors 2`, `failures=3`). A count-first
+# match whose word is followed by its own number (`10 errors 0`) is label-first.
+_COUNT_FIRST = re.compile(r"\b([1-9]\d*) (failed|failures?|errors?)\b")
+_AFTER_COUNT_WORD = re.compile(r"\s+(\d+)\b")
+_LABEL_FIRST = re.compile(r"\b(failed|failures|errors)(?:\s*[=:]\s*|\s+)(\d+)\b")
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Path token: start of text or after whitespace / opener; strip trailing punctuation later.
 _PATH_TOKEN = re.compile(
@@ -206,6 +210,21 @@ def masked_pipes(cmd):
     return found
 
 
+def _nonzero_failure_count(line):
+    """True when a failed/failures/errors count on the line is non-zero."""
+    for m in _COUNT_FIRST.finditer(line):
+        after = _AFTER_COUNT_WORD.match(line, m.end())
+        if after is not None:
+            if int(after.group(1)) != 0:
+                return True
+            continue
+        return True
+    for m in _LABEL_FIRST.finditer(line):
+        if int(m.group(2)) != 0:
+            return True
+    return False
+
+
 def failure_line(text):
     """First line matching a measured failure pattern, stripped and cut to 160 chars."""
     if not text:
@@ -213,6 +232,8 @@ def failure_line(text):
     for line in text.splitlines():
         if line.startswith("$ "):
             continue
+        if _nonzero_failure_count(line):
+            return line.strip()[:160]
         for pat in _FAILURE_RES:
             if pat.search(line):
                 return line.strip()[:160]

@@ -94,7 +94,28 @@ def last_context(path):
     return None
 
 
-def _idle_block(session, ctx, ts_str):
+def _load_fresh_start():
+    path = ROOT / "skills/delegate/scripts/fresh_start.py"
+    spec = importlib.util.spec_from_file_location("context_guard_fresh_start", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fresh_parenthetical(transcript_path):
+    """`(a fresh session here starts at ~Nk)` from peer transcripts, or empty."""
+    try:
+        mod = _load_fresh_start()
+        path = Path(transcript_path)
+        tokens = mod.median_fresh_start(path.parent, exclude=path)
+        if tokens is None:
+            return ""
+        return f" (a fresh session here starts at ~{tokens // 1000}k)"
+    except Exception:
+        return ""
+
+
+def _idle_block(session, ctx, ts_str, transcript_path=None):
     """Block once per idle period when cache has likely expired. Returns True if blocked."""
     ts = _parse_ts(ts_str)
     if ts is None:
@@ -112,11 +133,12 @@ def _idle_block(session, ctx, ts_str):
         return False  # resend after a block for this assistant record
     marker.write_text(ts_str)
     k = ctx // 1000
+    fresh = _fresh_parenthetical(transcript_path) if transcript_path else ""
     reason = (
         f"context guard: idle {idle_min} min, so the cache has expired and this prompt would rewrite ~{k}k "
         f"tokens at twice the input price.\n"
-        f"If the handoff is current, /clear, then /next to continue from it "
-        f"(a fresh session starts at ~35k); otherwise send the prompt again to go ahead here."
+        f"If the handoff is current, /clear, then /next to continue from it"
+        f"{fresh}; otherwise send the prompt again to go ahead here."
     )
     print(json.dumps({"decision": "block", "reason": reason}))
     return True
@@ -280,7 +302,7 @@ def _delegate_nudge(session, transcript):
     return system, additional
 
 
-def _size_reminder(session, ctx):
+def _size_reminder(session, ctx, transcript_path=None):
     level = 1 + (ctx - FIRST) // STEP
     STATE.mkdir(parents=True, exist_ok=True)
     marker = STATE / session
@@ -289,10 +311,11 @@ def _size_reminder(session, ctx):
         return None
     marker.write_text(str(level))
     k = ctx // 1000
+    fresh = _fresh_parenthetical(transcript_path) if transcript_path else ""
     system = f"context guard: ~{k}k tokens; a new work item is cheaper after a handoff, /clear and /next."
     additional = (
-        f"Context guard: this session's context is ~{k}k tokens and every call re-reads all of it "
-        "(a fresh session starts at ~35k). Decide whether this prompt starts a new work item: the "
+        f"Context guard: this session's context is ~{k}k tokens and every call re-reads all of it"
+        f"{fresh}. Decide whether this prompt starts a new work item: the "
         "previous item is committed, merged or handed off, the user turns to a different topic, or a "
         "finished build turns into Q&A support or a hand-paste loop. If it does, do not start it here, even after 'go on'. "
         "First write or refresh the handoff (memory files plus a short HANDOFF.md: state, open PRs or "
@@ -323,9 +346,9 @@ def main():
     # held prompt never reaches Claude: hold only what looks typed (2026-10-12, hooks docs).
     prompt = str(data.get("prompt") or "").lstrip()
     typed = bool(prompt) and not prompt.startswith(("<", "/"))
-    if ctx and typed and _idle_block(session, ctx, ts_str):
+    if ctx and typed and _idle_block(session, ctx, ts_str, transcript):
         return
-    size = _size_reminder(session, ctx) if ctx and ctx >= FIRST else None
+    size = _size_reminder(session, ctx, transcript) if ctx and ctx >= FIRST else None
     nudge = _delegate_nudge(session, transcript)
     if not size and not nudge:
         return

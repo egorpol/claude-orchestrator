@@ -259,6 +259,35 @@ class TestAsk(unittest.TestCase):
         self.assertEqual(ask.extract_pick("for the intended cases:Pick: A\nWhy: y"), "A")
         self.assertIsNone(ask.extract_pick("two options: pick: whichever works"))
 
+    def test_extract_pick_bold_and_numbered(self):
+        """Bold option letters and Qn Pick lines; plain Pick: still wins."""
+        glued = (
+            "I'll verify the gate table, closure rules, and harness control against "
+            "tracked files before picking an option.**A**\n\n"
+            "Why: The Close row never reads r ...\n\n"
+            "Risk others may miss: ..."
+        )
+        cases = [
+            ("Pick: A\nWhy: x", "A"),
+            ("**Pick:** B\nWhy: x", "B"),
+            (glued, "A"),
+            ("**A**\n\nWhy: cheaper.", "A"),
+            ("Q1 Pick: A\nWhy: x\n\nQ2 Pick: B\nWhy: z", "Q1 A; Q2 B"),
+            ("**Q1 Pick:** A\nWhy: x\n\n**Q2 Pick:** A", "Q1 A; Q2 A"),
+            ("Why: option **A** keeps the old path.", None),
+            ("**Note**: I could not read the file.\nWhy: n/a", None),
+            ("I think both are fine.", None),
+            # Review 2026-11-10: bold words starting A-H are not option letters.
+            ("**Caveat**: I could not read the file.\nWhy: n/a", None),
+            ("I checked. **Both options work** equally.\nWhy: x", None),
+            ("**Decision:** keep the current gate.\n\nWhy: x", None),
+            ("**B (cheaper)**\nWhy: x", "B (cheaper)"),
+            ("Q1. Pick: A\nWhy: x\nQ2. Pick: B", "Q1 A; Q2 B"),
+        ]
+        for answer, expected in cases:
+            with self.subTest(answer=answer[:40]):
+                self.assertEqual(ask.extract_pick(answer), expected)
+
     def _fallback_report(self, catalog, default_codex):
         def rating(name, intelligence, cost, creator="OpenAI"):
             return {"name": name, "intelligence": intelligence, "cost_per_task": cost,

@@ -1262,6 +1262,92 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual([line for line in lines if line.startswith("risks:")],
                              concerns[:count])
 
+    def test_review_packet_lists_finding_bullets(self):
+        """Review packets show up to 5 finding lines (high→medium→low); None. adds none."""
+        self.launch("codex", "rev-findings")
+        root = self.root("rev-findings")
+        rev = root / "review-1"
+        rev.mkdir()
+        (rev / "meta.json").write_text(json.dumps(
+            {"agent": "cursor", "model": "auto", "n": 1, "round": 1}))
+        (rev / "exit_code").write_text("0\n")
+        (rev / "finished_at").write_text("2026-01-01T00:00:00+00:00\n")
+        (rev / "pre_digest").write_text("same\n")
+        (rev / "post_digest").write_text("same\n")
+        body = (
+            "## Verdict\nVerdict: CHANGES REQUESTED\n## Findings\n"
+            "- [medium] second medium\n"
+            "- [high] first high\n"
+            "- [low] a low\n"
+            "- [medium] first medium\n"
+            "- [high] second high\n"
+            "  continuation that must not appear\n"
+            "- [high] third high\n"
+            "- [high] fourth high\n"
+            "## Digest\nfiles: x\nverify: ok\nconflicts: none\nrisks: none\n"
+        )
+        (rev / "last-message.md").write_text(body)
+        lines = runs.packet(rev)
+        self.assertLessEqual(len(lines), runs.PACKET_MAX_LINES, lines)
+        text = "\n".join(lines)
+        self.assertIn("findings: high 4, medium 2, low 1", text)
+        # Severity order; within severity, reviewer order. Cap 5 + more line.
+        finding_lines = [l for l in lines if l.startswith("  - [")]
+        self.assertEqual(finding_lines, [
+            "  - [high] first high",
+            "  - [high] second high",
+            "  - [high] third high",
+            "  - [high] fourth high",
+            "  - [medium] second medium",
+        ])
+        self.assertTrue(any("… and 2 more in last-message.md" in l for l in lines))
+        self.assertNotIn("continuation that must not appear", text)
+        # No findings → no finding lines.
+        (rev / "last-message.md").write_text(
+            "## Verdict\nVerdict: APPROVE\n## Findings\nNone.\n"
+            "## Digest\nfiles: x\nverify: ok\nconflicts: none\nrisks: none\n")
+        lines = runs.packet(rev)
+        self.assertFalse(any(l.startswith("  - [") for l in lines))
+        self.assertFalse(any("more in last-message.md" in l for l in lines))
+
+    def test_review_packet_findings_fit_worst_case_budget(self):
+        """Worst case (warnings, concerns, reviewer-changed, 7 long findings) stays ≤20."""
+        self.launch("codex", "rev-budget")
+        root = self.root("rev-budget")
+        rev = root / "review-1"
+        rev.mkdir()
+        (rev / "meta.json").write_text(json.dumps(
+            {"agent": "cursor", "model": "auto", "n": 1, "round": 1}))
+        (rev / "exit_code").write_text("0\n")
+        (rev / "finished_at").write_text("2026-01-01T00:00:00+00:00\n")
+        (rev / "pre_digest").write_text("a\n")
+        (rev / "post_digest").write_text("b\n")  # reviewer-changed warning
+        findings = "\n".join(f"- [high] finding {i} " + ("x" * 220) for i in range(7))
+        (rev / "last-message.md").write_text(
+            f"## Verdict\nVerdict: CHANGES REQUESTED\n## Findings\n{findings}\n"
+            "## Digest\nfiles: x\nverify: ok\nconflicts: c1\nrisks: r1\n")
+        (rev / "warnings").write_text("\n".join(
+            f"warning: warning {i}" for i in range(4)) + "\n")
+        concerns = [f"risks: concern {i}" for i in range(3)]
+        with patch.object(runs, "_concerns", return_value=concerns):
+            lines = runs.packet(rev)
+        self.assertLessEqual(len(lines), runs.PACKET_MAX_LINES, lines)
+        self.assertTrue(lines[-1].startswith("artifacts:"))
+        self.assertIn("WARNING: reviewer changed the worktree", lines)
+        finding_lines = [l for l in lines if l.startswith("  - [")]
+        self.assertEqual(len(finding_lines), 5)
+        self.assertTrue(any("… and 2 more in last-message.md" in l for l in lines))
+        for line in finding_lines:
+            self.assertLessEqual(len(line), runs.CONCERN_LINE_MAX)
+        # Tight fixed lines: next: is omitted first; findings still take leftover budget.
+        concerns_heavy = [f"risks: concern {i}" for i in range(8)]
+        with patch.object(runs, "_concerns", return_value=concerns_heavy):
+            tight = runs.packet(rev)
+        self.assertLessEqual(len(tight), runs.PACKET_MAX_LINES, tight)
+        self.assertFalse(any(line.startswith("next:") for line in tight))
+        self.assertTrue(any(l.startswith("  - [") or "more in last-message.md" in l
+                            for l in tight))
+
     def test_packet_never_exceeds_20_lines_under_load(self):
         """Fixed lines are reserved first; file rows fill the remaining budget (≤20)."""
         self.launch("codex", "pkt-bound", "--verify", "printf 'FAILED (failures=1)\\n'")

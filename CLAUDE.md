@@ -15,6 +15,7 @@ User-level Claude Code skills for running Claude as orchestrator with Codex CLI 
   - `runs.py`: worktree/launch/followup/review/verify/status/wait/diff/apply/cleanup, `meta.json`, environment scrubbing
   - `checks.py`: launch warnings (a `--verify` pipe that masks the exit code, brief paths outside the worktree) and the failure-line check on verify logs that exited 0
   - `cost.py`, `ask.py`, `report.py`: session and run-log cost, read-only questions, field-report skeletons and JSONL rows
+  - `fresh_start.py`: median first-call context of the 5 newest other sessions in a transcript folder; shared by `hooks/context-guard.py` (via importlib) and `cost --session`
   - `rate.py`: `delegate rate`, the blinded item rater (rubric v2), and the item columns of `cost --by-mode`
   - `prereg.py`: `delegate prereg`, counts-only progress and frozen confirmatory analysis, with the early-look guard
   - `blinding.py`: arm-guess calls for the preregistration blinding check (`prereg --prepare`)
@@ -73,10 +74,13 @@ bash -n install.sh
 
 ## Field reports, releases, open items
 
-- **Folding in field reports:** list `feedback/*.md` newer than the last "fold in" commit. For each lesson:
-  - a rule for every session goes into `rules/hygiene.md`, or into `rules/delegation.md` if it is about delegating;
-  - delegate workflow goes into the matching topic file in `skills/delegate/reference/` or `templates/`;
-  - a CLI or hook bug becomes a fix plus a test.
+- **Folding in field reports:** once a week, list `feedback/*.md` newer than the last "fold in" commit. For each lesson:
+  - a new tip needs 2+ reports. A rule for every session goes into `rules/hygiene.md`, or into `rules/delegation.md` if it is about delegating; delegate workflow goes into the matching topic file in `skills/delegate/reference/` or `templates/`;
+  - a lesson from one report waits in the dated list in `docs/field-results.md` until a second report repeats it;
+  - a rule that already exists and is broken in 2+ reports gets mechanised (a hook, a CLI check or a printed figure), not reworded;
+  - a CLI or hook bug becomes a fix plus a test, from one report.
+
+  Adherence to the rules is measured once after the experiment's freeze, on orchestrator sessions only; a rule that isn't followed is then dropped or mechanised (picked 2026-11-10).
 
   Append a dated section with the sessions' numbers to `docs/field-results.md`, with `delegate cost --session <id>` as the source, and refresh the overview table there. If a headline number in README changes, re-check it against that table. Reports name other projects' private details; carry lessons over, not quotes.
 - **Releases:** move `[Unreleased]` to `## [X.Y.Z] - date` and update the compare links. The tag (`git tag -a vX.Y.Z`) and the push are outward steps, so bundle them into the end-of-item approval.

@@ -1166,9 +1166,11 @@ class TestListPrice(unittest.TestCase):
             "context/call: first 1.1k  last 1.1k  max 1.1k",
             "cost units: 410  (input 2.4%  cache_read 24.4%  cache_write 48.8%  output 24.4%)",
             "idle rebuilds (gap >= 60 min): none", "next call re-reads ≈ 1.1k tokens",
+            "fresh session here starts ≈ unknown",
         ])
         self.assertIn("list price: $0.00  (main $0.00, subagents $0.00; prices as of 2026-10-06)", text)
         self.assertIn("by model: (prices as of 2026-10-06; USD)", text)
+        self.assertIsNone(payload["fresh_start"])
 
 class TestUntilAndPreregCap(unittest.TestCase):
     def setUp(self):

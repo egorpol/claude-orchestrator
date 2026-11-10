@@ -316,6 +316,43 @@ class ContextGuardTests(unittest.TestCase):
         self.assertEqual(cache["ids"], ["toolu_partial"])
         self.assertEqual(guard._tool_call_count(self.transcript, session), 1)
 
+    def _peer_session(self, name, context, mtime):
+        path = self.tmp / name
+        usage = {
+            "input_tokens": 10,
+            "cache_read_input_tokens": context - 1010,
+            "cache_creation_input_tokens": 1000,
+        }
+        rec = {"type": "assistant", "entrypoint": "claude-vscode",
+               "message": {"model": "claude-opus-5-5", "usage": usage}}
+        path.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_size_reminder_uses_measured_fresh_start(self):
+        base = 1_700_000_000
+        for i, ctx in enumerate((50_000, 52_000, 54_000)):
+            self._peer_session(f"peer-{i}.jsonl", ctx, base + i)
+        out = self.prompt(121_000)
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("a fresh session here starts at ~52k", context)
+        self.assertNotIn("~35k", context)
+
+    def test_size_reminder_omits_fresh_when_too_few_peers(self):
+        out = self.prompt(121_000)
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Context guard:", context)
+        self.assertNotIn("fresh session here starts", context)
+        self.assertNotIn("~35k", context)
+
+    def test_idle_block_uses_measured_fresh_start(self):
+        base = 1_700_000_000
+        for i, ctx in enumerate((49_000, 52_000, 55_000)):
+            self._peer_session(f"idle-peer-{i}.jsonl", ctx, base + i)
+        blocked = self.prompt(150_000, timestamp=_ago(hours=2))
+        self.assertEqual(blocked["decision"], "block")
+        self.assertIn("a fresh session here starts at ~52k", blocked["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
