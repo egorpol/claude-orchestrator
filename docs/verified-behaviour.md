@@ -2,6 +2,10 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-11-10
+
+- **Router pricing didn't move the Codex-empty fallback.** `frontier.py` has priced on AA `cost_per_task` since it was added and doesn't import `route.py`, so `b59c3e2` changed neither `route --frontier` nor the fallback; `route --frontier` reads no quota, only `cursor-agent models` and the ratings cache. On the leaderboard cache fetched 2026-11-09 18:23 CET, it still picks `deepseek-v41-flash-1017-max` under a cap of 2× the cost per task of `gpt-6.1-sol@medium`, the `ask` default. A default `review` gets a higher cap, since `runs.py` defaults Codex to xhigh. The pick is the same at high, xhigh and max: of the 6 eligible Cursor rows, the only one rated higher is `gemini-4-argon-high`, which costs far more per task than any of those caps. At medium the margin under the cap is small; above it, the pick would fall to `deepseek-v41-flash-1017-high`.
+
 ## 2026-11-09
 
 - **Codex still offers GPT-5.6 Terra, and AA no longer rates it.** Codex CLI 0.159.1 `app-server` `model/list` returned 8 models, none hidden: `gpt-6.1-sol` (default), `gpt-6-astra`, `gpt-6.1-terra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna`, each with efforts `low` to `max`, plus `ultra` on the Sol, Astra and Terra models. The AA leaderboard page parsed to 171 models on 2026-11-08 and again on 2026-11-09, none of them GPT-5.6. GPT-6.1 Terra (High) is rated, with a lower intelligence score and a much lower cost per index task than GPT-6.1 Sol (Xhigh).
