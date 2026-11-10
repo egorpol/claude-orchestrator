@@ -82,6 +82,6 @@ bash -n install.sh
 
   Adherence to the rules is measured once after the experiment's freeze, on orchestrator sessions only; a rule that isn't followed is then dropped or mechanised (picked 2026-11-10).
 
-  Append a dated section with the sessions' numbers to `docs/field-results.md`, with `delegate cost --session <id>` as the source, and refresh the overview table there. If a headline number in README changes, re-check it against that table. Reports name other projects' private details; carry lessons over, not quotes.
+  Append a dated section with the sessions' numbers to `docs/field-results.md`, with `delegate cost --session <id>` as the source, and refresh the overview table there; sessions that started inside the experiment's confirmatory window get lessons only, and their numbers wait for the freeze (no by-arm look). If a headline number in README changes, re-check it against that table. Reports name other projects' private details; carry lessons over, not quotes.
 - **Releases:** move `[Unreleased]` to `## [X.Y.Z] - date` and update the compare links. The tag (`git tag -a vX.Y.Z`) and the push are outward steps, so bundle them into the end-of-item approval.
 - **Open items:** README's Roadmap lists them, and `HANDOFF.md` (local) has the next step.

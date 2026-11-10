@@ -1,6 +1,6 @@
 # Field results
 
-Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. `mode` is the session's drawn mode in the control-session experiment (hook registered 2026-10-13 10:29); — means the session started before it, and none that no draw was logged; excluded means sessions in this repo (claude-orchestrator), which the session-mode hook leaves out of the draw; they run with orchestrator rules. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in.
+Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. `mode` is the session's drawn mode in the control-session experiment (hook registered 2026-10-13 10:29); — means the session started before it, and none that no draw was logged; excluded means sessions in this repo (claude-orchestrator), which the session-mode hook leaves out of the draw; they run with orchestrator rules. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in. Sessions that started inside the preregistration's confirmatory window (first start after 2026-10-31 00:29:58 UTC) join the table at the freeze; until then their sections carry lessons only.
 
 | date | session | mode | calls | context at end | cost units | units per call | idle rebuild share |
 |---|---|---|---:|---:|---:|---:|---:|
@@ -428,6 +428,43 @@ Closed with `/field-report`; folded in on 2026-11-04. It started inside the prer
 - **Source checks piled up in the main context.** `rules/reference.md` now sends probes and fetches to a subagent past ~120k in a verification-heavy item.
 - **`delegate report` hid late input.** Picker answers were missing from "Context at typed prompts", so a session answered near its end read as if the user last spoke at its start. They now appear tagged `(picker)`.
 - **Not adopted.** Auto-running the cwd guard's wrapped form (a third report; it would still need an `allow`, which skips the permission prompt).
+
+## 2026-11-05 to 11-06: eight sessions, five projects
+
+Each has a `/field-report`; folded in on 2026-11-10, the first batch under the weekly fold-in rules in CLAUDE.md. All eight started inside the preregistration's confirmatory window, so this section carries their lessons only; their numbers wait for the freeze. Lessons from a single report wait in the list below.
+
+- **A launch or a background wait above ~120k is a handoff point.** Four sessions reached a delegate launch or a wait on background jobs above ~120k, and a fifth waited the same way on the author's input. The rules marked only waits over an hour, and the turn after any wait rewrites the whole context. `rules/hygiene.md` now makes either one a handoff point, however short. Two inline sentences that `rules/reference.md` already holds were cut to keep the inline budget.
+- **Picker numbers that nobody measured.** Five sessions put an unmeasured figure into a picker: a context size not taken from the tool, a fresh-session start (the context guard's constant "~35k", against 47.5k–48.3k measured in that project), a cost ceiling from the session's own estimate, a scope copied from a candidate text, and a gross rather than net saving from `/clear`. The rule already existed, so the one figure the tooling supplied is now measured: `fresh_start.py` takes the median first-call context of the 5 newest other sessions in the transcript folder, the context guard quotes it, and `delegate cost --session` prints it (52,442 in this repo on 2026-11-10).
+- **Review findings stayed outside the packet.** Three sessions re-read `last-message.md` for the findings, two after guessing a `review*.md` glob. Review packets now list up to 5 findings, high first, and count the rest.
+- **Green gates passed regressions in moved and ported code.** A Cursor APPROVE with no findings passed a port in which the orchestrator's base-against-build probes found 2 regressions. In another session a green verify passed a stretched PDF page, found by reading the diff, and a retry loop, found by Codex's review. `reference/review.md` now says to run the same adversarial inputs on base and build for moved or ported code and to give each departure the delegate lists one targeted read or probe; an APPROVE doesn't replace that pass.
+- **Checkers blind to the failure mode.** Three sessions' checkers missed what went wrong, each in a different way: the corpus lacked the construct; the failure path never ran and the defect sat upstream of the compared output; a control ran on another file. `reference/briefs.md` now asks, before launch, for the failure modes the change risks and a planted case for each; a checker for a target that doesn't exist yet takes its control on the target's previous version.
+- **Handoffs over ~10 KB.** Three handoffs ran 9.6–11.0 KB, one with a stale second next-step section. `/next` now gives the size of a handoff over 10 KB and cuts superseded sections first when it refreshes it.
+- **Three tool bugs, fixed from one report each.** The verify-log failure check read `signs 10 errors 0` as a failure: its pattern matched `10 errors`, whose 10 is the value of the label before it. `delegate report --session` called quota read at report time "at the end"; from 11 minutes on it now says how long after the last call it was read. `delegate ask` missed a pick written as a bare bold letter, and now reads question-numbered picks too.
+- **Reviews and builds.** Two Cursor Auto APPROVEs missed real defects (the 2 regressions above, and a medium bug in another session); a third Cursor Auto review found a real issue. Codex reviews found the retry loop above and 3 real findings in another session. Delegated builds took one round each, two by Codex Sol and one by Cursor Auto.
+- **Not adopted.** Known limits of the fixes, kept by decision: two picks on one line (`Q1 Pick: A. Q2 Pick: B`) come back as one, a capitalised `Failures: 1` gives no failure line, and a lag of 10 min 59 s rounds down to 10 and keeps "at the end". The label-first count also flags a data summary such as `errors 1`: one summary line, in 2 of the 250 verify logs on this machine that exited 0.
+
+## Waiting for a second report
+
+Lessons from a single field report, kept until a second report repeats one (fold-in rules in CLAUDE.md); a repeat moves it into the rules, a topic file or a template.
+
+From the reports of 2026-11-05 to 11-06 (folded in 2026-11-10):
+
+- Briefs: a clause that justifies dropping code ("X only does Y") is a behaviour claim and gets a test row.
+- Briefs: a port brief quotes every hunk of the proven diff that touches the behaviour; a paraphrase invites reinvention.
+- Briefs: grep each banned phrase of a content checker against the sources the delegate must preserve; one list hit the binding wording.
+- Briefs: for visual reads, "read by eye; don't write detectors" (Cursor Auto took 24 min on 76 crops; on a different task Codex took 3 min 55 s on 12 sheets).
+- Reviews: run a parse or compile check before a review and write the brief from `--stat`; "parse or execute what you can" as a standard brief line; a known defect left out of the brief serves as a positive control.
+- Checks: when a re-measure disagrees with a recorded number, find out why before editing the record.
+- Checks: a check of a text against a report is "matches the report", not a pass on the claim.
+- Checks: a resource bar taken from another job is a guess; a waiter gets a fallback that asks.
+- Checks: a precondition goes in front of the write as a failing test, not as a printed count.
+- Checks: a to-do taken from a candidate text gets its cheap reproduction before the picker that agrees to it.
+- Second opinions: the `ask` format adds "check cost and worst-case numbers against tracked files; list the numbers you took as given"; a new analysis script gets a one-vendor review before the picker.
+- Git: a git option in the decision picker names its paths and conditions (from what worked).
+- Shell: `pgrep -f name` matches its own shell, so use `pgrep -f '[n]ame'`; a server started with `( … & )` was gone, so start it in the background and check it with `curl` or `kill -0`.
+- `/next`: a `needs: author input` mark on a handoff step.
+- CLI: `launch --collect DIR`, with cleanup accepting byte-identical copies and a `collected` state; `apply` names the `--link` excludes and says cleanup restores them; `apply --check` lists added files that were untracked or outside the owned list; working-tree reviews remove their own worktree; `delegate report` counts findings per vendor.
+- Experiment: the mode override is hard to find, the control picker has no "needs delegation" option, and the environment variable sticks. Covered until the close by the 2026-11-09 decision (no in-session switch) and the 2026-11-08 crossover amendment.
 
 ## Still open
 
