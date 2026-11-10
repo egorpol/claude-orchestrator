@@ -6,6 +6,10 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
+Everything from 2026-10-30 to 11-10. The larger additions: the control-session experiment's preregistration (`docs/preregistration.md`) and `delegate prereg`, which shows counts-only progress and holds the registered analysis's outcomes until the freeze; hermetic tests (`tests/_env.py`); a hybrid quota reader in place of openusage (Codex from `codex app-server`, Claude from `claude -p /usage`, Cursor from its interactive `/usage` screen, which ships off); an hourly `delegate rate` timer, with a lock and a daily backup of the experiment's log; and the delegate skill split into a short core and seven topic files read on demand. Lessons from sixteen field reports went into the session rules, the delegate's topic files and templates, and `/next`.
+
 ### Added
 
 - Tests: `tests/_env.py` isolates `unittest` (temp `HOME`/XDG, agent stubs, closed proxies, in-process non-loopback connect/getaddrinfo block); a stub or network record fails the run. Every `test*.py` must start with `import _env`; `test_hermetic_env.py` enforces that and keeps planted leak/network controls. Child CLI/hook subprocesses get only the proxy variables.
@@ -19,7 +23,6 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - `docs/preregistration.md`: the preregistration of the control-session experiment's Max period (window, primary outcome, freeze, bootstrap, sensitivity analyses). Its first commit opens the confirmatory window. Dated amendments correct the registration date, record how `delegate prereg` reads the rules (including that a session whose transcript is gone at the freeze leaves the analysis set), and record the Max-plan calibration that the pool-points measure uses: its SHA-256 and claude-7d rate.
 - Session-log start rows record `checkout` (HEAD of the hook's own checkout; null unless git's top level is that folder), `dirty` (whether `git status --porcelain` lists any change, untracked files included), `context_sha256` (SHA-256 of the injected context without the spare-pool line) and `spare` (that line).
 - `hooks/secret-guard.py` asks before `delegate launch --unsandboxed` and before a `followup` of a run launched that way, since followups reuse the stored flag; it also asks for subagents and in vanilla sessions. `SANDBOX_GUARD_DISABLE=1` turns this check off.
-
 - `delegate report` lists tool rejections that carry a typed reason in "Context at typed prompts", tagged `(rejection)`: such replies are `tool_result` blocks, not typed prompts.
 - `delegate report` lists picker answers in "Context at typed prompts", tagged `(picker)`: a session answered near its end otherwise reads as if the user last spoke at its start.
 - `/field-report --session <id>` reports on an earlier session; the closing picker offers it after `/clear` above ~100k context.
@@ -224,6 +227,7 @@ The repo was private and unversioned before 0.1.0. Its 12 commits:
 - 2026-10-13 `02a9f87`: decisions in pickers; `ask --agent both`.
 - 2026-10-13 `958b4ab`: MIT licence and README positioning; `launch` rolls back the worktree when `--link` is rejected.
 
-[Unreleased]: https://github.com/egorpol/claude-orchestrator/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/egorpol/claude-orchestrator/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/egorpol/claude-orchestrator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/egorpol/claude-orchestrator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/egorpol/claude-orchestrator/releases/tag/v0.1.0
