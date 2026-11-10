@@ -125,7 +125,7 @@ class TestSession(unittest.TestCase):
     def test_dedupe_and_skip_synthetic(self):
         # Two lines share message.id (duplicated usage); one synthetic; one other id.
         lines = [
-            {"type": "user", "message": {"content": "hi"}},
+            {"type": "user", "message": {"content": "zq-private-prompt"}},
             {
                 "type": "assistant",
                 "requestId": "req_a",
@@ -203,7 +203,7 @@ class TestSession(unittest.TestCase):
             self.assertEqual(summary["context_max"], 5 + 2000 + 50)
             text = cost.render_session(path, summary)
             self.assertIn("calls: 2", text)
-            self.assertNotIn("hi", text)  # privacy: no message text
+            self.assertNotIn("zq-private-prompt", text)  # privacy: no message text
             self.assertIn("next call re-reads", text)
         finally:
             path.unlink(missing_ok=True)

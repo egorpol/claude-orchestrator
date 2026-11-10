@@ -207,6 +207,49 @@ if "--sandbox" in args and args[args.index("--sandbox") + 1] == "enabled":
 if "--resume" in args:
     assert args[args.index("--resume") + 1] == "fake-cursor-session"
 assert not any(k in os.environ for k in ("CLAUDECODE", "VSCODE_FAKE", "LD_LIBRARY_PATH"))
+
+LIMIT_LINE = (
+    "ActionRequiredError: You've hit your usage limit You've saved $309 on API model "
+    "usage this month with Pro. Switch to a different model or set a Spend Limit to "
+    "continue with this model. Your usage limits will reset when your monthly cycle "
+    "ends on 11/18/2026.\n"
+)
+
+
+def emit(event):
+    event["session_id"] = "fake-cursor-session"
+    print(json.dumps(event), flush=True)
+
+
+def assistant(text):
+    emit({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}})
+
+
+limit = os.environ.get("FAKE_CURSOR_LIMIT")
+if limit == "before":
+    # Verbatim plain-text failure; no stream-json at all (real logs do this sometimes).
+    sys.stderr.write(LIMIT_LINE)
+    sys.exit(1)
+if limit == "mid":
+    emit({"type": "system", "subtype": "init", "model": "auto"})
+    for i in range(3):
+        emit({"type": "thinking", "subtype": "delta", "text": f"thinking-{i}"})
+    sys.stderr.write(LIMIT_LINE)
+    sys.exit(1)
+if limit == "crash":
+    # Non-zero exit with no usage-limit line and no answer → verdict unclear.
+    emit({"type": "system", "subtype": "init", "model": "auto"})
+    sys.exit(1)
+if limit == "quoted":
+    # Limit text only inside a JSON string (no log line starts with ActionRequiredError:).
+    quoted = "## Findings\n" + LIMIT_LINE
+    emit({"type": "system", "subtype": "init", "model": "auto"})
+    assistant(quoted)
+    emit({"type": "result", "subtype": "success", "is_error": False, "duration_ms": 1500,
+          "result": quoted,
+          "usage": {"inputTokens": 110, "outputTokens": 25, "cacheReadTokens": 900, "cacheWriteTokens": 30}})
+    sys.exit(1)
+
 wt = Path(args[args.index("--workspace") + 1])
 prompt = args[-1]
 read_only = "--mode" in args and args[args.index("--mode") + 1] == "ask"
@@ -224,16 +267,6 @@ else:
     answer = "## Changes\nUpdated tracked.txt and new-cursor.txt.\n## Verification\nChecks passed.\n## Open questions / conflicts\nNone.\n"
 answer += "\n## Digest\nfiles: tracked.txt (+1/-0); new-cursor.txt (+1/-0)\nverify: git diff --check -> pass\nconflicts: none\nrisks: none\n"
 
-
-def emit(event):
-    event["session_id"] = "fake-cursor-session"
-    print(json.dumps(event), flush=True)
-
-
-def assistant(text):
-    emit({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}})
-
-
 emit({"type": "system", "subtype": "init", "model": "auto"})
 assistant("Earlier narration, omitted from the final message.")
 emit({"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {"path": "tracked.txt"}}}})
@@ -242,4 +275,8 @@ assistant(answer)
 emit({"type": "result", "subtype": "success", "is_error": False, "duration_ms": 1500,
       "result": "Earlier narration, omitted from the final message." + answer,
       "usage": {"inputTokens": 110, "outputTokens": 25, "cacheReadTokens": 900, "cacheWriteTokens": 30}})
+if limit == "verdict-then-limit":
+    # A real limit line after a parsed verdict must leave the verdict alone.
+    sys.stderr.write(LIMIT_LINE)
+    sys.exit(1)
 sys.exit(int(os.environ.get("FAKE_AGENT_EXIT", "0")))

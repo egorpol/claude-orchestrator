@@ -47,6 +47,7 @@ class LifecycleTests(unittest.TestCase):
                     "GIT_CONFIG_NOSYSTEM": "1",
                     "DELEGATE_CATALOG_LOCAL": ""}
         self.env.pop("FAKE_AGENT_EXIT", None)
+        self.env.pop("FAKE_CURSOR_LIMIT", None)
         for key in list(self.env):
             if key.startswith("FAKE_CODEX_"):
                 self.env.pop(key)
@@ -132,7 +133,7 @@ class LifecycleTests(unittest.TestCase):
         path = self.tmp / "quota-calls"
         return path.read_text().splitlines() if path.exists() else []
 
-    def review_with_report(self, name, report, extra_env, **overrides):
+    def review_with_report(self, name, report, extra_env, job_code=0, **overrides):
         """Exercise real dispatch and fake agents, replacing only ratings discovery."""
         args = argparse.Namespace(**{**dict(run=name, agent=None, model=None, effort=None, focus=None,
                                             dry_run=False, detach=False, brief=None, working_tree=False),
@@ -141,7 +142,7 @@ class LifecycleTests(unittest.TestCase):
 
         def run_job(job, detach, run):
             result = subprocess.run(["bash", str(job / "run.sh")], text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.returncode, job_code, result.stdout + result.stderr)
             print(result.stdout, end="")
             print(result.stderr, end="", file=sys.stderr)
 
@@ -182,6 +183,83 @@ class LifecycleTests(unittest.TestCase):
                 self.assertNotIn("fake-codex-thread", (job / "log").read_text())
                 self.assertNotIn("--force", (job / "run.sh").read_text())
                 self.assertFalse((job / "warnings").exists())
+
+    def test_review_cursor_premium_usage_limit(self):
+        selection = {
+            "row": {"agent": "cursor", "model": "frontier-selected-model", "intelligence": 44.2,
+                    "cost_per_task": 0.27, "pool": "cursor-premium?"},
+            "cap": 0.42,
+            "replaces": {"model": "gpt-6.1-sol", "effort": "xhigh", "cost_per_task": 0.21},
+        }
+        expected = ("verdict: none (Cursor premium usage limit; resets 11/18/2026) | "
+                    "rerun the review with --agent cursor (Auto pool) or --agent codex")
+        for variant in ("before", "mid"):
+            with self.subTest(variant=variant):
+                name = f"limit-{variant}"
+                self.launch("cursor", name)
+                env = {**self.quota_env(self.quota_envelope(five=1)),
+                       "FAKE_CURSOR_LIMIT": variant}
+                out, err, load = self.review_with_report(
+                    name, {"fallback": selection, "warnings": []}, env, job_code=1)
+                packet = self.last_packet(out)
+                self.assertIn(expected, packet)
+                self.assertNotIn("unclear", packet)
+                status = self.cli("status", name)
+                self.assertIn(
+                    "no verdict: Cursor premium usage limit (resets 11/18/2026)", status)
+                self.last_packet(status)
+
+    def test_review_cursor_auto_usage_limit(self):
+        self.launch("codex", "auto-limit")
+        r = self.cli_raw("review", "auto-limit", "--agent", "cursor", code=1,
+                         extra_env={"FAKE_CURSOR_LIMIT": "before"})
+        packet = self.last_packet(r.stdout)
+        expected = ("verdict: none (Cursor Auto usage limit; resets 11/18/2026) | "
+                    "rerun the review with --agent codex")
+        self.assertIn(expected, packet)
+        self.assertNotIn("unclear", packet)
+        self.assertNotIn("Auto pool", packet)
+        status = self.cli("status", "auto-limit")
+        self.assertIn("no verdict: Cursor Auto usage limit (resets 11/18/2026)", status)
+
+    def test_review_nonzero_exit_without_limit_stays_unclear(self):
+        selection = {
+            "row": {"agent": "cursor", "model": "frontier-selected-model", "intelligence": 44.2,
+                    "cost_per_task": 0.27, "pool": "cursor-premium?"},
+            "cap": 0.42,
+            "replaces": {"model": "gpt-6.1-sol", "effort": "xhigh", "cost_per_task": 0.21},
+        }
+        self.launch("cursor", "exit-unclear")
+        env = {**self.quota_env(self.quota_envelope(five=1)), "FAKE_CURSOR_LIMIT": "crash"}
+        out, err, load = self.review_with_report(
+            "exit-unclear", {"fallback": selection, "warnings": []}, env, job_code=1)
+        packet = self.last_packet(out)
+        self.assertIn("verdict: unclear", packet)
+        self.assertNotIn("usage limit", packet)
+
+    def test_review_quoted_limit_text_does_not_trigger(self):
+        # Limit text only inside stream-json (no log line starts with ActionRequiredError:).
+        self.launch("codex", "quote-limit")
+        r = self.cli_raw("review", "quote-limit", "--agent", "cursor", code=1,
+                         extra_env={"FAKE_CURSOR_LIMIT": "quoted"})
+        packet = self.last_packet(r.stdout)
+        self.assertIn("verdict: unclear", packet)
+        self.assertNotIn("usage limit", packet)
+        log = (self.root("quote-limit") / "review-1" / "log").read_text()
+        self.assertIn("ActionRequiredError: You've hit your usage limit", log)
+        self.assertFalse(any(
+            line.startswith("ActionRequiredError:") for line in log.splitlines()))
+
+    def test_review_verdict_untouched_by_limit_line(self):
+        self.launch("codex", "verdict-limit")
+        r = self.cli_raw("review", "verdict-limit", "--agent", "cursor", code=1,
+                         extra_env={"FAKE_CURSOR_LIMIT": "verdict-then-limit"})
+        packet = self.last_packet(r.stdout)
+        self.assertIn("verdict: CHANGES REQUESTED", packet)
+        self.assertNotIn("usage limit", packet)
+        log = (self.root("verdict-limit") / "review-1" / "log").read_text()
+        self.assertTrue(any(
+            line.startswith("ActionRequiredError:") for line in log.splitlines()))
 
     def test_default_review_without_fallback_warns_and_keeps_codex(self):
         for i, report in enumerate(({"fallback": None, "fallback_reason": "no eligible model", "warnings": []},

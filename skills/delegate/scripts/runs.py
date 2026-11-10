@@ -1615,6 +1615,46 @@ def _verdict(job):
     return m.group(1).upper() if m else None
 
 
+def _cursor_limit(job):
+    """If job/log's tail is a Cursor usage-limit ActionRequiredError, return pool/resets.
+
+    Only a plain-text log line that *starts with* ``ActionRequiredError:`` and contains
+    ``usage limit`` matches; a stream-json event that quotes the same text must not.
+    """
+    log = job / "log"
+    if not log.exists():
+        return None
+    size = log.stat().st_size
+    with log.open("rb") as stream:
+        if size > 8192:
+            stream.seek(size - 8192)
+        data = stream.read().decode("utf-8", errors="replace")
+    if size > 8192:
+        nl = data.find("\n")
+        if nl != -1:
+            data = data[nl + 1:]
+    hit = None
+    for line in data.splitlines():
+        if line.startswith("ActionRequiredError:") and "usage limit" in line:
+            hit = line
+            break
+    if hit is None:
+        return None
+    date = None
+    m = re.search(r"ends on (\d{1,2}/\d{1,2}/\d{4})", hit)
+    if m:
+        date = m.group(1)
+    model = None
+    if (job / "meta.json").exists():
+        model = load_meta(job).get("model")
+    if model is None or model == "":
+        pool = "Auto"
+    else:
+        import frontier
+        pool = "Auto" if frontier.auto_family(model) else "premium"
+    return {"pool": pool, "resets": date}
+
+
 def _round_record(job, meta, n):
     record = {"n": n, "model": meta.get("model"), "effort": meta.get("effort"),
               "started": _read(job, "started_at"), "minutes": _minutes(job),
@@ -1833,8 +1873,21 @@ def packet(job):
         text = _read(job, "last-message.md") or ""
         counts = {s: len(re.findall(r"^\s*[-*]\s*\[" + s + r"\]", text, re.M | re.I))
                   for s in ("high", "medium", "low")}
-        prefix.append(f"verdict: {_verdict(job) or 'unclear'} | findings: "
-                      + ", ".join(f"{s} {count}" for s, count in counts.items()))
+        verdict = _verdict(job)
+        limit = None if verdict is not None else _cursor_limit(job)
+        if limit is not None:
+            reset = f"; resets {limit['resets']}" if limit.get("resets") else ""
+            if limit["pool"] == "Auto":
+                prefix.append(
+                    f"verdict: none (Cursor Auto usage limit{reset}) | "
+                    f"rerun the review with --agent codex")
+            else:
+                prefix.append(
+                    f"verdict: none (Cursor premium usage limit{reset}) | "
+                    f"rerun the review with --agent cursor (Auto pool) or --agent codex")
+        else:
+            prefix.append(f"verdict: {verdict or 'unclear'} | findings: "
+                          + ", ".join(f"{s} {count}" for s, count in counts.items()))
         pre, post = _read(job, "pre_digest"), _read(job, "post_digest")
         if pre is not None and post is not None and pre != post:
             prefix.append("WARNING: reviewer changed the worktree")
@@ -1901,7 +1954,19 @@ def _review_summary(job):
     parts = [f"{job.name}: {meta.get('agent', '?')} {meta.get('model', '?')} [{state(job)} {_elapsed(job)}]"]
     last = job / "last-message.md"
     if last.exists():
-        parts.append(_verdict(job) or "verdict unclear")
+        verdict = _verdict(job)
+        if verdict:
+            parts.append(verdict)
+        else:
+            limit = _cursor_limit(job)
+            if limit is not None:
+                label = f"Cursor {limit['pool']} usage limit"
+                if limit.get("resets"):
+                    parts.append(f"no verdict: {label} (resets {limit['resets']})")
+                else:
+                    parts.append(f"no verdict: {label}")
+            else:
+                parts.append("verdict unclear")
     pre, post = job / "pre_digest", job / "post_digest"
     if pre.exists() and post.exists() and pre.read_text() != post.read_text():
         parts.append("WARNING: reviewer changed the worktree")
