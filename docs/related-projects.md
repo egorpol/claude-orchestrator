@@ -211,10 +211,10 @@ Done on 2026-10-09:
 5. `openai/codex-plugin-cc` is installed (user scope); the review gate is left off.
 
 Done on 2026-10-13 (wide-survey recommendations):
-1. `7bc654a`: `delegate cost --session` prices at list price including subagent transcripts (`<session>/subagents/agent-*.jsonl`, deduped), with 5-minute and 1-hour cache writes priced separately; matches `ccusage@20.0.30` to 1e-6 on two sessions (`docs/verified-behaviour.md`). Covers survey recommendations 1 and 2.
-2. `184bde7`: quota snapshots (`~/.cache/claude-delegate/quota.jsonl`) at session start/end, each run start, and from a timer; each reading has a `stale` flag. `delegate route` still uses openusage (can lag ~1 h, shown as DATA AGE); `--source direct` reads live. Recommendation 5 partly done.
-3. `698e857`, `b705445`: per-session summary rows log delegate commands; `delegate cost --by-mode` counts launches/runs per arm; `delegate rate` is a blinded item rater. Covers recommendation 4.
-4. Later, the rest of recommendation 5: `daf151a` (2026-10-27) leaves stale readings out of `delegate quota --unused`, and `b6603b2` (2026-10-28) re-reads a Codex pool over 15 min old with `--source direct` before a dispatch.
+1. `b7c175a`: `delegate cost --session` prices at list price including subagent transcripts (`<session>/subagents/agent-*.jsonl`, deduped), with 5-minute and 1-hour cache writes priced separately; matches `ccusage@20.0.30` to 1e-6 on two sessions (`docs/verified-behaviour.md`). Covers survey recommendations 1 and 2.
+2. `4252287`: quota snapshots (`~/.cache/claude-delegate/quota.jsonl`) at session start/end, each run start, and from a timer; each reading has a `stale` flag. `delegate route` still uses openusage (can lag ~1 h, shown as DATA AGE); `--source direct` reads live. Recommendation 5 partly done.
+3. `08575c8`, `47a361e`: per-session summary rows log delegate commands; `delegate cost --by-mode` counts launches/runs per arm; `delegate rate` is a blinded item rater. Covers recommendation 4.
+4. Later, the rest of recommendation 5: `10abbf3` (2026-10-27) leaves stale readings out of `delegate quota --unused`, and `73d534a` (2026-10-28) re-reads a Codex pool over 15 min old with `--source direct` before a dispatch.
 
 Still open:
 - Machine-readable reviews via `codex exec --output-schema` (the plugin ships `review-output.schema.json`). Dropped 2026-10-30: the regex parse of the Markdown reviews held on all 88 recorded reviews with a last message (49 Codex, 39 Cursor): every verdict parsed, no review gave two, and each review's finding bullets matched its severity tags (239 findings); cursor-agent has no schema option, so a schema would cover Codex reviews only. Reopen as `followup --from-review N` with a chosen subset of findings if forwarding a review's wrong findings (about one per review) costs measurable rounds.

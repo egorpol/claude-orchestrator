@@ -20,6 +20,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 ### Removed
 
 - Removed the AA leaderboard page scrape, its browser User-Agent and `tests/fixtures/aa-leaderboard-2026-11-08.html`, following the decision to use only the documented API and ship no copied AA data. Four synthetic free-API pages with invented models and figures replace the scraped fixture; the two `catalog.json` notes, the agent reference and two dated bullets in `docs/verified-behaviour.md` keep their facts and advice without AA figures, and the Codex-empty fallback test in `tests/test_ask.py` uses invented ratings.
+- Removed the copied AA figures from the git history too (2026-11-15), along with the field reports and `HANDOFF.md` that were tracked before 0.1.0: every commit has a new SHA, and tags `v0.1.0`, `v0.2.0` and `v0.3.0` were moved. Re-clone rather than pull; the docs' SHA citations point at the new commits.
 
 ### Fixed
 
@@ -241,17 +242,17 @@ First versioned release. The repo went public on 2026-10-13. The earlier commits
 
 The repo was private and unversioned before 0.1.0. Its 12 commits:
 
-- 2026-10-09 `c4b3ea6`: `delegate` skill with quota, ratings, routing and worktree launches.
-- 2026-10-09 `2f7d27c`: `review`, `followup` and `verify` rounds. Cursor delegates default to `--model auto`.
-- 2026-10-10 `f4681a9`: first field reports and the measured optimisation plan.
-- 2026-10-10 `68a86ce`: exit packets, per-round usage, `ask`, `cost`, the context guard (from 250k) and the first 31 tests.
-- 2026-10-10 `04a757d`, `b606961`: Grok and Composer routed on the Cursor Auto pool.
-- 2026-10-10 `92f25d5`: fixes for CRLF patches, Codex per-round usage on resumed rounds, and run logging.
-- 2026-10-10 `4178126`: handoff at item boundaries from 120k context; user-level rules.
-- 2026-10-11 `0ecc1c8`: `delegate wait`; `cost --since` takes a local date.
-- 2026-10-12 `4c74b67`: the idle hold in the context guard; `cost --session` counts idle rebuilds.
-- 2026-10-13 `02a9f87`: decisions in pickers; `ask --agent both`.
-- 2026-10-13 `958b4ab`: MIT licence and README positioning; `launch` rolls back the worktree when `--link` is rejected.
+- 2026-10-09 `4fe55a5`: `delegate` skill with quota, ratings, routing and worktree launches.
+- 2026-10-09 `9d398e4`: `review`, `followup` and `verify` rounds. Cursor delegates default to `--model auto`.
+- 2026-10-10 `12e20cc`: first field reports and the measured optimisation plan.
+- 2026-10-10 `19f246c`: exit packets, per-round usage, `ask`, `cost`, the context guard (from 250k) and the first 31 tests.
+- 2026-10-10 `67882a4`, `725c22f`: Grok and Composer routed on the Cursor Auto pool.
+- 2026-10-10 `c1c421e`: fixes for CRLF patches, Codex per-round usage on resumed rounds, and run logging.
+- 2026-10-10 `c594b71`: handoff at item boundaries from 120k context; user-level rules.
+- 2026-10-11 `7d2bfb8`: `delegate wait`; `cost --since` takes a local date.
+- 2026-10-12 `0d839e4`: the idle hold in the context guard; `cost --session` counts idle rebuilds.
+- 2026-10-13 `248b1e5`: decisions in pickers; `ask --agent both`.
+- 2026-10-13 `f5e2511`: MIT licence and README positioning; `launch` rolls back the worktree when `--link` is rejected.
 
 [Unreleased]: https://github.com/egorpol/claude-orchestrator/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/egorpol/claude-orchestrator/compare/v0.2.0...v0.3.0
