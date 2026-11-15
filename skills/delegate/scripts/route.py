@@ -1,6 +1,8 @@
 """Rank delegates for a task type: AA ratings weighted per task x live quota."""
 import math
 
+from ratings import ATTRIBUTION
+
 METRICS = ("intelligence", "coding", "speed", "price")
 
 
@@ -29,7 +31,7 @@ def _ratings(d, aa_models):
                  "speed": m.get("tps"), "price": None},
                 _positive_price(m.get("price_blended")),
                 _positive_price(m.get("cost_per_task")),
-                ("aa*" if m.get("coding_is_proxy") else "aa") + ("~" if d.get("aa_proxy") else ""))
+                "aa" + ("~" if d.get("aa_proxy") else ""))
     p = d.get("prior")
     if p:
         return ({"intelligence": p.get("intelligence"), "coding": p.get("coding"),
@@ -89,6 +91,8 @@ def _price_unit(rows):
 
 
 def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None, prefer=None):
+    # None means no key/cache: ignore all quality estimates, including priors.
+    quota_only = aa_models is None
     task = catalog["tasks"][task_name]
     w = task["weights"]
     min_quota = catalog.get("min_quota_pct", 10) if min_quota is None else min_quota
@@ -98,7 +102,11 @@ def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None, pref
     for d in catalog["delegates"]:
         if agents and d["agent"] not in agents:
             continue
-        metrics, blended, cpt, source = _ratings(d, aa_models)
+        if quota_only:
+            metrics, blended, cpt, source = ({k: None for k in METRICS}, None, None,
+                                              "unrated (quota only)")
+        else:
+            metrics, blended, cpt, source = _ratings(d, aa_models)
         left, pace, problems, unknown = _quota(d, pools)
         rows.append({"delegate": d, "metrics": metrics, "source": source,
                      "_blended": blended, "_cpt": cpt,
@@ -146,7 +154,7 @@ def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None, pref
                 norm = v / best[k]
             q += w[k] * norm
             wsum += w[k]
-        r["quality"] = q / wsum if wsum else 0.0
+        r["quality"] = 1.0 if quota_only else (q / wsum if wsum else 0.0)
         if r["left"] is None:
             # unknown / errored quota: neither trust nor exclude (visible as "?")
             r["quota_factor"] = 0.7
@@ -214,7 +222,10 @@ def render(task_name, task, rows):
     widths = [max(len(row[i]) for row in table) for i in range(len(hdr))]
     out += ["  ".join(c.ljust(wd) for c, wd in zip(row, widths)).rstrip() for row in table]
     out.append("")
-    out.append("QUAL = weighted AA metrics vs the best candidate (speed^0.5, price^0.35 damped); "
+    quality_note = ("QUAL = 1.0 for every delegate; ranking by quota only; "
+                    if rows and all(r["source"] == "unrated (quota only)" for r in rows) else
+                    "QUAL = weighted AA metrics vs the best candidate (speed^0.5, price^0.35 damped); ")
+    out.append(quality_note +
                "price is AA cost per task, or $/1M blended for the whole table when a priced "
                "delegate lacks one; "
                "SCORE = QUAL x sqrt(quota left) x pace bonus (<=+15%), x0.8 for Claude subagents (shared pool). "
@@ -222,8 +233,13 @@ def render(task_name, task, rows):
                "QUOTA ? = unknown pool (neither excluded nor treated as full).")
     out.append("ROUNDS = rounds left in the delegate's tightest pool at its median per-round cost "
                "from the logs (n >= 3).")
-    out.append("SRC: aa = AA API, aa* = AA page (coding = proxy from Terminal-Bench 4.0 + SciCode), "
+    out.append("SRC: aa = AA API, unrated (quota only) = no ratings available, "
                "~ = rating of a stand-in model (aa_proxy), prior = hand-set guess in catalog.json.")
+    aa_rows = [r for r in rows if r["source"].startswith("aa")]
+    if aa_rows:
+        out.append(ATTRIBUTION)
+        out.append("Coding Index: Artificial Analysis no longer publishes it; "
+                   "its weight is spread over the other metrics.")
     top = next((r for r in rows if not r["excluded"]), None)
     if top:
         d = top["delegate"]

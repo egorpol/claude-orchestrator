@@ -456,6 +456,8 @@ def _dispatch_quota(agent, model, effort, fallback=False):
             trigger = ", ".join(f"{pid} {entry['left_pct']:g}% left" for pid, entry in low)
             print(f"review: {trigger} below {check['threshold']:g}% threshold; fallback "
                   + frontier.fallback_description(selection), flush=True)
+            from ratings import ATTRIBUTION
+            print(f"review: {ATTRIBUTION}", flush=True)
             return "cursor", selection["row"]["model"], None, []
     unknown = [f"{pid} unknown ({entry['reason']})" for pid, entry in check["pools"].items()
                if entry["state"] == "unknown"]
@@ -2257,9 +2259,11 @@ def make_patch(root, meta):
     pathspecs = _link_pathspecs(meta)
     # intent-to-add: new files show up in the diff; nothing is committed. Literal excludes keep
     # --link paths out even when the info/exclude line was removed (and avoid glob false matches).
+    # LC_ALL=C: the ignored-path phrase below is matched in English (same reason as apply).
+    git_env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
     if pathspecs:
         r = subprocess.run(["git", "add", "-A", "-N", "--", ".", *pathspecs], cwd=wt,
-                           capture_output=True, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+                           capture_output=True, env=git_env)
         if r.returncode != 0:
             err = r.stderr.decode("utf-8", "replace")
             # An ignored link under info/exclude makes git add exit 1 even with :(exclude,literal);
@@ -2269,16 +2273,17 @@ def make_patch(root, meta):
     else:
         git("add", "-A", "-N", cwd=wt)
     head = git("rev-parse", "HEAD", cwd=wt)
-    # working-tree reviews check out meta["snapshot"]; base is only the diff base
-    if head != meta["base"] and head != meta.get("snapshot"):
-        print(f"WARNING: worktree HEAD {head[:9]} != base {meta['base'][:9]}: the delegate made commits "
-              f"(contract breach). The patch below covers them too.", file=sys.stderr)
     # Bytes, not text=True: universal newlines would turn \r\n into \n and break CRLF files.
     diff_cmd = ["git", "diff", "--binary", meta["base"]]
     if pathspecs:
         diff_cmd += ["--", ".", *pathspecs]
-    patch = subprocess.run(diff_cmd, cwd=wt, capture_output=True, check=True).stdout.decode(
+    patch = subprocess.run(diff_cmd, cwd=wt, capture_output=True, check=True, env=git_env).stdout.decode(
         "utf-8", "surrogateescape")
+    # After the diff: a base that does not resolve raised above, and is not a delegate commit.
+    # working-tree reviews check out meta["snapshot"]; base is only the diff base
+    if head != meta["base"] and head != meta.get("snapshot"):
+        print(f"WARNING: worktree HEAD {head[:9]} != base {meta['base'][:9]}: the delegate made commits "
+              f"(contract breach). The patch below covers them too.", file=sys.stderr)
     write_patch(root / "changes.patch", patch)
     stat_args = (meta["base"], "--", ".", *pathspecs) if pathspecs else (meta["base"],)
     return git("diff", "--stat", *stat_args, cwd=wt), patch
@@ -2564,6 +2569,118 @@ def _dirty_without_links(wt, meta):
     return "\n".join(kept)
 
 
+def _applied_matches(root, patch):
+    applied = root / "applied"
+    return applied.exists() and applied.read_text().strip() == _digest(patch)
+
+
+def _worktree_unapplied(root, meta, wt):
+    """Return (unapplied, dirty, error).
+
+    True unapplied when the worktree still holds work that cleanup would destroy without
+    --force: (a) a non-empty `make_patch` against base that is not recorded as applied
+    (including commits on the run branch), and (b) dirty status paths that are not still
+    real --link symlinks (a regular file replacing a link path must still block). When
+    `applied` matches the current patch digest, both are treated as applied — same escape
+    as before. A branch whose commits net to no change against base yields an empty patch.
+    When `make_patch` cannot compare (invalid base, git error), error is set and
+    unapplied is True so `--force` can discard.
+    """
+    dirty = _dirty_without_links(wt, meta)
+    try:
+        _, patch = make_patch(root, meta)
+    except subprocess.CalledProcessError as exc:
+        err = (exc.stderr or exc.stdout or b"git failed")
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", "replace")
+        return True, dirty, " ".join(err.split()) or "make_patch failed"
+    except SystemExit as exc:  # git() and the `git add -A -N` check exit with a message (index.lock)
+        err = exc.code if isinstance(exc.code, str) else ""
+        return True, dirty, " ".join(err.split()) or "make_patch failed"
+    if _applied_matches(root, patch):
+        return False, dirty, None
+    return bool(patch.strip()) or bool(dirty), dirty, None
+
+
+def _branch_ref(meta):
+    branch = meta.get("branch")
+    return f"refs/heads/{branch}" if branch else None
+
+
+def _branch_diff_against_base(meta):
+    """Return (patch_text, error). patch_text is None when the branch is missing.
+
+    Uses the fully qualified ref and a trailing `--` so a branch named like a path
+    cannot turn the comparison into a pathspec diff. error is set on unexpected git exits.
+    """
+    ref = _branch_ref(meta)
+    if not ref:
+        return None, None
+    repo = meta["repo"]
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", ref],
+        cwd=repo, capture_output=True, env=env)
+    if verify.returncode != 0:
+        return None, None
+    diff = subprocess.run(
+        ["git", "diff", "--binary", meta["base"], ref, "--"],
+        cwd=repo, capture_output=True, env=env)
+    if diff.returncode != 0:
+        err = (diff.stderr or diff.stdout or b"git diff failed").decode("utf-8", "replace").strip()
+        return None, err
+    return diff.stdout.decode("utf-8", "surrogateescape"), None
+
+
+def _branch_differs_from_base(meta):
+    """Return (differs, error).
+
+    Exit 0 = identical, 1 = differ; any other git exit sets error (fail closed).
+    """
+    ref = _branch_ref(meta)
+    if not ref:
+        return False, None
+    repo = meta["repo"]
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", ref],
+        cwd=repo, capture_output=True, env=env)
+    if verify.returncode != 0:
+        return False, None
+    diff = subprocess.run(
+        ["git", "diff", "--quiet", meta["base"], ref, "--"],
+        cwd=repo, capture_output=True, env=env)
+    if diff.returncode == 0:
+        return False, None
+    if diff.returncode == 1:
+        return True, None
+    err = (diff.stderr or diff.stdout or b"git diff failed").decode("utf-8", "replace").strip()
+    return False, err
+
+
+def _branch_unapplied(root, meta):
+    """Return (unapplied, error).
+
+    The applied-digest escape covers the branch only when the applied patch equals
+    the branch tip's own diff against base (not merely an empty worktree patch). A
+    whole apply of commits plus uncommitted edits therefore still refuses: an attached
+    worktree's HEAD always equals the tip, so it cannot prove the tip was applied.
+    """
+    if not meta.get("branch"):
+        return False, None
+    differs, err = _branch_differs_from_base(meta)
+    if err:
+        return False, err
+    if not differs:
+        return False, None
+    patch, err = _branch_diff_against_base(meta)
+    if err:
+        return False, err
+    if patch is None or not patch.strip():
+        return False, None
+    return (not _applied_matches(root, patch)), None
+
+
 def cleanup(a):
     root = find_run(a.run)
     if state(root) in BUSY or _finalizing(root) or any(
@@ -2572,20 +2689,40 @@ def cleanup(a):
     meta = load_meta(root)  # after the guard, or finalize's history could be saved back stale
     wt = Path(meta["worktree"])
     working_tree = meta.get("kind") == "working-tree"
-    if wt.exists() and not working_tree:
-        dirty = _dirty_without_links(wt, meta)
-        applied = root / "applied"
-        if dirty and not a.force:
-            if not (applied.exists() and applied.read_text().strip() == _digest(make_patch(root, meta)[1])):
+    unapplied = False
+    if not working_tree:
+        if wt.exists():
+            unapplied, dirty, wt_err = _worktree_unapplied(root, meta, wt)
+            if wt_err:
+                if not a.force:
+                    sys.exit(f"cannot compare worktree to base: {wt_err}; pass --force to discard")
+                unapplied = True
+            elif unapplied and not a.force:
+                detail = dirty if dirty else "(committed on the run branch; worktree status is clean)"
                 sys.exit(f"worktree has changes that were not applied (or changed since apply); "
-                         f"apply them or pass --force:\n{dirty}")
+                         f"apply them or pass --force:\n{detail}")
+        # Always check the recorded branch before deleting it, even when the worktree
+        # exists (e.g. detached at base with commits left only on the branch).
+        if meta.get("branch") and not a.keep_branch:
+            branch_unapplied, branch_err = _branch_unapplied(root, meta)
+            if branch_err:
+                if not a.force:
+                    sys.exit(f"cannot compare branch {meta['branch']} to base: {branch_err}")
+                unapplied = True
+            elif branch_unapplied:
+                unapplied = True
+                if not a.force:
+                    applied = " (an apply of commits plus edits also lands here)" \
+                        if (root / "applied").exists() else ""
+                    sys.exit(f"branch {meta['branch']} has unapplied commits beyond base{applied}; "
+                             f"check `git log {meta['base'][:9]}..{meta['branch']}`, then pass "
+                             f"--force to delete it, or --keep-branch to keep it")
     if not (root / "logged").exists() and not (root / "applied").exists():  # apply already logged it
         # Read-only runs, reviews and runs merged by hand never pass through apply.
         if working_tree:
             outcome = "reviewed"
         else:
-            changed = wt.exists() and bool(_dirty_without_links(wt, meta))
-            outcome = ("discarded" if changed else "read-only" if meta.get("read_only") else "no-changes")
+            outcome = ("discarded" if unapplied else "read-only" if meta.get("read_only") else "no-changes")
         log_run(root, meta, outcome)
     if wt.exists():
         for l in meta.get("links", []):

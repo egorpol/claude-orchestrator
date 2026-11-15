@@ -22,7 +22,7 @@ Read before selecting per-agent flags, handling environment gotchas or inspectin
 - **`--link`ed paths are read-only inside Codex's sandbox:** the symlink resolves outside the worktree (`Read-only file system`, tested 2026-10-30). Have the delegate write output under the worktree, and leave writes to linked folders to `--verify`.
 - **Cursor's sandbox has no pty:** `pty.openpty()` raises `OSError: out of pty devices` (run `cursor-reader`, 2026-11-07). Pty tests skip there (`unittest.skipUnless`) and run in `--verify`, outside the sandbox; adjudicate a pty finding with a local probe.
 - **Clean up only what the session created.** Use scratchpad `--outdir` for builds, leaving the repo's `build/` intact.
-- **Bash runs zsh:** an unquoted `$var` does not split into words. Loop over a file list with `while read`.
+- **If the Bash tool runs zsh,** an unquoted `$var` does not split into words. Loop over a file list with `while read`.
 - Untracked files count as changes. `run.sh` exports `PYTHONDONTWRITEBYTECODE=1`, so test runs leave no `.pyc`; other build output (`node_modules`, `dist`) needs a `.gitignore` in the target repo, or it lands in the patch.
 
 ## Run directory

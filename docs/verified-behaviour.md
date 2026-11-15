@@ -2,6 +2,17 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-11-15
+
+- **AA is replacing the output-speed fields.** Page 1 of the free endpoint has `performance` in all 200 rows and `performance_v3` in 112. AA's [API docs](https://artificialanalysis.ai/data-api/docs), read 2026-11-15, say `performance` returns null "From December 10, 2026", replaced by `performance_v3`; the old fields will be removed later, with notice. `ratings.py` now reads `performance.median_output_tokens_per_second`, else `performance_v3.mean_output_tokens_per_second`.
+- **A stale worktree lock can block comparison without blocking removal.** A worktree `index.lock` makes `git add -A -N` exit 128, while `git status`, `git worktree remove --force` and `git branch -D` still work. This is the case behind the fix that lets `cleanup --force` discard work even when comparison fails.
+- **Keyless routing uses a cache or quota only.** On the maintainer's machine, `route implement` exits 0 without a key: a fresh ratings cache is used (row source `aa`, or `aa~` for a stand-in); with no usable cache, every row reads `unrated (quota only)`, one stderr line names the key variable and file, and nothing is fetched from AA. `route --frontier` also uses a usable cache without a key; with neither, it exits 1 with the same key-location line and no AA request.
+
+## 2026-11-14
+
+- **AA's free API replaces the old endpoint.** Re-checked 2026-11-15: `/api/v2/data/llms/models` answers 410 Gone; `GET https://artificialanalysis.ai/api/v2/language/models/free` with an `x-api-key` header serves 741 models in 4 pages of up to 200 (`?page=1..4`). A free key gets 403 from the Pro endpoint `/api/v2/language/models`, and response headers carry `X-Ratelimit-Limit: 100`. AA's [API docs](https://artificialanalysis.ai/data-api/docs) say the quota uses a fixed 24-hour window starting with the first request, and "Use of the API requires attribution across all tiers."
+- **The free rows have no Coding Index or Agentic Index.** Re-checked 2026-11-15: both are null in all 741 rows; the Intelligence Index is set in 128. All 7 shipped delegates' slugs have the Intelligence Index, both prices, median output speed and cost per task.
+
 ## 2026-11-10
 
 - **The verify-log failure check misread a label-first summary.** The old pattern `\b[1-9]\d* (?:failed|failures?|errors?)\b` matched `10 errors` in `triage 576 signs 10 errors 0` and `crops 76 hits 10 errors 0`: the 10 is the value of `signs` or `hits`, and `errors` carries its own 0, so the field report's reading (an `errors 0` taken for a failure) was not the cause. Against the fixed check (`65cbac9`), both lines give no failure line; `signs 10 errors 2`, `errors 2`, `failures=3`, `3 errors`, `1 failed, 2 passed` and `FAILED (failures=1)` give one; `0 failed`, `error 404` and a capitalised `Failures: 1` give none. Of the 250 verify logs on this machine that exited 0 (270 in all), the old check flagged 9 and the fixed one 7: it cleared 4 and newly flags 2, both the same data summary (`… errors 1, cwd moves 0`).

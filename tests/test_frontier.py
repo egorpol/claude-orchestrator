@@ -175,14 +175,14 @@ class FrontierTest(unittest.TestCase):
 
     def test_fallback_cap_exclusions_and_tiebreak(self):
         old = dict(row("gpt-6.1-sol", 46, 0.21, 1, "codex"), effort="medium")
-        rows = [old, row("deepseek-max", 44, 0.27, 2), row("same-int", 44, 0.4, 1),
+        rows = [old, row("nimbus-max", 44, 0.27, 2), row("same-int", 44, 0.4, 1),
                 row("too-expensive", 60, 0.421, 1), row("claude-high", 90, 0.1, 1, creator="Anthropic"),
                 row("grok-4.7-high", 91, 0.1, 1), row("composer-2.5", 92, 0.1, 1),
                 row("auto", 93, 0.1, 1), row("faster-fast", 94, 0.1, 1),
                 row("no-task", 95, None, 1)]
         selection, reason = frontier.pick_fallback(rows, "gpt-6.1-sol", "medium")
         self.assertIsNone(reason)
-        self.assertEqual(selection["row"]["model"], "deepseek-max")
+        self.assertEqual(selection["row"]["model"], "nimbus-max")
         self.assertEqual(selection["cap"], 0.42)
         self.assertIsNone(frontier.pick_fallback(rows, "gpt-6.1-sol", "high")[0])
         self.assertIn("no eligible", frontier.pick_fallback([old], "gpt-6.1-sol", "medium")[1])
@@ -195,6 +195,7 @@ class FrontierTest(unittest.TestCase):
         text = frontier.render(result, catalog)
         self.assertIn("delegate ratings --refresh", text)
         self.assertIn("auto ~ (proxy)", text)
+        self.assertEqual(text.count("Source: Artificial Analysis (https://artificialanalysis.ai/)."), 1)
         self.assertTrue(text.splitlines()[-1].startswith("ask --agent both if Codex empty:"))
 
 
@@ -217,6 +218,16 @@ class DiscoveryAndCliTest(unittest.TestCase):
             self.assertEqual(result["codex_cache_client_version"], "fixture")
             self.assertEqual(run.call_args.args[0], ["cursor-agent", "models"])
             self.assertEqual(result["runnable"][0]["aa"], "a")
+
+    def test_missing_key_exception_carries_same_message_for_fallback_callers(self):
+        import ratings
+        message = ratings.missing_key_message()
+        with mock.patch.object(ratings, "load", side_effect=ratings.MissingAPIKey(message)), \
+             mock.patch.object(frontier, "cursor_models") as discover:
+            with self.assertRaisesRegex(ratings.MissingAPIKey, "ARTIFICIAL_ANALYSIS_API_KEY") as exc:
+                frontier.load_report({"delegates": []})
+        self.assertEqual(str(exc.exception), message)
+        discover.assert_not_called()
 
     def test_route_frontier_json_refresh_and_no_quota_or_rank(self):
         result = report({})

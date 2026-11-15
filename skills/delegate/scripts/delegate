@@ -104,7 +104,10 @@ def cmd_quota(a):
 def cmd_ratings(a):
     # Catalog before the AA fetch so a broken local file is not masked by network errors.
     cat = load_catalog()
-    env = ratings.load(refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))
+    try:
+        env = ratings.load(refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))
+    except ratings.RatingsError as exc:
+        sys.exit(str(exc))
     models = env["models"]
     if a.grep:
         import re
@@ -116,8 +119,8 @@ def cmd_ratings(a):
         print(json.dumps({k: models.get(s) for k, s in picks}, indent=2))
         return
     import time
-    print(f"source: {env['source']}, fetched {time.strftime('%Y-%m-%d %H:%M', time.localtime(env['fetched_at']))}"
-          f"{'  (coding = proxy: mean of Terminal-Bench 4.0 and SciCode)' if env['source'] != 'api' else ''}")
+    print(f"source: {env['source']}, fetched {time.strftime('%Y-%m-%d %H:%M', time.localtime(env['fetched_at']))}")
+    print(ratings.ATTRIBUTION)
     f = lambda v, s: format(v, s) if v is not None else "-"
     body = []
     for key, slug in picks:
@@ -140,13 +143,22 @@ def cmd_route(a):
     cat = load_catalog()
     if a.frontier:
         import frontier
-        report = frontier.load_report(cat, refresh=a.refresh)
+        try:
+            report = frontier.load_report(cat, refresh=a.refresh)
+        except ratings.RatingsError as exc:
+            sys.exit(str(exc))
         print(json.dumps(report, indent=2) if a.json else frontier.render(report, cat))
         return
     if a.task not in cat["tasks"]:
         sys.exit(f"unknown task {a.task!r}; known: {', '.join(cat['tasks'])}")
     pools = quota.pools(quota.fetch())
-    aa = ratings.load(refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))["models"]
+    try:
+        aa = ratings.load(refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))["models"]
+    except ratings.MissingAPIKey as exc:
+        print(str(exc), file=sys.stderr)
+        aa = None
+    except ratings.RatingsError as exc:
+        sys.exit(str(exc))
     agents = set(a.agents.split(",")) if a.agents else None
     options = {"min_quota": a.min_quota, "agents": agents}
     if a.prefer is not None:

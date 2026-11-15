@@ -31,6 +31,16 @@ CODEX_USAGE = {"input": 210, "cached_input": 90, "cache_write": 0, "output": 30,
 CURSOR_USAGE = {"input": 110, "cached_input": 900, "cache_write": 30, "output": 25, "reasoning_output": None}
 
 
+def _locale_available(prefix="de_DE"):
+    try:
+        lines = subprocess.run(
+            ["locale", "-a"], capture_output=True, text=True, check=True).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    p = prefix.lower()
+    return any(line.lower() == p or line.lower().startswith(p + ".") for line in lines)
+
+
 class LifecycleTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="delegate-lifecycle-")
@@ -178,6 +188,7 @@ class LifecycleTests(unittest.TestCase):
                                  ("cursor", selection["row"]["model"], None))
                 load.assert_called_once_with(unittest.mock.ANY, default_codex=("gpt-6.1-sol", "xhigh"))
                 self.assertIn(f"review: {pid} 1% left below 10% threshold; fallback cursor frontier-selected-model", out)
+                self.assertIn("review: Source: Artificial Analysis (https://artificialanalysis.ai/).", out)
                 self.assertEqual(err, "")
                 self.assertIn("fake-cursor-session", (job / "log").read_text())
                 self.assertNotIn("fake-codex-thread", (job / "log").read_text())
@@ -1537,7 +1548,217 @@ class LifecycleTests(unittest.TestCase):
         self.cli("cleanup", "test", "--force", "--purge")
         self.assertEqual(len((self.storage / "runs.jsonl").read_text().splitlines()), 1)
 
+    def _commit_in_worktree(self, name):
+        """Contract breach: commit the fake agent's edits so status is clean but base differs."""
+        root = self.root(name)
+        wt = root / "wt"
+        self.git("add", "-A", cwd=wt)
+        self.git("commit", "-qm", "delegate breach commit", cwd=wt)
+        self.assertFalse(self.git("status", "--porcelain", cwd=wt))
+        return root, wt
+
+    def test_diff_warns_about_delegate_commits(self):
+        # Control for the invalid-base case: a real commit on the run branch still warns.
+        self.launch("codex", "warned")
+        self._commit_in_worktree("warned")
+        r = self.cli_raw("diff", "warned")
+        self.assertIn("contract breach", r.stderr)
+
+    def test_cleanup_refuses_committed_unapplied_work(self):
+        self.launch("codex", "committed")
+        root, wt = self._commit_in_worktree("committed")
+        branch = runs.load_meta(root)["branch"]
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "committed"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("changes that were not applied", rejected.stderr)
+        self.assertTrue(wt.exists())
+        self.assertEqual(
+            self.git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"),
+            self.git("rev-parse", "HEAD", cwd=wt))
+        self.assertFalse((self.storage / "runs.jsonl").exists())
+        self.cli("cleanup", "committed", "--force")
+        self.assertFalse(wt.exists())
+        record = json.loads((self.storage / "runs.jsonl").read_text())
+        self.assertEqual(record["outcome"], "discarded")
+        self.assertNotEqual(
+            subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                           cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+
+    def test_cleanup_refuses_missing_worktree_with_unapplied_branch(self):
+        self.launch("codex", "gone-wt")
+        root, wt = self._commit_in_worktree("gone-wt")
+        branch = runs.load_meta(root)["branch"]
+        tip = self.git("rev-parse", "HEAD", cwd=wt)
+        # Remove the worktree directory without going through cleanup (prune leaves the branch).
+        self.git("worktree", "remove", "--force", str(wt))
+        self.assertFalse(wt.exists())
+        self.assertEqual(self.git("rev-parse", f"refs/heads/{branch}"), tip)
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "gone-wt"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("unapplied commits beyond base", rejected.stderr)
+        self.assertEqual(self.git("rev-parse", f"refs/heads/{branch}"), tip)
+        self.assertFalse((self.storage / "runs.jsonl").exists())
+        self.cli("cleanup", "gone-wt", "--force")
+        record = json.loads((self.storage / "runs.jsonl").read_text())
+        self.assertEqual(record["outcome"], "discarded")
+        self.assertNotEqual(
+            subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                           cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+
+    def test_cleanup_after_apply_of_committed_run_needs_no_force(self):
+        self.launch("codex", "applied-commit")
+        self._commit_in_worktree("applied-commit")
+        self.cli("apply", "applied-commit")
+        self.cli("cleanup", "applied-commit")  # no --force
+        self.assertFalse((self.root("applied-commit") / "wt").exists())
+        record = json.loads((self.storage / "runs.jsonl").read_text())
+        self.assertEqual(record["outcome"], "applied")
+
+    def test_cleanup_after_whole_apply_of_commits_plus_edits_names_the_case(self):
+        # The applied digest covers commits plus an edit, so it differs from the branch-only
+        # diff; HEAD == tip proves nothing (attached HEAD), so cleanup refuses but says why.
+        self.launch("codex", "mixed")
+        _, wt = self._commit_in_worktree("mixed")
+        with (wt / "tracked.txt").open("a") as f:
+            f.write("uncommitted on top of the commit\n")
+        self.cli("apply", "mixed")
+        rejected = subprocess.run([sys.executable, str(CLI), "cleanup", "mixed"], cwd=self.repo,
+                                  env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("an apply of commits plus edits also lands here", rejected.stderr)
+        self.assertTrue(wt.exists())
+        self.cli("cleanup", "mixed", "--force")
+        self.assertFalse(wt.exists())
+
+    def test_cleanup_refuses_detached_worktree_with_unapplied_branch(self):
+        # Commits remain on the branch while the worktree HEAD is reset to base.
+        self.launch("codex", "detached")
+        root, wt = self._commit_in_worktree("detached")
+        meta = runs.load_meta(root)
+        branch, base = meta["branch"], meta["base"]
+        tip = self.git("rev-parse", "HEAD", cwd=wt)
+        self.git("checkout", "-q", "--detach", base, cwd=wt)
+        self.assertFalse(self.git("status", "--porcelain", cwd=wt))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), base)
+        self.assertEqual(self.git("rev-parse", f"refs/heads/{branch}"), tip)
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "detached"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("unapplied commits beyond base", rejected.stderr)
+        self.assertTrue(wt.exists())
+        self.assertEqual(self.git("rev-parse", f"refs/heads/{branch}"), tip)
+        self.assertFalse((self.storage / "runs.jsonl").exists())
+        self.cli("cleanup", "detached", "--force")
+        record = json.loads((self.storage / "runs.jsonl").read_text())
+        self.assertEqual(record["outcome"], "discarded")
+
+    def test_cleanup_refuses_invalid_base_with_existing_branch(self):
+        self.launch("codex", "badbase", "--read-only")
+        root = self.root("badbase")
+        meta = runs.load_meta(root)
+        branch = meta["branch"]
+        # Drop the worktree so cleanup's branch compare is what fails closed (not make_patch).
+        self.git("worktree", "remove", "--force", str(root / "wt"))
+        meta["base"] = "0" * 40
+        (root / "meta.json").write_text(json.dumps(meta) + "\n")
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "badbase"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("cannot compare branch", rejected.stderr)
+        self.assertEqual(
+            subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                           cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+        self.assertFalse((self.storage / "runs.jsonl").exists())
+        self.cli("cleanup", "badbase", "--force")
+
+    def test_cleanup_force_discards_when_make_patch_fails(self):
+        """Invalid base with a live worktree: refuse naming --force; --force discards."""
+        self.launch("codex", "badwt")
+        root = self.root("badwt")
+        meta = runs.load_meta(root)
+        wt = Path(meta["worktree"])
+        branch = meta["branch"]
+        self.assertTrue(wt.exists())
+        meta["base"] = "0" * 40
+        (root / "meta.json").write_text(json.dumps(meta) + "\n")
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "badwt"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        err = rejected.stderr + rejected.stdout
+        self.assertNotIn("Traceback", err)
+        self.assertIn("cannot compare worktree to base", err)
+        self.assertIn("--force", err)
+        # The base did not resolve, so no "delegate made commits" warning may precede the refusal.
+        self.assertNotIn("contract breach", err)
+        self.assertTrue(wt.exists())
+        self.assertEqual(
+            subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                           cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+        self.cli("cleanup", "badwt", "--force")
+        self.assertFalse(wt.exists())
+        record = json.loads((self.storage / "runs.jsonl").read_text())
+        self.assertEqual(record["outcome"], "discarded")
+
+    def test_cleanup_force_discards_when_git_add_fails(self):
+        """A stale worktree index.lock makes `git add -A -N` exit 128 (SystemExit, not
+        CalledProcessError): refuse in one line naming --force; --force discards."""
+        self.launch("codex", "lockwt")
+        root = self.root("lockwt")
+        wt = Path(runs.load_meta(root)["worktree"])
+        lock = Path(subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-path", "index.lock"],
+            cwd=wt, env=self.env, text=True, capture_output=True, check=True).stdout.strip())
+        lock.write_text("")
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "lockwt"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        err = rejected.stderr + rejected.stdout
+        self.assertNotIn("Traceback", err)
+        self.assertIn("cannot compare worktree to base: git add -A -N failed", err)
+        self.assertIn("pass --force to discard", err)
+        self.assertEqual(len(rejected.stderr.strip().splitlines()), 1)
+        self.assertTrue(wt.exists())
+        self.assertFalse((self.storage / "runs.jsonl").exists())
+        self.cli("cleanup", "lockwt", "--force")
+        self.assertFalse(wt.exists())
+        record = json.loads((self.storage / "runs.jsonl").read_text())
+        self.assertEqual(record["outcome"], "discarded")
+
+    def test_cleanup_branch_named_like_tracked_file(self):
+        # A branch whose name matches a tracked path must still compare as a ref, not a path.
+        (self.repo / "tracked.txt").write_text("base\nextra\n")
+        self.git("commit", "-qam", "change tracked")
+        self.launch("codex", "pathish")
+        root, wt = self._commit_in_worktree("pathish")
+        meta = runs.load_meta(root)
+        # Rename the run branch to the tracked file's name.
+        old = meta["branch"]
+        new = "tracked.txt"
+        self.git("branch", "-m", old, new)
+        meta["branch"] = new
+        (root / "meta.json").write_text(json.dumps(meta) + "\n")
+        # Detach at base so only the branch holds the commits.
+        self.git("checkout", "-q", "--detach", meta["base"], cwd=wt)
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "pathish"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0, rejected.stderr)
+        self.assertIn("unapplied commits beyond base", rejected.stderr)
+        self.assertEqual(
+            subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{new}"],
+                           cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+        self.cli("cleanup", "pathish", "--force")
+
     def test_dry_run_flags_and_optional_registration(self):
+
         codex = self.launch("codex", "x", "--dry-run")
         cursor = self.launch("cursor", "x", "--dry-run")
         self.assertIn("--json", codex)
@@ -1749,6 +1970,21 @@ class LifecycleTests(unittest.TestCase):
         meta = runs.load_meta(self.root("link-d"))
         self.assertEqual(meta.get("excluded", []), [])
         self.cli("cleanup", "link-d", "--force")
+
+    @unittest.skipUnless(_locale_available("de_DE"), "de_DE locale not installed")
+    def test_link_lifecycle_under_german_locale(self):
+        # make_patch matches the English "ignored by…" phrase; without LC_ALL=C a de_DE
+        # git locale breaks diff/apply --check/cleanup for gitignored --link runs.
+        (self.repo / "data/cache").mkdir(parents=True)
+        (self.repo / "data/cache/input").write_text("x\n")
+        de = {"LC_ALL": "de_DE.UTF-8", "LANG": "de_DE.UTF-8"}
+        self.launch("codex", "link-de", "--link", "data/cache", extra_env=de)
+        self.cli("diff", "link-de", extra_env=de)
+        check = self.cli_raw("apply", "link-de", "--check", extra_env=de)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.cli("apply", "link-de", extra_env=de)
+        self.cli("cleanup", "link-de", extra_env=de)
+        self.assertFalse((self.root("link-de") / "wt").exists())
 
     def test_link_preserves_user_preexisting_exclude_line(self):
         # (e) user's own exclude line for the same path survives cleanup

@@ -263,6 +263,7 @@ def load_report(catalog, refresh=False, default_codex=None):
     import ratings
     from ask import DEFAULTS
     warnings = []
+    env = ratings.load(refresh=refresh, log=warnings.append)
     try:
         ids = cursor_models()
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -273,7 +274,6 @@ def load_report(catalog, refresh=False, default_codex=None):
     except (OSError, ValueError) as exc:
         cache = {}
         warnings.append(f"Codex models cache unavailable: {exc}")
-    env = ratings.load(refresh=refresh, log=warnings.append)
     report = build_report(catalog, env, ids, cache, default_codex or DEFAULTS["codex"])
     report["warnings"].extend(warnings)
     return report
@@ -321,6 +321,8 @@ def render(report, catalog):
     if any(r["pool"] == "cursor-premium?" for r in report["runnable"]):
         lines.append("cursor-premium?: billing pool has not been verified for this model's creator.")
     lines.extend(f"warning: {warning}" for warning in report["warnings"])
+    from ratings import ATTRIBUTION
+    lines.append(ATTRIBUTION)
     lines.append("ask --agent both if Codex empty: " + (fallback_description(report["fallback"])
                  if report["fallback"] else "keep Codex; " + report["fallback_reason"]))
     return "\n".join(lines)

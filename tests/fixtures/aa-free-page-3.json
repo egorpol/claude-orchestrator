@@ -1,0 +1,61 @@
+{
+  "_synthetic": "All names and figures are invented test data; shipped slugs only test catalog matching.",
+  "tier": "free",
+  "intelligence_index_version": 5,
+  "pagination": {
+    "page": 3,
+    "page_size": 2,
+    "total_pages": 4,
+    "has_more": true
+  },
+  "data": [
+    {
+      "slug": "claude-sonnet-5-5-high",
+      "name": "Invented Sonnet (High)",
+      "model_creator": {
+        "name": "Synthetic Lab"
+      },
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 39,
+        "artificial_analysis_coding_index": null,
+        "artificial_analysis_agentic_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 6,
+        "price_1m_output_tokens": 16
+      },
+      "performance": {
+        "median_output_tokens_per_second": 1411.125
+      },
+      "artificial_analysis_intelligence_index_cost": {
+        "cost_per_task": {
+          "total_cost": 52.34567
+        }
+      }
+    },
+    {
+      "slug": "claude-haiku-5-5",
+      "name": "Invented Haiku",
+      "model_creator": {
+        "name": "Synthetic Lab"
+      },
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 46,
+        "artificial_analysis_coding_index": null,
+        "artificial_analysis_agentic_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 7,
+        "price_1m_output_tokens": 18
+      },
+      "performance": {
+        "median_output_tokens_per_second": 1511.125
+      },
+      "artificial_analysis_intelligence_index_cost": {
+        "cost_per_task": {
+          "total_cost": 62.34567
+        }
+      }
+    }
+  ]
+}

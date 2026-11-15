@@ -445,7 +445,9 @@ _HOME_NIX = "/" + "home" + "/"
 _HOME_MAC = "/" + "Users" + "/"
 _HOME_WIN_BS = "\\" + "Users" + "\\"
 _HOME_WIN_SL = "/" + "Users" + "/"
-_USER = r"[A-Za-z0-9._-]+"
+# NAME_MAX (255): bound the path-component capture so whole-line / long-line scans agree.
+NAME_MAX = 255
+_USER = r"[A-Za-z0-9._-]{1," + str(NAME_MAX) + r"}"
 # Char before the leading / must not be a word character, `.` or `-`.
 # re.ASCII so (?i) Windows matching agrees with a lower() prefilter (no long-ſ).
 HOME_PATH = re.compile(
@@ -489,6 +491,11 @@ _WT_DIFF_FLAGS = (
     "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
     "--src-prefix=a/", "--dst-prefix=b/",
 )
+# Untracked file scans (tests patch both). SCAN_CHUNK_SIZE is characters per text-mode read.
+SCAN_CHUNK_SIZE = 1024 * 1024
+# SCAN_CHUNK_OVERLAP applies only inside one line longer than SCAN_CHUNK_SIZE + SCAN_CHUNK_OVERLAP
+# characters (a sliding window with one character of left context). Shorter lines are scanned whole.
+SCAN_CHUNK_OVERLAP = 8192
 
 
 def _split_lf(text):
@@ -702,7 +709,8 @@ class Guard:
             raise GitError(err[0] if err else "git failed")
         return proc
 
-    def add(self, label, path, line, commit, value, mask=True):
+    def _finding_key(self, label, path, line, commit, value, mask=True):
+        """Dedup key shared by add and the deferred extra-home queue."""
         if label == "private key":
             shown = _PRIV_SHOWN
         else:
@@ -710,7 +718,10 @@ class Guard:
         commit = commit or "-"
         if _OID.fullmatch(str(commit)):
             commit = commit[:12]
-        key = (label, path or "-", line or "-", commit, shown)
+        return (label, path or "-", line or "-", commit, shown), shown, commit
+
+    def add(self, label, path, line, commit, value, mask=True):
+        key, shown, commit = self._finding_key(label, path, line, commit, value, mask=mask)
         self._scan_hits += 1  # count before dedupe so every push destination can be named
         if key in self._seen:
             return
@@ -720,8 +731,24 @@ class Guard:
             "commit": commit, "value": shown,
         })
 
-    def _find_private_key_hits(self, text):
-        """Linear PRIVATE KEY header search — avoids quadratic [^\n]* backtracking."""
+    def _defer_home(self, homes, homes_seen, path, lineno, commit, value):
+        """Queue an extra-home hit, deduped on the same key as add; count drops like add."""
+        key, _shown, _commit = self._finding_key(
+            "home path", path, lineno, commit, value, mask=False)
+        if key in homes_seen:
+            self._scan_hits += 1  # dropped duplicate: keep pre-dedupe hit count
+            return
+        homes_seen.add(key)
+        homes.append((lineno, value))
+
+    def _find_private_key_hits(self, text, begin_before_start=False):
+        """Linear PRIVATE KEY header search — avoids quadratic [^\n]* backtracking.
+
+        Yields (start, end, label, value, mask). `end` is the end of the PRIVATE KEY
+        keyword (not the line), so a chunked scan can tell the keyword is complete.
+        When `begin_before_start` is set, a BEGIN on the continued first line may lie
+        outside this window (carried as per-line state from an earlier chunk).
+        """
         hits = []
         start = 0
         while True:
@@ -731,22 +758,24 @@ class Guard:
                 break
             line_start = text.rfind("\n", 0, pos) + 1
             begin_at = text.find(_BEGIN, line_start, pos)
+            if begin_at < 0 and begin_before_start and line_start == 0:
+                begin_at = 0
             if begin_at >= 0:
                 line_end = text.find("\n", pos)
                 if line_end < 0:
                     line_end = len(text)
                 value = text[begin_at:line_end].strip()
-                hits.append((begin_at, "private key", value, True))
+                # start=begin_at for whole-file ordering; window filters use end-len(_PRIV).
+                hits.append((begin_at, pos + len(_PRIV), "private key", value, True))
             start = pos + len(_PRIV)
         return hits
 
-    def scan_text(self, text, path, commit, start_line=1, home_paths=True):
-        if not text:
-            return
-        self._tick()
-        # Per-rule regexes with literal prefilters (a leading lookbehind / \\b / big
-        # alternation in one combined regex was slower than separate rules).
-        hits = list(self._private_name_hits(text))  # (pos, label, value, mask)
+    def _secret_hits(self, text, home_paths=True, begin_before_start=False):
+        """Return (start, end, label, value, mask) hits for `text`, sorted by start."""
+        # Private-name hits are (pos, label, value, mask); end = pos + len(value).
+        hits = []
+        for pos, label, value, mask in self._private_name_hits(text):
+            hits.append((pos, pos + len(value), label, value, mask))
         folded = None
 
         def hay_fold():
@@ -755,8 +784,8 @@ class Guard:
                 folded = text.lower()
             return folded
 
-        if _PRIV in text:
-            hits.extend(self._find_private_key_hits(text))
+        if _PRIV in text or begin_before_start:
+            hits.extend(self._find_private_key_hits(text, begin_before_start=begin_before_start))
 
         for kind, pattern, lits, fold_lits in SCAN_RULES:
             if kind == "home path" and not (self.home_paths and home_paths):
@@ -780,44 +809,159 @@ class Guard:
                     continue
                 elif value.startswith(_SK_ANT) and kind in ("OpenAI key", "Anthropic key"):
                     label = "Anthropic key"
-                hits.append((match.start(), label, value, mask))
+                hits.append((match.start(), match.end(), label, value, mask))
 
         hits.sort(key=lambda h: h[0])
-        # Count newlines only up to each match (kept from round-3 orchestrator fix).
-        lineno, last = start_line, 0
-        for pos, label, value, mask in hits:
-            self._tick()
-            lineno += text.count("\n", last, pos)
-            last = pos
-            self.add(label, path, lineno, commit, value, mask=mask)
-        # Extra $HOME roots (rare) still need a linear pass when configured.
-        if self._home_roots and self.home_paths and home_paths:
-            for offset, line in enumerate(_split_lf(text)):
-                self._scan_extra_homes(line, path, start_line + offset, commit)
+        return hits
 
-    def _scan_line(self, line, path, lineno, commit):
-        """Scan one line (used for diff hunks where we already have the line)."""
-        self.scan_text(line, path, commit, start_line=lineno)
-
-    def _scan_extra_homes(self, line, path, lineno, commit):
+    def _extra_home_hits(self, line):
+        """Yield (start, stop, value) for configured extra $HOME roots in one line."""
         for root in self._home_roots:
             idx = 0
             while True:
                 pos = line.find(root, idx)
                 if pos < 0:
                     break
+                idx = pos + 1
                 if pos > 0 and (line[pos - 1].isalnum() or line[pos - 1] in "._-"):
-                    idx = pos + 1
                     continue
                 end = pos + len(root)
                 if end < len(line) and line[end] not in "/\\":
-                    idx = pos + 1
                     continue
                 stop = end
                 while stop < len(line) and not line[stop].isspace() and line[stop] not in "\"'":
                     stop += 1
-                self.add("home path", path, lineno, commit, line[pos:stop], mask=False)
-                idx = pos + 1
+                yield pos, stop, line[pos:stop]
+
+    def _long_line_overlap(self):
+        """Overlap for intra-line windows: enough for the longest configured literal.
+
+        Widens past SCAN_CHUNK_OVERLAP for private-name literals, extra-home roots, and
+        the HOME_PATH username bound (NAME_MAX) plus each rule's anchors. The NAME_MAX
+        regex bound also applies on scan_text, so the whole-line invariant stays exact.
+        """
+        need = SCAN_CHUNK_OVERLAP
+        if self.private_names and self._private_entries:
+            # Match is the literal; alnum boundaries are checks, not consumed.
+            need = max(need, max(len(name) for _ln, name in self._private_entries))
+        if self._home_roots:
+            # Extra-home root is start-anchored; root length keeps the start findable.
+            need = max(need, max(len(root) for root in self._home_roots))
+        prefixes = (
+            len(_HOME_NIX), len(_HOME_MAC),
+            len("C:" + _HOME_WIN_BS), len("C:" + _HOME_WIN_SL),
+        )
+        # Home username: prefix + NAME_MAX + closing slash/backslash.
+        need = max(need, max(prefixes) + NAME_MAX + 1)
+        return need
+
+    def scan_text(self, text, path, commit, start_line=1, home_paths=True,
+                  report_start=0, max_start=None, begin_before_start=False,
+                  homes_out=None, homes_seen=None):
+        """Scan `text`. Optional window bounds support line-batch / long-line windows.
+
+        report_start: ignore hits that start before this (left-context prefix).
+        max_start: ignore non-private-key hits that start at or after this.
+        begin_before_start: a BEGIN marker was seen earlier on the continued first line.
+        homes_out: when set, append extra-home (lineno, value) pairs here instead of adding
+            them immediately (so they stay after all other findings, as in a whole-file scan).
+            Duplicates are dropped on the same key as add; each drop still counts a scan hit.
+        homes_seen: dedupe set for homes_out (required when homes_out is set).
+        """
+        if not text:
+            return
+        self._tick()
+        hits = self._secret_hits(text, home_paths=home_paths,
+                                 begin_before_start=begin_before_start)
+        # Count newlines only up to each match (kept from round-3 orchestrator fix).
+        lineno, last = start_line, 0
+        for pos, end, label, value, mask in hits:
+            self._tick()
+            lineno += text.count("\n", last, pos)
+            last = pos
+            # A private-key hit's start may be a synthetic BEGIN; filter on the keyword.
+            at = end - len(_PRIV) if label == "private key" else pos
+            if at < report_start or (max_start is not None and label != "private key"
+                                     and at >= max_start):
+                continue
+            self.add(label, path, lineno, commit, value, mask=mask)
+        if self._home_roots and self.home_paths and home_paths:
+            if homes_out is None:
+                homes, seen = [], set()
+            else:
+                homes, seen = homes_out, homes_seen
+            line_at = 0
+            for offset, line in enumerate(_split_lf(text)):
+                if max_start is not None and line_at >= max_start:
+                    break
+                for pos, _stop, value in self._extra_home_hits(line):
+                    at = line_at + pos
+                    if at < report_start or (max_start is not None and at >= max_start):
+                        continue
+                    self._defer_home(homes, seen, path, start_line + offset, commit, value)
+                line_at += len(line) + 1
+            if homes_out is None:
+                for lineno, value in homes:
+                    self.add("home path", path, lineno, commit, value, mask=False)
+
+    def scan_file_text(self, path, shown_path, commit, home_paths=True):
+        """Scan untracked text in whole-line batches (text mode, universal newlines).
+
+        Invariant: when no line is longer than SCAN_CHUNK_SIZE + the effective long-line
+        overlap (see _long_line_overlap), findings (label, path, line, commit, value, order)
+        match scan_text(path.read_text(encoding="utf-8", errors="replace")).
+
+        Inside a longer line, every whole-file (label, line) is still found for every rule
+        scan_text applies. Start-anchored rules (token prefixes, extra-home roots) may
+        report a cut value when the match extends past a window. End-anchored or
+        full-literal rules (HOME_PATH's closing slash, private-name literals) fit because
+        HOME_PATH usernames are bounded by NAME_MAX and the long-line overlap is widened
+        to the longest configured literal plus its anchors. A match across a window's left
+        edge can still add a second finding from an inner start, and a private-key finding
+        whose BEGIN lay in an earlier window can take a different place in the order.
+        Extra-home findings are deferred until EOF (deduped) so they stay after other hits.
+        """
+        size, overlap = SCAN_CHUNK_SIZE, self._long_line_overlap()
+        lineno, pending, long_line, begin_seen = 1, "", False, False
+        homes, homes_seen = [], set()
+
+        def lines(text):
+            self.scan_text(text, shown_path, commit, start_line=lineno, home_paths=home_paths,
+                           report_start=1 if long_line else 0,
+                           begin_before_start=begin_seen, homes_out=homes,
+                           homes_seen=homes_seen)
+
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            while True:
+                self._tick()
+                block = handle.read(size)
+                text = pending + block
+                if not block:
+                    lines(text)
+                    break
+                cut = text.rfind("\n") + 1
+                if cut:
+                    lines(text[:cut])
+                    lineno += text.count("\n", 0, cut)
+                    pending, long_line, begin_seen = text[cut:], False, False
+                elif len(text) > size + overlap:
+                    carry = len(text) - overlap - 1  # text[carry] is the next left context
+                    self.scan_text(text, shown_path, commit, start_line=lineno,
+                                   home_paths=home_paths,
+                                   report_start=1 if long_line else 0, max_start=carry + 1,
+                                   begin_before_start=begin_seen, homes_out=homes,
+                                   homes_seen=homes_seen)
+                    begin_seen = begin_seen or text.find(
+                        _BEGIN, 0, carry + len(_BEGIN) - 1) >= 0
+                    pending, long_line = text[carry:], True
+                else:
+                    pending = text
+        for lineno, value in homes:
+            self.add("home path", shown_path, lineno, commit, value, mask=False)
+
+    def _scan_line(self, line, path, lineno, commit):
+        """Scan one line (used for diff hunks where we already have the line)."""
+        self.scan_text(line, path, commit, start_line=lineno)
 
     def scan_path_name(self, relpath, commit, root_relative=None):
         added_path = root_relative if root_relative is not None else relpath
@@ -1125,10 +1269,7 @@ class Guard:
                     continue
                 if _is_probably_binary(path):
                     continue
-                self.scan_text(
-                    path.read_text(encoding="utf-8", errors="replace"),
-                    shown_path, "(untracked)",
-                )
+                self.scan_file_text(path, shown_path, "(untracked)")
             except OSError as exc:
                 raise GitError(f"unreadable {shown_path}: {exc}") from exc
 
@@ -1197,7 +1338,9 @@ def _hunk_new_start(line):
 
 
 def _is_probably_binary(path, sample=8192):
-    data = path.read_bytes()[:sample]  # OSError propagates to caller
+    """True if the first `sample` bytes contain a NUL (reads at most `sample` bytes)."""
+    with path.open("rb") as handle:
+        data = handle.read(sample)  # OSError propagates to caller
     return b"\0" in data
 
 

@@ -506,6 +506,8 @@ def _fallback_for_both(a, prefix="ask"):
         print(head + f"keeping Codex: {report['fallback_reason']}.", flush=True)
         return None
     print(head + "fallback " + frontier.fallback_description(selection), flush=True)
+    from ratings import ATTRIBUTION
+    print(f"{prefix}: {ATTRIBUTION}", flush=True)
     return selection["row"]
 
 

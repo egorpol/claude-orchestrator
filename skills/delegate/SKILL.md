@@ -5,7 +5,7 @@ description: Delegate coding, review, research or bulk-labelling work from Claud
 
 # Delegate
 
-One CLI: `~/.claude/skills/delegate/scripts/delegate` (stdlib Python; full path, or `delegate` after `install.sh --bin` links it into `~/.local/bin`). Source of truth is `egorpol/claude-orchestrator`; `~/.claude/skills/delegate` symlinks into it. Commit edits there.
+One CLI: `~/.claude/skills/delegate/scripts/delegate` (stdlib Python; full path, or `delegate` after `install.sh --bin` links it into `~/.local/bin`). Edit the skill in the claude-orchestrator checkout that `install.sh` linked or copied it from, not in `~/.claude/skills`.
 
 Before doing each workflow step, read the file named there: the field lessons live in those topic files.
 

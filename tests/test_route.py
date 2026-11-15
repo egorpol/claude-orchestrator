@@ -1,9 +1,13 @@
 """Tests for route.rank preferences and unknown pools."""
 import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import copy
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -236,9 +240,9 @@ class TestRoundsColumn(unittest.TestCase):
 
 
 def _aa_fixture_models():
-    page = Path(__file__).resolve().parent / "fixtures" / "aa-leaderboard-2026-11-08.html"
-    with mock.patch.object(ratings, "_get", return_value=page.read_text(encoding="utf-8")):
-        return ratings.from_page()
+    pages = sorted((Path(__file__).resolve().parent / "fixtures").glob("aa-free-page-*.json"))
+    with mock.patch.object(ratings, "_get", side_effect=[p.read_text(encoding="utf-8") for p in pages]):
+        return ratings.from_api("invented-key")
 
 
 def _shipped_catalog():
@@ -248,6 +252,163 @@ def _shipped_catalog():
 def _half_quota_pools(cat):
     return {p: {"left_pct": 50.0, "pace": 1.0}
             for p in ("codex-5h", "codex-7d", "cursor-auto", "claude-5h", "claude-7d")}
+
+
+class TestQuotaOnly(unittest.TestCase):
+    def test_equal_quality_ignores_priors_and_retains_prefer(self):
+        cat = _catalog()
+        task, rows = route.rank("implement", cat, _pools_ok(), None)
+        self.assertEqual([r["delegate"]["id"] for r in rows[:2]], ["cursor-auto", "codex-sol"])
+        for row in rows:
+            self.assertEqual(row["quality"], 1.0)
+            self.assertAlmostEqual(row["score"], 100 * row["quota_factor"])
+            self.assertIn("unrated", row["source"])
+            self.assertTrue(all(v is None for v in row["metrics"].values()))
+        self.assertIn("ranking by quota only", route.render("implement", task, rows))
+
+    def test_quota_exclusion_subagent_penalty_and_filters_still_apply(self):
+        cat = _catalog()
+        cat["delegates"].append({"id": "sub", "agent": "claude-subagent", "model": "sonnet",
+                                  "pools": ["claude-5h"]})
+        pools = _pools_ok()
+        pools["cursor-auto"]["left_pct"] = 5
+        pools["claude-5h"] = {"left_pct": 100}
+        _, rows = route.rank("implement", cat, pools, None)
+        by_id = {r["delegate"]["id"]: r for r in rows}
+        self.assertEqual(rows[0]["delegate"]["id"], "codex-sol")
+        self.assertTrue(by_id["cursor-auto"]["excluded"])
+        self.assertEqual(by_id["cursor-auto"]["score"], 0)
+        self.assertAlmostEqual(by_id["sub"]["score"], 80)
+        _, filtered = route.rank("implement", cat, pools, None, agents={"cursor"}, min_quota=0,
+                                  prefer=["cursor-auto"])
+        self.assertTrue(all(r["delegate"]["agent"] == "cursor" for r in filtered))
+        self.assertEqual(filtered[0]["delegate"]["id"], "cursor-auto")
+        self.assertFalse(filtered[0]["excluded"])
+
+    def test_null_coding_weight_is_renormalised(self):
+        cat = _shipped_catalog()
+        models = _aa_fixture_models()
+        pools = _half_quota_pools(cat)
+        _, original = route.rank("implement", cat, pools, models, prefer=[])
+        cat["tasks"]["implement"]["weights"]["coding"] = 0
+        _, without = route.rank("implement", cat, pools, models, prefer=[])
+        self.assertEqual([(r["delegate"]["id"], r["quality"]) for r in original],
+                         [(r["delegate"]["id"], r["quality"]) for r in without])
+
+
+class TestRatingsCli(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        loader = importlib.machinery.SourceFileLoader("ratings_delegate_cli", str(SCRIPTS / "delegate"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        cls.cli = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.cli)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        for patcher in (
+                mock.patch.object(ratings, "CACHE", self.root / "aa.json"),
+                mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": "",
+                                            "XDG_CONFIG_HOME": str(self.root / "config")}),
+                mock.patch.object(self.cli, "load_catalog", return_value=_shipped_catalog()),
+                mock.patch.object(self.cli.quota, "fetch", return_value={}),
+                mock.patch.object(self.cli.quota, "pools", return_value=_half_quota_pools(None)),
+                mock.patch("monitor.load_cost_groups", return_value={}),
+                mock.patch("monitor.annotate_route_rows")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def invoke(self, args):
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with mock.patch.object(sys, "argv", ["delegate"] + args), \
+             mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            try:
+                self.cli.main()
+            except SystemExit as exc:
+                # Mirror the interpreter's handling of sys.exit(message).
+                if isinstance(exc.code, str):
+                    print(exc.code, file=sys.stderr)
+                    code = 1
+                else:
+                    code = exc.code or 0
+        return code, out.getvalue(), err.getvalue()
+
+    def test_keyless_route_text_and_json_have_one_key_line_and_no_request(self):
+        for as_json in (False, True):
+            with self.subTest(json=as_json), \
+                 mock.patch.object(ratings, "_get", side_effect=AssertionError("network")) as fetch:
+                args = ["route", "implement", "--prefer", "codex-terra"] + (["--json"] if as_json else [])
+                code, out, err = self.invoke(args)
+            self.assertEqual(code, 0)
+            fetch.assert_not_called()
+            self.assertEqual(err.splitlines(), [ratings.missing_key_message()])
+            self.assertNotIn("ARTIFICIAL_ANALYSIS_API_KEY", out)
+            self.assertNotIn("Coding Index", out)
+            if as_json:
+                rows = json.loads(out)
+                self.assertEqual(rows[0]["id"], "codex-terra")
+                self.assertTrue(all(r["quality"] == 1.0 and "unrated" in r["source"] for r in rows))
+                self.assertTrue(any(r["score"] > 0 for r in rows))
+                self.assertEqual(set(rows[0]), {"id", "score", "quality", "quota_left", "pace", "excluded",
+                                               "metrics", "source", "price_unit", "rounds_left", "round_cost", "launch"})
+            else:
+                self.assertIn("pick: codex-terra", out)
+                self.assertIn("ranking by quota only", out)
+
+    def test_keyless_frontier_and_ratings_exit_cleanly_without_request_or_discovery(self):
+        import frontier
+        for args in (["route", "--frontier"], ["ratings"], ["ratings", "--json"]):
+            with self.subTest(args=args), \
+                 mock.patch.object(ratings, "_get", side_effect=AssertionError("network")) as fetch, \
+                 mock.patch.object(frontier, "cursor_models", side_effect=AssertionError("discovery")) as discover:
+                code, out, err = self.invoke(args)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(out, "")
+            self.assertEqual(err.splitlines(), [ratings.missing_key_message()])
+            self.assertIn(str(ratings.key_file()), err)
+            fetch.assert_not_called()
+            discover.assert_not_called()
+
+    def test_keyed_text_attribution_coding_note_and_pure_json(self):
+        fixture_dir = Path(__file__).resolve().parent / "fixtures"
+        pages = [p.read_text() for p in sorted(fixture_dir.glob("aa-free-page-*.json"))]
+        key = "invented-cli-secret"
+        with mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": key}), \
+             mock.patch.object(ratings, "_get", side_effect=pages) as fetch:
+            for args in (["ratings"], ["route", "implement"], ["ratings", "--json"],
+                         ["ratings", "--grep", "Invented Sol", "--json"],
+                         ["route", "implement", "--json"]):
+                with self.subTest(args=args):
+                    code, out, err = self.invoke(args)
+                    self.assertEqual(code, 0)
+                    self.assertEqual(err, "")
+                    self.assertNotIn(key, out + err + ratings.CACHE.read_text())
+                    if "--json" in args:
+                        parsed = json.loads(out)
+                        self.assertTrue(parsed)
+                        self.assertNotIn(ratings.ATTRIBUTION, out)
+                        self.assertNotIn("Coding Index", out)
+                        if args == ["ratings", "--json"]:
+                            self.assertEqual(set(parsed), {d["id"] for d in _shipped_catalog()["delegates"]})
+                        if "--grep" in args:
+                            self.assertEqual(set(parsed), {"gpt-6-1-sol-xhigh"})
+                    else:
+                        self.assertEqual(out.count(ratings.ATTRIBUTION), 1)
+                        self.assertNotIn("aa*", out)
+                        self.assertNotIn("coding = proxy", out)
+                        if args[0] == "route":
+                            notes = [line for line in out.splitlines() if "Coding Index" in line]
+                            self.assertEqual(len(notes), 1)
+                            self.assertIn("no longer publishes", notes[0])
+                            self.assertIn("weight is spread over the other metrics", notes[0])
+                        else:
+                            self.assertNotIn("proxy", out)
+                            for d in _shipped_catalog()["delegates"]:
+                                self.assertIn(d["id"], out)
+            self.assertEqual(fetch.call_count, 4)
 
 
 class TestPriceUnit(unittest.TestCase):

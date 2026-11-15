@@ -1,10 +1,14 @@
-"""Tests for ratings.from_page against a fake leaderboard payload."""
-import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
+"""Free API reading and caching against entirely invented model data."""
+import _env  # noqa: F401 — isolate HOME/XDG/PATH before scripts/hooks
+import io
 import json
+import os
 import sys
 import tempfile
 import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -14,83 +18,102 @@ sys.path.insert(0, str(SCRIPTS))
 import frontier  # noqa: E402
 import ratings  # noqa: E402
 
-
-def _page(models):
-    payload = "".join(json.dumps(m) for m in models)
-    return "<script>self.__next_f.push(" + json.dumps([1, payload]) + ")</script>"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def _model(i, scores=None, **flat):
-    m = {"slug": f"m{i}", "name": f"M{i}", "modelCreatorName": "X", "intelligenceIndex": 40 + i,
-         "price1mInputTokens": 1.0, "price1mOutputTokens": 4.0, "medianOutputTokensPerSecond": 100}
-    if scores is not None:
-        m["scores"] = scores
-    m.update(flat)
-    return m
+def _pages():
+    return [p.read_text(encoding="utf-8") for p in sorted(FIXTURES.glob("aa-free-page-*.json"))]
 
 
-class FromPageTest(unittest.TestCase):
-    def parse(self, models):
-        with mock.patch.object(ratings, "_get", return_value=_page(models)):
-            return ratings.from_page()
-
-    def test_nested_scores_give_coding_proxy(self):
-        models = self.parse([_model(i, {"terminalbench-4-0": 0.3, "scicode": 0.5}) for i in range(20)])
-        self.assertAlmostEqual(models["m0"]["coding"], 40.0)
-        self.assertTrue(models["m0"]["coding_is_proxy"])
-        self.assertEqual(models["m0"]["price_blended"], 1.75)
-
-    def test_old_flat_keys_still_read(self):
-        models = self.parse([_model(i, terminalBench40=0.2, scicode=0.4) for i in range(20)])
-        self.assertAlmostEqual(models["m3"]["coding"], 30.0)
-
-    def test_cost_per_task_from_verified_page_field_only(self):
-        models = self.parse([_model(i, scicode=0.4, intelligenceIndexCostPerTask=0.123) for i in range(20)])
-        self.assertEqual(models["m0"]["cost_per_task"], 0.123)
-        missing = self.parse([_model(i, scicode=0.4) for i in range(20)])
-        self.assertIsNone(missing["m0"]["cost_per_task"])
-
-    def test_api_never_guesses_cost_per_task(self):
-        data = {"data": [{"slug": "m", "evaluations": {}, "pricing": {"intelligenceIndexCostPerTask": 7},
-                          "intelligenceIndexCostPerTask": 9}]}
-        with mock.patch.object(ratings, "_get", return_value=json.dumps(data)):
-            self.assertIsNone(ratings.from_api("fake")["m"]["cost_per_task"])
-
-    def test_no_coding_scores_anywhere_raises(self):
-        with self.assertRaisesRegex(RuntimeError, "Terminal-Bench"):
-            self.parse([_model(i, {"omniscience-accuracy": 0.5}) for i in range(20)])
+def _page(rows=(), more=False):
+    return json.dumps({"tier": "free", "pagination": {"has_more": more}, "data": list(rows)})
 
 
-class CurrentPageFixtureTest(unittest.TestCase):
-    """24 of the 282 model objects on the live page of 2026-11-08, between that payload
-    chunk's own head and tail, plus GPT-6.1 Terra (High) from the 2026-11-09 page, first in
-    the list. Its speed key is `outputSpeed`; the fake pages above keep the older
-    `medianOutputTokensPerSecond`."""
-
+class FreeApiTest(unittest.TestCase):
     def models(self):
-        page = (Path(__file__).resolve().parent / "fixtures" / "aa-leaderboard-2026-11-08.html")
-        with mock.patch.object(ratings, "_get", return_value=page.read_text(encoding="utf-8")):
-            return ratings.from_page()
+        with mock.patch.object(ratings, "_get", side_effect=_pages()):
+            return ratings.from_api("invented-key")
 
-    def test_current_layout_parses(self):
-        models = self.models()
-        self.assertEqual(len(models), 23)
-        for slug in ("jt-35b-flash", "nova-2-0-omni-reasoning-medium"):
-            self.assertNotIn(slug, models)  # no speed key: skipped, as the old anchor did
+    def test_pagination_and_documented_fields(self):
+        pages = _pages()
+        # has_more, rather than total_pages, controls when to stop.
+        first = json.loads(pages[0])
+        first["pagination"]["total_pages"] = 1
+        pages[0] = json.dumps(first)
+        with mock.patch.object(ratings.urllib.request, "urlopen",
+                               side_effect=[io.BytesIO(p.encode()) for p in pages]) as fetch:
+            models = ratings.from_api("invented-key")
+        self.assertEqual(fetch.call_count, 4)
+        for i, call in enumerate(fetch.call_args_list, 1):
+            request = call.args[0]
+            self.assertEqual(request.full_url, f"{ratings.API_URL}?page={i}")
+            self.assertEqual(request.get_header("X-api-key"), "invented-key")
+            self.assertEqual(request.get_header("User-agent"), ratings.UA)
+            self.assertTrue(ratings.UA.startswith("claude-delegate/"))
+            self.assertNotIn("Mozilla", ratings.UA)
+        self.assertEqual(len(models), 8)
         sol = models["gpt-6-1-sol-xhigh"]
-        self.assertEqual((sol["name"], sol["creator"]), ("GPT-6.1 Sol (Xhigh)", "OpenAI"))
-        self.assertAlmostEqual(sol["tps"], 50.0, places=2)
-        self.assertAlmostEqual(sol["intelligence"], 50.0, places=2)
-        self.assertAlmostEqual(sol["coding"], 50.0, places=2)
-        self.assertTrue(sol["coding_is_proxy"])
-        self.assertEqual(sol["price_blended"], 4.0)
-        self.assertAlmostEqual(sol["cost_per_task"], 0.5, places=3)
-        self.assertFalse(sol["deprecated"])
+        self.assertEqual(sol, {
+            "name": "Invented Sol (Xhigh)", "creator": "Synthetic Lab",
+            "intelligence": 11, "coding": None, "coding_is_proxy": False,
+            "tps": 1011.125, "price_in": 2, "price_out": 8,
+            "price_blended": 3.5, "cost_per_task": 12.34567, "deprecated": False,
+        })
+        self.assertIsNone(models["invented-comet"]["intelligence"])
+        self.assertIsNone(models["invented-comet"]["cost_per_task"])
+        self.assertTrue(all(m["coding"] is None and m["coding_is_proxy"] is False
+                            for m in models.values()))
+
+    def test_page_cap_rejects_partial_results(self):
+        with mock.patch.object(ratings, "_get", return_value=_page(more=True)) as fetch:
+            with self.assertRaisesRegex(ratings.RatingsError, "page limit"):
+                ratings.from_api("invented-key")
+        self.assertEqual(fetch.call_count, ratings.MAX_PAGES)
+        self.assertLessEqual(fetch.call_count, 10)
+
+    def test_key_does_not_follow_a_redirect(self):
+        # urllib copies ordinary headers to a redirect's target, whatever its host.
+        with mock.patch.object(ratings.urllib.request, "urlopen", return_value=io.BytesIO(b"{}")) as fetch:
+            ratings._get(f"{ratings.API_URL}?page=1", {"x-api-key": "invented-key"})
+        request = fetch.call_args.args[0]
+        moved = urllib.request.HTTPRedirectHandler().redirect_request(
+            request, io.BytesIO(), 302, "Found", {}, "https://elsewhere.invalid/")
+        self.assertEqual(request.get_header("X-api-key"), "invented-key")
+        self.assertIsNone(moved.get_header("X-api-key"))
+        self.assertEqual(moved.get_header("User-agent"), ratings.UA)
+
+    def test_null_optional_fields_and_no_guessed_fields(self):
+        row = {"slug": "invented-null", "evaluations": {
+            "artificial_analysis_coding_index": 777}, "pricing": None, "performance": None,
+            "artificial_analysis_intelligence_index_cost": {"cost_per_task": None},
+            "median_output_tokens_per_second": 999, "intelligenceIndexCostPerTask": 999,
+            "deprecated": True}
+        with mock.patch.object(ratings, "_get", return_value=_page([row])):
+            model = ratings.from_api("invented-key")[row["slug"]]
+        for key in ("intelligence", "coding", "tps", "price_in", "price_out", "price_blended", "cost_per_task"):
+            self.assertIsNone(model[key])
+        self.assertFalse(model["coding_is_proxy"])
+        self.assertFalse(model["deprecated"])
+
+    def test_speed_falls_back_to_performance_v3(self):
+        # AA nulls `performance` on 2026-12-10; `performance_v3` reports a mean instead.
+        rows = [{"slug": "invented-old", "performance": {"median_output_tokens_per_second": 48.0},
+                 "performance_v3": {"mean_output_tokens_per_second": 44.0}},
+                {"slug": "invented-v3", "performance": None,
+                 "performance_v3": {"mean_output_tokens_per_second": 44.0}}]
+        with mock.patch.object(ratings, "_get", return_value=_page(rows)):
+            models = ratings.from_api("invented-key")
+        self.assertEqual(models["invented-old"]["tps"], 48.0)
+        self.assertEqual(models["invented-v3"]["tps"], 44.0)
+
+    def test_invalid_pagination_fails(self):
+        for data in ({"data": []}, {"pagination": {"has_more": "true"}, "data": []}):
+            with self.subTest(data=data), mock.patch.object(ratings, "_get", return_value=json.dumps(data)):
+                with self.assertRaises((ratings.RatingsError, KeyError)):
+                    ratings.from_api("invented-key")
 
     def test_fixture_rates_every_shipped_delegate(self):
-        """A slug AA dropped (gpt-5-6-terra by 2026-11-08) leaves its delegate unrated, and
-        the router then scores it 0. A Codex or named Cursor delegate's model and effort must
-        also spell its own slug, so an effort change can't keep another effort's rating."""
+        """Invented ratings cover each shipped slug and its own model/effort."""
         models = self.models()
         index, warnings = frontier.aa_index(models)
         self.assertEqual(warnings, [])
@@ -98,9 +121,7 @@ class CurrentPageFixtureTest(unittest.TestCase):
         for d in shipped:
             with self.subTest(delegate=d["id"]):
                 self.assertIn(d["aa"], models)
-                cpt = models[d["aa"]].get("cost_per_task")
-                self.assertIsNotNone(cpt)
-                self.assertGreater(cpt, 0)
+                self.assertGreater(models[d["aa"]]["cost_per_task"], 0)
                 if d["agent"] in ("codex", "cursor") and not d.get("aa_proxy"):
                     self.assertEqual(frontier.match_aa(d["agent"], d["model"], d.get("effort"),
                                                        models, index, {}), d["aa"])
@@ -110,95 +131,145 @@ class CacheTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.cache = Path(tmp.name) / "aa.json"
-        patcher = mock.patch.object(ratings, "CACHE", self.cache)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        env = mock.patch.dict("os.environ", {"ARTIFICIAL_ANALYSIS_API_KEY": ""})
-        env.start()
-        self.addCleanup(env.stop)
+        self.cache = Path(tmp.name) / "cache" / "aa.json"
+        self.config = Path(tmp.name) / "config"
+        self.keyfile = self.config / "claude-orchestrator" / "aa-api-key"
+        for patcher in (mock.patch.object(ratings, "CACHE", self.cache),
+                        mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": "",
+                                                      "XDG_CONFIG_HOME": str(self.config)})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-    def test_schema_1_or_missing_refreshes_even_when_recent(self):
-        for schema in (None, 1):
-            old = {"fetched_at": time.time(), "source": "old", "models": {"old": {}}}
-            if schema:
-                old["schema"] = schema
-            self.cache.write_text(json.dumps(old))
-            with mock.patch.object(ratings, "from_page", return_value={"new": {"cost_per_task": 1}}) as fetch:
-                env = ratings.load()
-            fetch.assert_called_once()
-            self.assertEqual(env["schema"], 2)
-            self.assertIn("new", env["models"])
-            self.assertEqual(json.loads(self.cache.read_text())["schema"], 2)
-
-    def test_old_cache_remains_fallback_when_refresh_fails(self):
-        old = {"fetched_at": time.time(), "source": "old", "models": {"old": {}}}
-        for schema in (None, 1):
-            if schema:
-                old["schema"] = schema
-            self.cache.write_text(json.dumps(old))
-            logs = []
-            with mock.patch.object(ratings, "from_page", side_effect=RuntimeError("offline")):
-                self.assertEqual(ratings.load(log=logs.append), old)
-            self.assertIn("using cache", logs[0])
-            self.assertEqual(json.loads(self.cache.read_text()), old)
-
-    def test_recent_schema_2_cache_does_not_refresh(self):
-        env = {"schema": 2, "fetched_at": time.time(), "source": "fixture", "models": {}}
+    def cache_env(self, schema=ratings.SCHEMA, age=0):
+        env = {"schema": schema, "fetched_at": time.time() - age,
+               "source": "api" if schema == ratings.SCHEMA else "leaderboard-page",
+               "models": {"invented-cache": {"intelligence": 17}}}
+        self.cache.parent.mkdir(parents=True, exist_ok=True)
         self.cache.write_text(json.dumps(env))
-        with mock.patch.object(ratings, "from_page", side_effect=AssertionError("network")):
-            self.assertEqual(ratings.load(), env)
+        return env
 
-    def test_api_refresh_merges_page_task_costs_by_exact_slug_only(self):
-        api = {"data": [{"slug": slug, "name": "API name", "evaluations": {
-            "artificial_analysis_intelligence_index": 50,
-            "artificial_analysis_coding_index": 60}} for slug in ("m0", "m-1", "m2", "api-only")]}
-        page = _page([_model(i, scicode=0.4, intelligenceIndexCostPerTask=0 if i == 2 else 0.123)
-                      for i in range(20)])
+    def write_key(self, key="file-invented-key"):
+        self.keyfile.parent.mkdir(parents=True, exist_ok=True)
+        self.keyfile.write_text(f"  {key}\n")
+        self.keyfile.chmod(0o600)
 
-        def get(url, *args):
-            return {ratings.API_URL: json.dumps(api), ratings.PAGE_URL: page}[url]
+    def test_key_from_env_file_and_env_wins(self):
+        for env_key, file_key, expected in (("env-invented-key", None, "env-invented-key"),
+                                            ("", "file-invented-key", "file-invented-key"),
+                                            ("env-invented-key", "file-invented-key", "env-invented-key")):
+            with self.subTest(env=env_key, file=file_key):
+                if file_key:
+                    self.write_key(file_key)
+                with mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": env_key}), \
+                     mock.patch.object(ratings, "_get", return_value=_page()) as fetch:
+                    env = ratings.load(refresh=True)
+                self.assertEqual(fetch.call_args.args[1], {"x-api-key": expected})
+                self.assertEqual(env["schema"], ratings.SCHEMA)
+                self.assertEqual(set(env), {"schema", "fetched_at", "source", "models"})
+                self.assertNotIn(expected, self.cache.read_text())
 
+    def test_default_key_path(self):
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}):
+            self.assertEqual(ratings.key_file(), Path.home() / ".config" / "claude-orchestrator" / "aa-api-key")
+
+    def test_unreadable_key_file_is_named_and_offline(self):
+        self.keyfile.mkdir(parents=True)
+        with mock.patch.object(ratings, "_get", side_effect=AssertionError("network")) as fetch:
+            with self.assertRaisesRegex(ratings.RatingsError, "Cannot read AA API key file"):
+                ratings.load()
+        fetch.assert_not_called()
+
+    def test_key_in_no_output_log_error_or_cache(self):
+        key = "do-not-echo-this-invented-secret"
+        with mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": key}), \
+             mock.patch("sys.stdout", io.StringIO()) as out, \
+             mock.patch("sys.stderr", io.StringIO()) as err:
+            with mock.patch.object(ratings, "_get", side_effect=_pages()):
+                ratings.load()
+            self.assertNotIn(key, self.cache.read_text())
+            logs = []
+            for failure in (RuntimeError(key), urllib.error.HTTPError(ratings.API_URL, 429, key, {}, None)):
+                with mock.patch.object(ratings, "_get", side_effect=failure):
+                    ratings.load(refresh=True, log=logs.append)
+                    self.cache.unlink()
+                    with self.assertRaises(ratings.RatingsError) as raised:
+                        ratings.load(log=logs.append)
+                self.assertNotIn(key, str(raised.exception))
+                self.cache_env()
+            self.assertNotIn(key, "\n".join(logs) + out.getvalue() + err.getvalue() + self.cache.read_text())
+
+    def test_old_schemas_are_neither_hits_nor_fallbacks(self):
+        for schema in (None, 1, 2):
+            with self.subTest(schema=schema):
+                old = self.cache_env(schema=schema)
+                with mock.patch.object(ratings, "_get", side_effect=AssertionError("network")) as fetch:
+                    with self.assertRaisesRegex(ratings.MissingAPIKey, "ARTIFICIAL_ANALYSIS_API_KEY"):
+                        ratings.load()
+                    fetch.assert_not_called()
+                with mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": "invented-key"}), \
+                     mock.patch.object(ratings, "_get", side_effect=RuntimeError("offline")):
+                    with self.assertRaises(ratings.RatingsError):
+                        ratings.load()
+                self.assertEqual(json.loads(self.cache.read_text()), old)
+                with mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": "invented-key"}), \
+                     mock.patch.object(ratings, "_get", return_value=_page()) as fetch:
+                    env = ratings.load()
+                fetch.assert_called_once()
+                self.assertEqual(env["schema"], ratings.SCHEMA)
+                self.assertEqual(env["models"], {})
+
+    def test_fresh_cache_hit_with_or_without_key(self):
+        env = self.cache_env()
+        for key in ("", "invented-key"):
+            with mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": key}), \
+                 mock.patch.object(ratings, "_get", side_effect=AssertionError("network")) as fetch:
+                self.assertEqual(ratings.load(), env)
+                fetch.assert_not_called()
+
+    def test_stale_keyless_cache_warns_with_date_and_makes_no_request(self):
+        env = self.cache_env(age=ratings.TTL_S + 1)
         logs = []
-        with mock.patch.dict("os.environ", {"ARTIFICIAL_ANALYSIS_API_KEY": "fake"}), \
-             mock.patch.object(ratings, "_get", side_effect=get) as fetch:
-            env = ratings.load(refresh=True, log=logs.append)
-        self.assertEqual(fetch.call_count, 2)
-        self.assertEqual(env["source"], "api")
-        self.assertEqual(set(env["models"]), {"m0", "m-1", "m2", "api-only"})
-        self.assertEqual(env["models"]["m0"]["cost_per_task"], 0.123)
-        self.assertEqual(env["models"]["m2"]["cost_per_task"], 0)
-        self.assertIsNone(env["models"]["m-1"]["cost_per_task"])
-        self.assertIsNone(env["models"]["api-only"]["cost_per_task"])
-        self.assertEqual(env["models"]["m0"]["name"], "API name")
-        self.assertEqual(env["models"]["m0"]["intelligence"], 50)
-        self.assertEqual(env["models"]["m0"]["coding"], 60)
-        self.assertFalse(env["models"]["m0"]["coding_is_proxy"])
-        self.assertEqual(logs, [])
-        self.assertEqual(json.loads(self.cache.read_text()), env)
-
-    def test_api_refresh_keeps_api_models_and_warns_once_if_page_fails(self):
-        self.cache.write_text(json.dumps({"schema": 2, "fetched_at": 0, "source": "old",
-                                          "models": {"old": {"cost_per_task": 1}}}))
-        api = {"data": [{"slug": "m0", "name": "API model"}]}
-
-        def get(url, *args):
-            if url == ratings.PAGE_URL:
-                raise RuntimeError("page offline")
-            self.assertEqual(url, ratings.API_URL)
-            return json.dumps(api)
-
-        logs = []
-        with mock.patch.dict("os.environ", {"ARTIFICIAL_ANALYSIS_API_KEY": "fake"}), \
-             mock.patch.object(ratings, "_get", side_effect=get):
-            env = ratings.load(refresh=True, log=logs.append)
-        self.assertEqual(env["source"], "api")
-        self.assertEqual(set(env["models"]), {"m0"})
-        self.assertIsNone(env["models"]["m0"]["cost_per_task"])
+        with mock.patch.object(ratings, "_get", side_effect=AssertionError("network")) as fetch:
+            self.assertEqual(ratings.load(log=logs.append), env)
+        fetch.assert_not_called()
         self.assertEqual(len(logs), 1)
-        self.assertIn("warning:", logs[0])
-        self.assertIn("page offline", logs[0])
-        self.assertIn("keeping API models", logs[0])
+        self.assertIn(time.strftime("%Y-%m-%d %H:%M", time.localtime(env["fetched_at"])), logs[0])
+        self.assertIn("using cache", logs[0])
+
+    def test_429_and_other_failures_use_only_new_schema_cache(self):
+        for failure in (urllib.error.HTTPError(ratings.API_URL, 429, "limited", {}, None),
+                        urllib.error.HTTPError(ratings.API_URL, 403, "denied", {}, None),
+                        OSError("offline"), ValueError("bad JSON")):
+            for age in (0, ratings.TTL_S + 1):
+                with self.subTest(failure=type(failure).__name__, age=age):
+                    old = self.cache_env(age=age)
+                    logs = []
+                    with mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": "invented-key"}), \
+                         mock.patch.object(ratings, "_get", side_effect=failure) as fetch:
+                        self.assertEqual(ratings.load(refresh=True, log=logs.append), old)
+                    fetch.assert_called_once()
+                    self.assertEqual(json.loads(self.cache.read_text()), old)
+                    self.assertEqual(len(logs), 1)
+                    self.assertIn("using cache from", logs[0])
+                    self.assertIn(time.strftime("%Y-%m-%d %H:%M", time.localtime(old["fetched_at"])), logs[0])
+
+    def test_missing_key_without_cache_is_actionable_and_offline(self):
+        with mock.patch.object(ratings, "_get", side_effect=AssertionError("network")) as fetch:
+            with self.assertRaises(ratings.MissingAPIKey) as exc:
+                ratings.load()
+        self.assertEqual(str(exc.exception), ratings.missing_key_message())
+        self.assertIn(str(self.keyfile), str(exc.exception))
+        fetch.assert_not_called()
+        self.assertFalse(self.cache.exists())
+
+    def test_successful_refresh_replaces_cache_and_second_load_hits(self):
+        self.cache_env(age=ratings.TTL_S + 1)
+        with mock.patch.dict(os.environ, {"ARTIFICIAL_ANALYSIS_API_KEY": "invented-key"}), \
+             mock.patch.object(ratings, "_get", side_effect=_pages()) as fetch:
+            env = ratings.load()
+            self.assertEqual(ratings.load(), env)
+        self.assertEqual(fetch.call_count, 4)
+        self.assertEqual(len(env["models"]), 8)
         self.assertEqual(json.loads(self.cache.read_text()), env)
 
 

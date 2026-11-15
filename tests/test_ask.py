@@ -295,13 +295,13 @@ class TestAsk(unittest.TestCase):
         models = {
             "gpt-6-1-sol-medium": rating("GPT-6.1 Sol (Medium)", 46.6, 0.21),
             "gpt-6-1-sol-high": rating("GPT-6.1 Sol (High)", 50.6, 0.33),
-            "deepseek-v4-1-flash-1017": rating("DeepSeek V4.1 Flash 1017 (Max)", 44.2, 0.27, "DeepSeek"),
+            "nimbus-v2-1-flash-0917": rating("Nimbus V2.1 Flash 0917 (Max)", 44.2, 0.27, "Nimbus"),
             "better": rating("Better (High)", 49, 0.55),
             "claude": rating("Claude (High)", 90, 0.1, "Anthropic"),
             "grok": rating("Grok (High)", 91, 0.1, "xAI"),
         }
         return frontier.build_report(catalog, {"source": "fake", "fetched_at": 1, "models": models},
-                                     ["auto", "deepseek-v41-flash-1017-max", "better-high", "claude-high", "grok-high"],
+                                     ["auto", "nimbus-v21-flash-0917-max", "better-high", "claude-high", "grok-high"],
                                      {}, default_codex)
 
     def _run_fallback_both(self, **kw):
@@ -339,12 +339,13 @@ class TestAsk(unittest.TestCase):
         self.quota_pools.return_value = {"codex-5h": {"left_pct": 3, "age_min": 0}, "codex-7d": {"left_pct": 80, "age_min": 0}}
         out, cursor, codex, load = self._run_fallback_both()
         codex.assert_not_called()
-        self.assertEqual(sorted(c.args[1] for c in cursor.call_args_list), ["auto", "deepseek-v41-flash-1017-max"])
+        self.assertEqual(sorted(c.args[1] for c in cursor.call_args_list), ["auto", "nimbus-v21-flash-0917-max"])
         line = out.splitlines()[0]
-        for bit in ("codex-5h 3% left", "10% threshold", "deepseek-v41-flash-1017-max", "AA 44.2",
+        for bit in ("codex-5h 3% left", "10% threshold", "nimbus-v21-flash-0917-max", "AA 44.2",
                     "$0.270/task", "cap $0.420/task", "2x gpt-6.1-sol@medium", "$0.210/task", "bills cursor-premium?"):
             self.assertIn(bit, line)
-        self.assertIn("## fallback (cursor deepseek-v41-flash-1017-max)", out)
+        self.assertIn("ask: Source: Artificial Analysis (https://artificialanalysis.ai/).", out)
+        self.assertIn("## fallback (cursor nimbus-v21-flash-0917-max)", out)
         self.assertIn("Pick (fallback): A", out)
         self.assertIn("## cursor", out)
         self.assertIn("Pick (cursor): A", out)

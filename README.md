@@ -29,7 +29,7 @@ The analysis behind these levers is in [docs/cost-analysis.md](docs/cost-analysi
 
 | part | what it does |
 |---|---|
-| [`delegate`](skills/delegate/SKILL.md) skill and CLI | Hands work to **Codex CLI** or **Cursor's headless agent** (`cursor-agent --model auto`). Shows live quota per pool via `codex app-server`, `claude -p /usage` and (when opted in) Cursor's interactive `/usage` screen, and ranks models per task type with [Artificial Analysis](https://artificialanalysis.ai/) ratings. Each delegate runs in its own git worktree with a brief, a log and an optional check command. The other vendor reviews the result read-only, and fix rounds resume the same agent session. Claude reviews the diff and applies it uncommitted. |
+| [`delegate`](skills/delegate/SKILL.md) skill and CLI | Hands work to **Codex CLI** or **Cursor's headless agent** (`cursor-agent --model auto`). Shows live quota per pool via `codex app-server`, `claude -p /usage` and (when opted in) Cursor's interactive `/usage` screen, and ranks models per task type with [Artificial Analysis](https://artificialanalysis.ai/) free-API ratings when a key or usable cache is available, otherwise by quota only. Each delegate runs in its own git worktree with a brief, a log and an optional check command. The other vendor reviews the result read-only, and fix rounds resume the same agent session. Claude reviews the diff and applies it uncommitted. |
 | [`/field-report`](skills/field-report/SKILL.md) skill | Writes a field report on the current session from any project's chat: `delegate report` fills in the numbers, then Claude writes the narrative. |
 | [`hooks/context-guard.py`](hooks/context-guard.py) | Asks for a handoff before a new work item once context passes about 120k tokens. Holds the first prompt after an hour idle. In orchestrator sessions, nudges once toward `delegate` when spare pools remain unused. |
 | [`hooks/secret-guard.py`](hooks/secret-guard.py) | PreToolUse (Bash) and optional git pre-commit/pre-push: catches API tokens, private keys, home paths, key/env files, private names and added working files (`HANDOFF.md`, direct `feedback/*.md` or `*.jsonl`); also denies a sticking `cd`/`pushd` into a project subdirectory and notices a drifted shell `cwd`. Private literals go in `${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/private-names.txt`, one per line (blanks and `#` comments ignored); output masks names. Per-repo opt-outs: `git config secretGuard.homePaths false`, `git config secretGuard.privateNames false`, `git config secretGuard.workingFiles false`. |
@@ -48,7 +48,7 @@ gh repo clone egorpol/claude-orchestrator
 cd claude-orchestrator
 ./install.sh --check        # what is missing; deny-list path/count and warning if inside a git work tree
 ./install.sh                # symlink skills into ~/.claude/skills and /next into ~/.claude/commands (add --bin for `delegate` on PATH)
-./install.sh --hooks        # optional: register hooks/context-guard.py and hooks/secret-guard.py
+./install.sh --hooks        # optional: register hooks/context-guard.py and hooks/secret-guard.py (missing scripts exit 0)
 ./install.sh --attention    # optional: mark the waiting Cursor window on KDE Plasma (hooks/attention.py)
 ./install.sh --git-hook=.   # optional: link secret-guard.py as this repo's pre-commit and pre-push hooks
 ./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
@@ -58,7 +58,9 @@ cd claude-orchestrator
 
 `--experiment` is for measuring whether delegation pays off. Each new session draws `orchestrator` (50% by default), `claude-only` or `vanilla` (25% each; delegation blocked), gets that mode's rules from the hook and logs one summary row to `~/.cache/claude-delegate/sessions.jsonl` (local only). The hook replaces the `--rules` import, so `--experiment` removes it. `delegate rate` has Cursor Auto split each finished session into items from your prompts, HANDOFF.md and commits, without seeing the mode, and `delegate cost --by-mode` compares the arms: cost per finished item, by size and type. Weights go in `~/.config/claude-orchestrator/session-mode.json`; to stop, delete the `session-mode.py` entries from `~/.claude/settings.json` and run `--rules` again.
 
-`install.sh` is idempotent. It never deletes an existing skill directory or command file: with `--force`, the old one moves to `~/.claude/skill-backups/`. Use `--copy` where a symlink into the repo is not wanted. A copied install doesn't know where the checkout is, so `/field-report` then needs `CLAUDE_ORCHESTRATOR_FEEDBACK` set to a folder.
+`install.sh` is idempotent, including `--copy`: an unchanged copy stays put, and an unedited copy refreshes after a `git pull` without a backup. User-edited or unrecorded skill directories and command files need `--force`, which moves the old copy to `~/.claude/skill-backups/` before replacing it. A `--copy` install from before the copy manifest needs `--force` once. Use `--copy` where a symlink into the repo is not wanted. A copied install doesn't know where the checkout is, so `/field-report` then needs `CLAUDE_ORCHESTRATOR_FEEDBACK` set to a folder.
+
+`./install.sh --uninstall` removes this product's registered hooks, rules imports, recorded skill/command symlinks, `delegate` PATH link and quota/rate timer units. It moves recorded skill/command copies, including user edits, to `~/.claude/skill-backups/`; unrelated settings, hooks, imports and files stay, as do local logs, caches and configuration. Add `--git-hook=DIR` to remove this product's pre-commit and pre-push links in that repo; plain `--uninstall` keeps them. Repeating `--uninstall` changes nothing.
 
 The secret guard asks in Claude Code and stops commits/pushes in the git hooks. An approved ask still reaches an installed git hook; rerunning with `--no-verify` is scanned and asked again. A missing deny list turns that rule off; an unreadable or invalid UTF-8 list stops the scan. Keep the list outside git work trees. Command-line `-c` overrides cannot disable the per-repo rules for the scanned command.
 
@@ -67,7 +69,7 @@ Prerequisites (`--check` prints install hints):
 - `codex`, logged in with `codex login`
 - `cursor-agent`: `curl https://cursor.com/install -fsS | bash`, then `cursor-agent login`. The login needs a browser approval.
 - optional: the [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) (needs Node 18.18+), which adds `/codex:review` and `/codex:adversarial-review` for the current checkout. Install it with `claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex`.
-- optional: `ARTIFICIAL_ANALYSIS_API_KEY` (free) for AA's official coding index. Without it, ratings are parsed from the public leaderboard page.
+- Ratings need a free AA key in `ARTIFICIAL_ANALYSIS_API_KEY`, else `~/.config/claude-orchestrator/aa-api-key` (`XDG_CONFIG_HOME` respected; mode `0600` is not enforced). Without a key or usable ratings cache, `route TASK` ranks by quota only and prints one stderr line naming both key locations; `ratings` and `route --frontier` stop with that line and exit 1. See [ratings and tuning](skills/delegate/reference/quota.md#tuning) for cache, API limits and output notes.
 
 ### Cursor quota (opt-in)
 
@@ -107,7 +109,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota. E
 ## Layout
 
 ```text
-install.sh                         link/copy skills and commands, check prerequisites; --hooks, --attention, --git-hook=DIR, --rules, --experiment, --timer, --bin
+install.sh                         link/copy skills and commands, check prerequisites; --hooks, --attention, --git-hook=DIR, --rules, --experiment, --timer, --bin, --uninstall
 commands/next.md                   /next: continue from HANDOFF.md after /clear
 hooks/attention.py                 Stop/PreToolUse/Notification: mark the waiting Cursor window (KDE Plasma)
 hooks/context-guard.py             UserPromptSubmit: handoff nudge past ~120k; holds a prompt once after 1h idle; mid-session `delegate` nudge when spare pools sit unused

@@ -1,0 +1,61 @@
+{
+  "_synthetic": "All names and figures are invented test data; shipped slugs only test catalog matching.",
+  "tier": "free",
+  "intelligence_index_version": 5,
+  "pagination": {
+    "page": 1,
+    "page_size": 2,
+    "total_pages": 4,
+    "has_more": true
+  },
+  "data": [
+    {
+      "slug": "gpt-6-1-sol-xhigh",
+      "name": "Invented Sol (Xhigh)",
+      "model_creator": {
+        "name": "Synthetic Lab"
+      },
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 11,
+        "artificial_analysis_coding_index": null,
+        "artificial_analysis_agentic_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 8
+      },
+      "performance": {
+        "median_output_tokens_per_second": 1011.125
+      },
+      "artificial_analysis_intelligence_index_cost": {
+        "cost_per_task": {
+          "total_cost": 12.34567
+        }
+      }
+    },
+    {
+      "slug": "gpt-6-astra-xhigh",
+      "name": "Invented Astra (Xhigh)",
+      "model_creator": {
+        "name": "Synthetic Lab"
+      },
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 18,
+        "artificial_analysis_coding_index": null,
+        "artificial_analysis_agentic_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 3,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 1111.125
+      },
+      "artificial_analysis_intelligence_index_cost": {
+        "cost_per_task": {
+          "total_cost": 22.34567
+        }
+      }
+    }
+  ]
+}

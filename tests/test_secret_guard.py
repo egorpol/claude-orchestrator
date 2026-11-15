@@ -1493,6 +1493,342 @@ class SecretGuardRound3Tests(_SecretGuardHarness, unittest.TestCase):
         self.assertIn("preamble", str(cm.exception).lower())
 
 
+class SecretGuardChunkedScanTests(_SecretGuardHarness, unittest.TestCase):
+    """Bounded binary sniff and chunked untracked-file scans (pubfix memory fixes)."""
+
+    def _sg(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sg", HOOK)
+        sg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sg)
+        return sg
+
+    def test_binary_sniff_reads_at_most_sample_bytes(self):
+        import io
+        sg = self._sg()
+        # NUL sits past the sample window; a whole-file read would see it and return True.
+        payload = b"text" + (b"x" * 100_000) + b"\0" + (b"y" * 1000)
+
+        class FakePath:
+            def __init__(self):
+                self.requested = None
+                self.got = None
+
+            def open(self, mode="rb"):
+                buf = io.BytesIO(payload)
+                orig = buf.read
+
+                def read(n=-1):
+                    self.requested = n
+                    data = orig(n)
+                    self.got = len(data)
+                    return data
+
+                buf.read = read
+                return buf
+
+        fake = FakePath()
+        self.assertFalse(sg._is_probably_binary(fake, sample=8192))
+        self.assertEqual(fake.requested, 8192)
+        self.assertEqual(fake.got, 8192)
+
+    def test_chunked_scan_token_on_last_line_line_number(self):
+        sg = self._sg()
+        tok = _fake_token("ghp_", 36)
+        # Several short lines; token alone on the final line. Overlap >= token length.
+        lines = ["noise"] * 5 + [tok]
+        path = self.tmp / "multi.txt"
+        path.write_text("\n".join(lines) + "\n")
+        g = sg.Guard(budget_s=sg._UNLIMITED)
+        orig_size, orig_overlap = sg.SCAN_CHUNK_SIZE, sg.SCAN_CHUNK_OVERLAP
+        try:
+            sg.SCAN_CHUNK_SIZE = 16
+            sg.SCAN_CHUNK_OVERLAP = 48
+            g.scan_file_text(path, "multi.txt", "(untracked)")
+        finally:
+            sg.SCAN_CHUNK_SIZE, sg.SCAN_CHUNK_OVERLAP = orig_size, orig_overlap
+        hits = [f for f in g.findings if f["label"] == "GitHub token"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["line"], 6)
+
+    def _whole_and_chunked(self, sg, path, shown, size, overlap, home_roots=()):
+        whole_text = path.read_text(encoding="utf-8", errors="replace")
+        ref = sg.Guard(budget_s=sg._UNLIMITED)
+        ref._home_roots = list(home_roots)
+        ref.scan_text(whole_text, shown, "(untracked)")
+        orig = (sg.SCAN_CHUNK_SIZE, sg.SCAN_CHUNK_OVERLAP)
+        try:
+            sg.SCAN_CHUNK_SIZE, sg.SCAN_CHUNK_OVERLAP = size, overlap
+            got = sg.Guard(budget_s=sg._UNLIMITED)
+            got._home_roots = list(home_roots)
+            got.scan_file_text(path, shown, "(untracked)")
+        finally:
+            sg.SCAN_CHUNK_SIZE, sg.SCAN_CHUNK_OVERLAP = orig
+        key = lambda fs: [(f["label"], f["path"], f["line"], f["commit"], f["value"])
+                          for f in fs]
+        return key(ref.findings), key(got.findings), whole_text
+
+    def test_chunked_scan_token_across_mid_line_split(self):
+        sg = self._sg()
+        tok = _fake_token("ghp_", 36)
+        # One long line forced through the long-line window path; cut inside the token.
+        path = self.tmp / "longline.txt"
+        prefix = "x" * 100
+        path.write_text(prefix + tok + "\n")
+        size, overlap = 60, 48
+        line_len = len(prefix) + len(tok)
+        self.assertGreater(line_len, size + overlap)  # long-line window path
+        self.assertLess(size, len(prefix) + len(tok))
+        self.assertGreater(size + overlap, len(prefix))  # window reaches the token
+        want, got, _ = self._whole_and_chunked(sg, path, "longline.txt", size, overlap)
+        want_ll = {(lab, line) for lab, _p, line, _c, _v in want}
+        got_ll = {(lab, line) for lab, _p, line, _c, _v in got}
+        self.assertTrue(want_ll <= got_ll, f"want {want_ll} got {got_ll}")
+
+    def test_chunked_scan_no_duplicate_from_overlap(self):
+        sg = self._sg()
+        tok = _fake_token("ghp_", 36)
+        path = self.tmp / "dup.txt"
+        path.write_text(("n" * 30) + tok + " " + ("n" * 30) + "\n")
+        want, got, _ = self._whole_and_chunked(sg, path, "dup.txt", 40, 56)
+        self.assertEqual(got, want)
+        self.assertEqual(sum(1 for f in got if f[0] == "GitHub token"), 1)
+
+    def test_chunked_scan_multibyte_and_newlines_via_text_mode(self):
+        """Text-mode reads match read_text for multibyte, CRLF and bare CR (incl. tiny chunks)."""
+        sg = self._sg()
+        tok = _fake_token("ghp_", 36)
+        cases = {
+            "multibyte": b"xx\xc3\xa9yy\n" + tok.encode() + b"\n",
+            "crlf": b"a\r\nb\r\n" + tok.encode() + b"\r\n",
+            "bare-cr": b"a\rb\r" + tok.encode() + b"\r",
+            # Straddle the C stdio / text reader's 8 KiB buffer with CRLF and bare CR.
+            "crlf-8k": (b"x" * 8190) + b"\r\n" + tok.encode() + b"\n",
+            "bare-cr-8k": (b"y" * 8191) + b"\r" + tok.encode() + b"\n",
+            "multibyte-8k": (b"z" * 8191) + "é".encode() + b"\n" + tok.encode() + b"\n",
+        }
+        for name, raw in cases.items():
+            path = self.tmp / (name + ".txt")
+            path.write_bytes(raw)
+            for size in (1, 2, 3, 7, 16, 64, 8192):
+                want, got, _ = self._whole_and_chunked(sg, path, name, size, 48)
+                self.assertEqual(got, want, f"{name} size={size}")
+
+    def test_chunked_scan_private_key_header_at_boundary(self):
+        sg = self._sg()
+        header = "-----" + "BEGIN " + "RSA " + "PRIVATE " + "KEY-----"
+        path = self.tmp / "key.txt"
+        path.write_text(("n" * 15) + "\n" + header + "\n")
+        split_at = path.read_text().index("PRIVATE") + 3
+        want, got, _ = self._whole_and_chunked(sg, path, "key.txt", split_at, 48)
+        self.assertEqual(got, want)
+        self.assertEqual([f for f in got if f[0] == "private key"][0][2], 2)
+
+    def test_f1_long_token_short_lines_exact(self):
+        """F1b: a ghp_ token on its own short line equals the whole-file scan."""
+        sg = self._sg()
+        tok = "gh" + "p_" + ("A" * 60)
+        path = self.tmp / "f1b.txt"
+        path.write_text(("a" * 20 + "\n") * 30 + tok + "\n")
+        size, overlap = 40, 48
+        self.assertLess(size, 30 * 21)  # first reads end before the token line
+        self.assertLessEqual(len(tok), size + overlap)  # token line scanned whole
+        want, got, _ = self._whole_and_chunked(sg, path, "f1b.txt", size, overlap)
+        self.assertEqual(got, want)
+        self.assertTrue(any(f[0] == "GitHub token" for f in got))
+
+    def test_f1_long_token_one_long_line_fail_closed(self):
+        """F1: one long line with a long token — every whole-file (label, line) is found."""
+        sg = self._sg()
+        tok = "gh" + "p_" + ("A" * 200)
+        path = self.tmp / "f1.txt"
+        prefix = "x" * 80
+        path.write_text(prefix + tok + " end\n")
+        size, overlap = 60, 48
+        self.assertGreater(len(path.read_text()), size + overlap)
+        token_at = len(prefix)
+        self.assertLess(size, token_at + len(tok))
+        self.assertGreater(size + overlap, token_at)
+        want, got, _ = self._whole_and_chunked(sg, path, "f1.txt", size, overlap)
+        want_ll = {(lab, line) for lab, _p, line, _c, _v in want}
+        got_ll = {(lab, line) for lab, _p, line, _c, _v in got}
+        self.assertTrue(want_ll <= got_ll, f"want {want_ll} got {got_ll} full={got}")
+
+    def test_f2_private_key_then_begin_no_false_finding(self):
+        """F2: PRIVATE KEY then BEGIN on the next line must not invent a header on line 1."""
+        sg = self._sg()
+        begin = "-----" + "BEGIN "
+        priv = "PRIVATE " + "KEY"
+        path = self.tmp / "f2.txt"
+        # Chunk ends on the newline after PRIVATE KEY; BEGIN starts the next pending line.
+        path.write_text(("b" * 20) + priv + "\n" + begin + ("c" * 30) + "\n")
+        size = 20 + len(priv) + 1
+        self.assertEqual(size, 32)
+        self.assertEqual(path.read_text()[size - 1], "\n")
+        self.assertTrue(path.read_text()[size:].startswith(begin))
+        want, got, _ = self._whole_and_chunked(sg, path, "f2.txt", size, 48)
+        self.assertEqual(got, want)
+        self.assertFalse(any(f[0] == "private key" for f in got))
+
+    def test_f3_extra_home_root_at_boundary(self):
+        """F3: an extra $HOME root ending at the chunk boundary must not false-hit."""
+        sg = self._sg()
+        root = "/srv/alice"
+        size, overlap = 64, 48
+        path = self.tmp / "f3.txt"
+        # Same shape as the linebatch checker: root ends at the read boundary, then "x".
+        path.write_text("d " * ((size - len(root)) // 2) + root + "x tail\n")
+        text = path.read_text()
+        self.assertGreaterEqual(len(text), size)
+        self.assertEqual(text[size - len(root):size], root)
+        self.assertEqual(text[size], "x")
+        want, got, _ = self._whole_and_chunked(
+            sg, path, "f3.txt", size, overlap, home_roots=[root])
+        self.assertEqual(got, want)
+        self.assertEqual(got, [])
+
+    def test_f4_private_key_order_across_chunk(self):
+        """F4: BEGIN, a token, gap past one read, PRIVATE KEY — same order as whole-file."""
+        sg = self._sg()
+        begin = "-----" + "BEGIN "
+        priv = "PRIVATE " + "KEY"
+        tok = _fake_token("ghp_", 36)
+        path = self.tmp / "f4.txt"
+        size, overlap, gap = 21, 48, 5
+        text = begin + " " + tok + (" " * gap) + priv + "\n"
+        path.write_text(text)
+        self.assertGreater(len(text), size)  # spans a read boundary
+        self.assertLessEqual(len(text), size + overlap)  # invariant: exact equality
+        want, got, _ = self._whole_and_chunked(sg, path, "f4.txt", size, overlap)
+        self.assertEqual(got, want)
+        self.assertEqual([f[0] for f in got], ["private key", "GitHub token"])
+
+    def test_deferred_extra_homes_queue_dedupes(self):
+        """Identical extra-home hits must not grow the deferred queue without bound."""
+        sg = self._sg()
+        root = "/" + "srv" + "/" + "alice"
+        n = 4000
+        path = self.tmp / "dup-homes.txt"
+        path.write_text((root + "/x ") * n)
+        peaks = []
+        orig = sg.Guard._defer_home
+
+        def tracking(self, homes, homes_seen, pth, lineno, commit, value):
+            orig(self, homes, homes_seen, pth, lineno, commit, value)
+            peaks.append(len(homes))
+
+        g = sg.Guard(budget_s=sg._UNLIMITED)
+        g._home_roots = [root]
+        sg.Guard._defer_home = tracking
+        try:
+            orig_size, orig_overlap = sg.SCAN_CHUNK_SIZE, sg.SCAN_CHUNK_OVERLAP
+            try:
+                sg.SCAN_CHUNK_SIZE, sg.SCAN_CHUNK_OVERLAP = 64, 32
+                g.scan_file_text(path, "dup-homes.txt", "(untracked)")
+            finally:
+                sg.SCAN_CHUNK_SIZE, sg.SCAN_CHUNK_OVERLAP = orig_size, orig_overlap
+        finally:
+            sg.Guard._defer_home = orig
+        home_hits = [f for f in g.findings if f["label"] == "home path"]
+        self.assertEqual(len(home_hits), 1, home_hits)
+        self.assertEqual(g._scan_hits, n)
+        self.assertTrue(peaks, "expected deferred homes appends")
+        self.assertEqual(max(peaks), 1, f"queue peak {max(peaks)} after {n} identical hits")
+
+    def test_long_line_private_name_longer_than_default_overlap(self):
+        """A private-name literal longer than SCAN_CHUNK_OVERLAP must still be found."""
+        sg = self._sg()
+        size, overlap = 100, 40
+        name = "N" * 80  # longer than overlap; start near first window end
+        prefix, suffix = 130, 50
+        path = self.tmp / "long-priv.txt"
+        # Non-alnum padding so private-name boundary checks accept the literal.
+        path.write_text(("." * prefix) + name + (" " * suffix))
+        self.assertGreater(prefix + len(name), size + overlap)
+
+        def run(mod):
+            whole = path.read_text(encoding="utf-8", errors="replace")
+            ref = mod.Guard(budget_s=mod._UNLIMITED)
+            ref._home_roots = []
+            ref._private_entries = [(1, name)]
+            ref.scan_text(whole, "long-priv.txt", "(untracked)")
+            orig = (mod.SCAN_CHUNK_SIZE, mod.SCAN_CHUNK_OVERLAP)
+            try:
+                mod.SCAN_CHUNK_SIZE, mod.SCAN_CHUNK_OVERLAP = size, overlap
+                got = mod.Guard(budget_s=mod._UNLIMITED)
+                got._home_roots = []
+                got._private_entries = [(1, name)]
+                got.scan_file_text(path, "long-priv.txt", "(untracked)")
+            finally:
+                mod.SCAN_CHUNK_SIZE, mod.SCAN_CHUNK_OVERLAP = orig
+            return ([(f["label"], f["line"]) for f in ref.findings],
+                    [(f["label"], f["line"]) for f in got.findings])
+
+        want, got = run(sg)
+        self.assertTrue(any(lab == "private name" for lab, _ in want), want)
+        self.assertEqual(set(want), set(got), f"chunked missed {set(want) - set(got)}")
+
+    def test_home_username_respects_name_max(self):
+        """HOME_PATH rejects usernames longer than NAME_MAX on every scan path."""
+        sg = self._sg()
+        over = "u" * (sg.NAME_MAX + 1)
+        ok = "u" * sg.NAME_MAX
+        prefix = "/" + "home" + "/"
+        g = sg.Guard(budget_s=sg._UNLIMITED)
+        g._home_roots = []
+        g.scan_text(prefix + over + "/x\n", "over.txt", "(untracked)")
+        self.assertFalse(any(f["label"] == "home path" for f in g.findings), g.findings)
+        g2 = sg.Guard(budget_s=sg._UNLIMITED)
+        g2._home_roots = []
+        g2.scan_text(prefix + ok + "/x\n", "ok.txt", "(untracked)")
+        self.assertTrue(any(f["label"] == "home path" for f in g2.findings), g2.findings)
+
+    def test_chunked_matches_whole_file_differential(self):
+        """Exact equality when lines fit; fail-closed (label, line) when a line is longer."""
+        sg = self._sg()
+        tok = _fake_token("ghp_", 36)
+        ant = b"sk-" + b"ant-" + (b"x" * 24)
+        home = b"/" + b"home" + b"/" + b"someuser" + b"/"
+        begin = b"-----" + b"BEGIN "
+        priv = b"PRIVATE " + b"KEY"
+        extra = "/srv/alice"
+        cases = {
+            "token-across-boundary": (b"x" * 20) + tok.encode() + b"\n",
+            "home-word-prefix": b"abc" + home + b"x\n",
+            "sk-word-prefix": b"xsk-" + (b"A" * 24) + b"\n",
+            "crlf": b"a\r\nb\r\n" + tok.encode() + b"\r\n",
+            "bare-cr": b"a\rb\r" + tok.encode() + b"\r",
+            "cr-at-end": b"a\r" + tok.encode() + b"\n",
+            "multibyte": "xxéyy\n".encode() + tok.encode() + b"\n",
+            "no-trailing-newline": (b"x" * 20) + tok.encode(),
+            "two-tokens-one-line": tok.encode() + b" " + tok.encode() + b"\n",
+            "anthropic": ant + b"\n",
+            "private-key-far-begin": begin + (b"n" * 200) + b" RSA " + priv + b"-----\n",
+            "private-key-short": begin + b"RSA " + priv + b"-----\n",
+            "extra-home": (extra + "/x\n").encode(),
+            "long-line": (b"x" * 100) + tok.encode() + b"\n",
+        }
+        for name, raw in cases.items():
+            path = self.tmp / (name + ".txt")
+            path.write_bytes(raw)
+            roots = [extra] if name == "extra-home" else []
+            whole = path.read_text(encoding="utf-8", errors="replace")
+            max_line = max(len(x) for x in whole.split("\n"))
+            for chunk in range(1, min(len(raw) + 2, 80)):
+                for overlap in (48, 60, 72):
+                    want, got, _ = self._whole_and_chunked(
+                        sg, path, name, chunk, overlap, home_roots=roots)
+                    if max_line <= chunk + overlap:
+                        self.assertEqual(
+                            got, want,
+                            f"{name} chunk={chunk} overlap={overlap}: {got} != {want}")
+                    else:
+                        want_ll = {(lab, line) for lab, _p, line, _c, _v in want}
+                        got_ll = {(lab, line) for lab, _p, line, _c, _v in got}
+                        self.assertTrue(
+                            want_ll <= got_ll,
+                            f"{name} chunk={chunk} overlap={overlap}: missing {want_ll - got_ll}")
+
 
 class SecretGuardHomePathSwitchTests(_SecretGuardHarness, unittest.TestCase):
     """`git config secretGuard.homePaths false` turns off only the home-path rule."""
