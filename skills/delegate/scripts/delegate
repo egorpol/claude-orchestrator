@@ -19,6 +19,7 @@ import argparse
 import importlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import catalog
@@ -60,6 +61,28 @@ def cmd_catalog(a):
 
 
 def cmd_quota(a):
+    if getattr(a, "cached", False):
+        if a.now:
+            now = quota.parse_ts(a.now)
+            if now is None:
+                sys.exit(f"invalid --now timestamp: {a.now!r}")
+        else:
+            now = datetime.now(timezone.utc)
+        path = quota.log_path(a.log)
+        res = quota.cached_pools(log=a.log, now=now)
+        if a.json:
+            print(json.dumps(res, indent=2))
+            return
+        rounds_lines = []
+        try:
+            import monitor
+            groups = monitor.load_cost_groups(catalog=load_catalog())
+            rounds_lines = monitor.render_rounds_left_lines(groups, res)
+        except Exception:
+            rounds_lines = []
+        print(f"Cached readings from {path} (newest per pool); no live read.")
+        print(quota.render(res, now=now, rounds_lines=rounds_lines))
+        return
     if getattr(a, "unused", False):
         if a.snapshot:
             sys.exit("quota --unused cannot be combined with --snapshot")
@@ -191,12 +214,14 @@ def main():
 
     s = sub.add_parser("quota", help="remaining quota and reset time per pool")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--cached", action="store_true",
+                   help="show newest saved reading per pool from the quota log; no live read")
     s.add_argument("--snapshot", action="store_true", help="append a quota.jsonl reading")
     s.add_argument("--unused", action="store_true",
                    help="report closed quota windows' unused share and per-job pool costs from local logs")
     s.add_argument("--since", help="with --unused: keep windows/jobs ending/starting on or after this date")
     s.add_argument("--pool", help="with --unused: comma-separated pool ids")
-    s.add_argument("--now", help="with --unused: ISO time with offset (reproducible reports)")
+    s.add_argument("--now", help="with --unused/--cached: ISO time with offset (reproducible reports)")
     s.add_argument("--run-log", help="with --unused: runs.jsonl path")
     s.add_argument("--session-log", help="with --unused: sessions.jsonl path")
     s.add_argument("--reason", choices=["session-start", "session-end", "backfill", "launch",
@@ -205,7 +230,7 @@ def main():
     s.add_argument("--run")
     s.add_argument("--job", help="with --snapshot: round-N or review-N job id")
     s.add_argument("--if-active", action="store_true", help="poll only when a timer reading is due")
-    s.add_argument("--log", help="snapshot / --unused quota JSONL path")
+    s.add_argument("--log", help="snapshot / --unused / --cached quota JSONL path")
     s.set_defaults(fn=cmd_quota)
 
     s = sub.add_parser("ratings", help="Artificial Analysis ratings for catalog models")
@@ -369,6 +394,12 @@ def main():
             p.error("route --frontier cannot be used with a task")
         if not a.frontier and a.task is None:
             p.error("route requires a task or --frontier")
+    if a.cmd == "quota" and getattr(a, "cached", False):
+        conflicts = [flag for flag, on in (("--snapshot", a.snapshot),
+                                           ("--unused", getattr(a, "unused", False)),
+                                           ("--if-active", a.if_active)) if on]
+        if conflicts:
+            sys.exit(f"quota --cached cannot be combined with {'/'.join(conflicts)}")
     if a.cmd == "quota" and a.snapshot and getattr(a, "unused", False):
         p.error("quota --unused cannot be combined with --snapshot")
     if a.cmd == "quota" and a.snapshot and not a.if_active and a.reason is None:

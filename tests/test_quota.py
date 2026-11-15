@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import math
 import os
 import time
 import subprocess
@@ -1642,6 +1643,455 @@ class HybridTests(unittest.TestCase):
         self.assertEqual(delta(entry(10, t0), entry(12, t1, "throttle")), 2)
         self.assertEqual(delta(entry(10, t0), entry(12, t1)), 2)
         self.assertEqual(delta(entry(10, None), entry(12, None)), 2)
+
+
+class CachedQuotaTests(unittest.TestCase):
+    """delegate quota --cached: log-only newest-per-pool, no live readers."""
+
+    def setUp(self):
+        guard_stdout(self)
+        temporary = tempfile.TemporaryDirectory(prefix="quota-cached-")
+        self.addCleanup(temporary.cleanup)
+        self.tmp = Path(temporary.name)
+        self.log = self.tmp / "quota.jsonl"
+        self.now = datetime(2026, 11, 15, 3, 0, 0, tzinfo=timezone.utc)
+        self.env = {
+            "HOME": str(self.tmp / "home"),
+            "XDG_CACHE_HOME": str(self.tmp / "cache"),
+            "XDG_CONFIG_HOME": str(self.tmp / "config"),
+            "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"),
+            "DELEGATE_CATALOG_LOCAL": "",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        }
+        (self.tmp / "home").mkdir()
+        (self.tmp / "cache").mkdir()
+        (self.tmp / "config").mkdir()
+        (self.tmp / "claude").mkdir()
+        env_patch = mock.patch.dict(os.environ, self.env, clear=True)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+    def write_lines(self, *lines):
+        self.log.parent.mkdir(parents=True, exist_ok=True)
+        text = ""
+        for line in lines:
+            if isinstance(line, dict):
+                text += json.dumps(line) + "\n"
+            else:
+                text += line if line.endswith("\n") else line + "\n"
+        self.log.write_text(text)
+
+    def pool(self, used_pct, resets_at, observed_at=None, **extra):
+        entry = {"used_pct": used_pct, "resets_at": resets_at}
+        if observed_at is not None:
+            entry["observed_at"] = observed_at
+        entry.update(extra)
+        return entry
+
+    def all_pools(self, used=10.0, resets="2026-11-15T08:00:00+00:00",
+                  observed="2026-11-15T01:00:00+00:00", **overrides):
+        base = {pid: self.pool(used, resets, observed) for pid in quota.POOLS}
+        for pid, entry in overrides.items():
+            base[pid] = entry
+        return base
+
+    def cli(self, *args, code=0, env=None, path_extra=None):
+        empty = self.tmp / "empty-path"
+        empty.mkdir(exist_ok=True)
+        path = str(empty)
+        if path_extra:
+            path = f"{path_extra}{os.pathsep}{path}"
+        result = subprocess.run(
+            [sys.executable, str(CLI), "quota", *map(str, args)],
+            env={**os.environ, "PATH": path, **(env or {})},
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+        return result
+
+    def test_newest_per_pool_adversarial(self):
+        # Older row: good figures for every pool.
+        old_obs = "2026-11-15T00:30:00+00:00"
+        old = {"ts": "2026-11-15T00:40:00+00:00", "pools": self.all_pools(
+            used=20.0, resets="2026-11-15T10:00:00+00:00", observed=old_obs,
+            **{"codex-5h": self.pool(11.0, "2026-11-15T05:00:00+00:00", old_obs)})}
+        # Middle: codex-5h error; cursor-auto carried with observed_at 40 min older than ts.
+        mid_ts = "2026-11-15T02:00:00+00:00"
+        cursor_obs = "2026-11-15T01:20:00+00:00"
+        mid = {"ts": mid_ts, "pools": {
+            "codex-5h": {"error": "codex app-server failed"},
+            "cursor-auto": self.pool(33.0, "2026-11-18T01:53:54+00:00", cursor_obs,
+                                     carried="throttle"),
+            "claude-5h": self.pool(25.0, "2026-11-15T07:00:00+00:00", mid_ts),
+        }}
+        # Newest: top-level error must not hide older goods.
+        newest = {"ts": "2026-11-15T02:30:00+00:00", "error": "quota readers failed",
+                  "pools": self.all_pools(used=99.0)}
+        self.write_lines(old, mid, newest)
+        result = quota.cached_pools(log=self.log, now=self.now)
+        self.assertEqual(result["codex-5h"]["left_pct"], 89.0)
+        self.assertEqual(result["codex-5h"]["row_ts"], old["ts"])
+        self.assertEqual(result["cursor-auto"]["left_pct"], 67.0)
+        self.assertEqual(result["cursor-auto"]["row_ts"], mid_ts)
+        self.assertEqual(result["cursor-auto"]["observed_at"], cursor_obs)
+        self.assertEqual(result["cursor-auto"]["carried"], "throttle")
+        # age from observed_at: (03:00 - 01:20) = 100 min
+        self.assertEqual(result["cursor-auto"]["age_min"], 100)
+        self.assertEqual(result["claude-5h"]["row_ts"], mid_ts)
+        self.assertEqual(result["claude-5h"]["left_pct"], 75.0)
+        # Pools only in the old row keep that row.
+        self.assertEqual(result["codex-7d"]["row_ts"], old["ts"])
+        self.assertEqual(result["claude-7d"]["row_ts"], old["ts"])
+        self.assertEqual(result["cursor-premium"]["row_ts"], old["ts"])
+
+    def test_skip_rules(self):
+        good_obs = "2026-11-15T01:00:00+00:00"
+        good = {"ts": "2026-11-15T01:10:00+00:00",
+                "pools": self.all_pools(used=40.0, observed=good_obs)}
+        self.write_lines(
+            good,
+            {"ts": "2026-11-15T01:20:00+00:00", "error": "top-level",
+             "pools": self.all_pools(used=1.0)},
+            {"ts": "2026-11-15T01:30:00+00:00", "pools": {
+                "codex-5h": {"error": "per-pool"},
+                "claude-5h": self.pool("12", "2026-11-15T08:00:00+00:00", good_obs),
+                "claude-7d": self.pool(True, "2026-11-15T08:00:00+00:00", good_obs),
+                "codex-7d": self.pool(False, "2026-11-15T08:00:00+00:00", good_obs),
+            }},
+            "{not json\n",
+            '{"ts": "2026-11-15T01:40:00+00:00", "pools": ',  # truncated
+            {"ts": "not-a-timestamp", "pools": self.all_pools(used=2.0)},
+        )
+        result = quota.cached_pools(log=self.log, now=self.now)
+        for pid in quota.POOLS:
+            self.assertEqual(result[pid]["left_pct"], 60.0, pid)
+            self.assertEqual(result[pid]["row_ts"], good["ts"], pid)
+
+    def test_non_string_timestamps_keep_older_good(self):
+        good_obs = "2026-11-15T01:00:00+00:00"
+        good = {"ts": "2026-11-15T01:10:00+00:00",
+                "pools": self.all_pools(used=40.0, observed=good_obs)}
+        # Numeric row ts: whole row skipped.
+        bad_ts = {"ts": 1731632400, "pools": self.all_pools(used=1.0)}
+        # Numeric observed_at: fall back to row ts; still usable.
+        # Dict resets_at: counts as no reset (pace None).
+        mixed = {"ts": "2026-11-15T02:00:00+00:00", "pools": {
+            "claude-5h": self.pool(15.0, "2026-11-15T08:00:00+00:00", 1731632400),
+            "codex-5h": self.pool(15.0, {"when": "soon"}, good_obs),
+        }}
+        self.write_lines(good, bad_ts, mixed)
+        result = quota.cached_pools(log=self.log, now=self.now)
+        # Bad ts row never hid the good figures for pools not in mixed.
+        self.assertEqual(result["claude-7d"]["left_pct"], 60.0)
+        self.assertEqual(result["claude-7d"]["row_ts"], good["ts"])
+        # Numeric observed_at → age from row ts 02:00 → 60m; left from mixed.
+        self.assertEqual(result["claude-5h"]["left_pct"], 85.0)
+        self.assertEqual(result["claude-5h"]["age_min"], 60)
+        self.assertEqual(result["claude-5h"]["observed_at"], 1731632400)
+        # Dict resets_at → no reset, pace None; still preferred over older good.
+        self.assertEqual(result["codex-5h"]["left_pct"], 85.0)
+        self.assertIsNone(result["codex-5h"]["resets_at"])
+        self.assertIsNone(result["codex-5h"]["pace"])
+
+    def test_age_from_observed_at_and_row_ts_fallback(self):
+        row_ts = "2026-11-15T02:03:01+00:00"
+        observed = "2026-11-15T01:36:33+00:00"
+        self.write_lines({
+            "ts": row_ts,
+            "pools": {
+                "cursor-auto": self.pool(22.0, "2026-11-18T01:53:54+00:00", observed),
+                "codex-5h": self.pool(10.0, "2026-11-15T07:00:00+00:00"),  # no observed_at
+                "claude-5h": self.pool(10.0, "2026-11-15T07:00:00+00:00",
+                                       "not-a-time"),  # unparseable → row ts
+            },
+        })
+        result = quota.cached_pools(log=self.log, now=self.now)
+        # 03:00 - 01:36:33 = 83.45 min → 83
+        self.assertEqual(result["cursor-auto"]["age_min"], 83)
+        # 03:00 - 02:03:01 = 56.983 min → 57
+        self.assertEqual(result["codex-5h"]["age_min"], 57)
+        self.assertEqual(result["claude-5h"]["age_min"], 57)
+        self.assertIsNone(result["codex-5h"]["observed_at"])
+
+    def test_stale_reset_nulls_pace(self):
+        self.write_lines({
+            "ts": "2026-11-15T01:00:00+00:00",
+            "pools": {
+                "codex-5h": self.pool(10.0, "2026-11-15T02:00:00+00:00",
+                                      "2026-11-15T01:00:00+00:00"),
+                "codex-7d": self.pool(10.0, self.now.isoformat(),
+                                      "2026-11-15T01:00:00+00:00"),
+            },
+        })
+        result = quota.cached_pools(log=self.log, now=self.now)
+        for pid in ("codex-5h", "codex-7d"):
+            self.assertTrue(result[pid]["stale_reset"], pid)
+            self.assertIsNone(result[pid]["time_left_frac"], pid)
+            self.assertIsNone(result[pid]["pace"], pid)
+
+    def test_pace_hand_computed_for_window_and_cycle(self):
+        # 5h pool: reset in 2.5 h → tlf = 2.5/5 = 0.5; left 80% → pace = 0.8/0.5 = 1.6
+        # 7d pool: reset in 84 h → tlf = 84/168 = 0.5; left 50% → pace = 0.5/0.5 = 1.0
+        # cycle at window start: reset 2026-12-15T03:00:00Z, start 2026-11-15T03:00:00Z;
+        #         at now (= start) tlf = 1.0; left 75% → pace = 0.75/1.0 = 0.75
+        reset_5h = (self.now + timedelta(hours=2, minutes=30)).isoformat()
+        reset_7d = (self.now + timedelta(hours=84)).isoformat()
+        reset_cycle = "2026-12-15T03:00:00+00:00"
+        obs = self.now.isoformat()
+        self.write_lines({
+            "ts": obs,
+            "pools": {
+                "codex-5h": self.pool(20.0, reset_5h, obs),
+                "codex-7d": self.pool(50.0, reset_7d, obs),
+                "cursor-auto": self.pool(25.0, reset_cycle, obs, whole_percent=True),
+            },
+        })
+        result = quota.cached_pools(log=self.log, now=self.now)
+        self.assertAlmostEqual(result["codex-5h"]["time_left_frac"], 0.5, places=6)
+        self.assertAlmostEqual(result["codex-5h"]["pace"], 1.6, places=6)
+        self.assertAlmostEqual(result["codex-7d"]["time_left_frac"], 0.5, places=6)
+        self.assertAlmostEqual(result["codex-7d"]["pace"], 1.0, places=6)
+        self.assertAlmostEqual(result["cursor-auto"]["time_left_frac"], 1.0, places=6)
+        self.assertAlmostEqual(result["cursor-auto"]["pace"], 0.75, places=6)
+        self.assertTrue(result["cursor-auto"]["whole_percent"])
+
+    def test_pace_mid_cycle_hand_computed(self):
+        # reset 2026-12-15T03:00:00Z → calendar start 2026-11-15T03:00:00Z (30d).
+        # Halfway: now = 2026-11-30T03:00:00Z → tlf = 15/30 = 0.5;
+        # left 75% → pace = 0.75 / 0.5 = 1.5. Expected values computed by hand only.
+        reset = "2026-12-15T03:00:00+00:00"
+        now = datetime(2026, 11, 30, 3, 0, 0, tzinfo=timezone.utc)
+        obs = now.isoformat()
+        self.write_lines({
+            "ts": obs,
+            "pools": {"cursor-auto": self.pool(25.0, reset, obs)},
+        })
+        result = quota.cached_pools(log=self.log, now=now)
+        self.assertAlmostEqual(result["cursor-auto"]["time_left_frac"], 0.5, places=6)
+        self.assertAlmostEqual(result["cursor-auto"]["pace"], 1.5, places=6)
+
+    def test_int_used_pct_and_torn_final_line(self):
+        good = {"ts": "2026-11-15T01:10:00+00:00",
+                "pools": self.all_pools(used=40, observed="2026-11-15T01:00:00+00:00")}
+        self.write_lines(good)
+        with self.log.open("a", encoding="utf-8") as stream:
+            stream.write('{"ts": "2026-11-15T02:00:00+00:00", "pools": {')
+        result = quota.cached_pools(log=self.log, now=self.now)
+        for pid in quota.POOLS:
+            self.assertEqual(result[pid]["left_pct"], 60.0, pid)
+            self.assertEqual(result[pid]["row_ts"], good["ts"], pid)
+
+    def test_nan_used_pct_keeps_older_good(self):
+        good = {"ts": "2026-11-15T01:10:00+00:00",
+                "pools": self.all_pools(used=40.0, observed="2026-11-15T01:00:00+00:00")}
+        nan_row = {"ts": "2026-11-15T02:00:00+00:00",
+                   "pools": self.all_pools(used=float("nan"),
+                                           observed="2026-11-15T02:00:00+00:00")}
+        self.write_lines(good, nan_row)
+        # Python json round-trips NaN; confirm the fixture actually stores it.
+        stored = json.loads(self.log.read_text().splitlines()[-1])
+        self.assertTrue(math.isnan(stored["pools"]["codex-5h"]["used_pct"]))
+        result = quota.cached_pools(log=self.log, now=self.now)
+        for pid in quota.POOLS:
+            self.assertEqual(result[pid]["left_pct"], 60.0, pid)
+            self.assertEqual(result[pid]["row_ts"], good["ts"], pid)
+
+    def test_missing_and_empty_file(self):
+        missing = self.tmp / "absent.jsonl"
+        for path in (missing, self.log):
+            if path == self.log:
+                path.write_text("")
+            result = quota.cached_pools(log=path, now=self.now)
+            for pid, spec in quota.POOLS.items():
+                self.assertEqual(result[pid], {
+                    "label": spec["label"], "provider": spec["provider"],
+                    "error": f"no saved reading in {path}",
+                })
+        out = self.cli("--cached", "--json", "--log", missing, "--now", self.now.isoformat())
+        self.assertEqual(out.returncode, 0)
+        parsed = json.loads(out.stdout)
+        self.assertTrue(all("error" in parsed[pid] for pid in quota.POOLS))
+
+    def test_unreadable_log_directory(self):
+        directory = self.tmp / "not-a-log"
+        directory.mkdir()
+        result = quota.cached_pools(log=directory, now=self.now)
+        for pid in quota.POOLS:
+            err = result[pid]["error"]
+            self.assertTrue(err.startswith(f"cannot read {directory}: "), err)
+            self.assertNotIn("Traceback", err)
+        out = self.cli("--cached", "--json", "--log", directory, "--now",
+                       self.now.isoformat())
+        self.assertEqual(out.returncode, 0)
+        parsed = json.loads(out.stdout)
+        self.assertTrue(all(parsed[pid]["error"].startswith(f"cannot read {directory}: ")
+                            for pid in quota.POOLS))
+
+    def test_cli_json_text_now_and_refusals(self):
+        obs = "2026-11-15T01:36:33+00:00"
+        self.write_lines({
+            "ts": "2026-11-15T02:03:01+00:00",
+            "pools": self.all_pools(
+                used=22.0, resets="2026-11-15T08:00:00+00:00", observed=obs,
+                **{"cursor-auto": self.pool(22.0, "2026-11-18T01:53:54+00:00", obs)}),
+        })
+        now_s = self.now.isoformat()
+        js = self.cli("--cached", "--json", "--log", self.log, "--now", now_s)
+        data = json.loads(js.stdout)
+        self.assertEqual(data["cursor-auto"]["age_min"], 83)
+        self.assertEqual(data["cursor-auto"]["left_pct"], 78.0)
+        self.assertIn("row_ts", data["cursor-auto"])
+
+        text = self.cli("--cached", "--log", self.log, "--now", now_s)
+        lines = text.stdout.splitlines()
+        self.assertEqual(
+            lines[0],
+            f"Cached readings from {self.log} (newest per pool); no live read.")
+        header = lines[1]
+        self.assertIn("DATA AGE", header)
+        cursor_line = next(line for line in lines if line.startswith("cursor-auto"))
+        self.assertIn("83m", cursor_line)
+        self.assertIn("78%", cursor_line)
+
+        bad = self.cli("--cached", "--now", "not-a-time", "--log", self.log, code=1)
+        self.assertIn("invalid --now", bad.stderr)
+
+        for args in (("--cached", "--snapshot"),
+                     ("--cached", "--snapshot", "--log", str(self.log)),
+                     ("--cached", "--unused"),
+                     ("--cached", "--if-active")):
+            refused = self.cli(*args, code=1)
+            stderr_lines = [line for line in refused.stderr.splitlines() if line.strip()]
+            self.assertEqual(len(stderr_lines), 1, refused.stderr)
+            self.assertIn("--cached", stderr_lines[0])
+            self.assertEqual(refused.stdout, "")
+
+    def test_one_now_shared_without_flag(self):
+        self.write_lines({
+            "ts": "2026-11-15T01:00:00+00:00",
+            "pools": self.all_pools(used=10.0, observed="2026-11-15T01:00:00+00:00"),
+        })
+        loader = importlib.machinery.SourceFileLoader("quota_delegate_cli_now", str(CLI))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        cli = importlib.util.module_from_spec(spec)
+        loader.exec_module(cli)
+        captured = {}
+        real_cached = quota.cached_pools
+        real_render = quota.render
+
+        def wrap_cached(*args, **kwargs):
+            captured["cached_now"] = kwargs.get("now")
+            return real_cached(*args, **kwargs)
+
+        def wrap_render(*args, **kwargs):
+            captured["render_now"] = kwargs.get("now")
+            return real_render(*args, **kwargs)
+
+        out = io.StringIO()
+        with mock.patch.object(quota, "cached_pools", side_effect=wrap_cached), \
+             mock.patch.object(quota, "render", side_effect=wrap_render), \
+             mock.patch.object(sys, "argv",
+                               [str(CLI), "quota", "--cached", "--log", str(self.log)]), \
+             redirect_stdout(out):
+            cli.main()
+        self.assertIsNotNone(captured.get("cached_now"))
+        self.assertEqual(captured["cached_now"], captured["render_now"])
+
+    def test_cached_launches_no_reader_with_live_control(self):
+        # Positive control: live quota records a stub call; --cached must not.
+        self.write_lines({
+            "ts": "2026-11-15T01:00:00+00:00",
+            "pools": self.all_pools(used=10.0, observed="2026-11-15T01:00:00+00:00"),
+        })
+        calls = _env.CALLS
+        before = calls.read_text() if calls.exists() else ""
+
+        def stub_lines():
+            if not calls.exists():
+                return []
+            return [line for line in calls.read_text()[len(before):].splitlines()
+                    if line.strip()]
+
+        def restore_calls():
+            calls.write_text(before)
+        self.addCleanup(restore_calls)
+
+        empty = self.tmp / "empty-path"
+        empty.mkdir(exist_ok=True)
+        child_env = {**os.environ, "PATH": f"{_env.BIN}{os.pathsep}{empty}",
+                     "HOME": str(self.tmp / "home"),
+                     "XDG_CACHE_HOME": str(self.tmp / "cache"),
+                     "XDG_CONFIG_HOME": str(self.tmp / "config"),
+                     "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"),
+                     "DELEGATE_CATALOG_LOCAL": ""}
+        live = subprocess.run(
+            [sys.executable, str(CLI), "quota", "--json"],
+            env=child_env, text=True, capture_output=True)
+        live_calls = stub_lines()
+        self.assertTrue(any("app-server" in line for line in live_calls), live_calls)
+
+        calls.write_text(before)
+        for args in (("--cached", "--log", str(self.log)),
+                     ("--cached", "--json", "--log", str(self.log))):
+            result = subprocess.run(
+                [sys.executable, str(CLI), "quota", *args],
+                env=child_env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(stub_lines(), [], f"cached launched readers: {stub_lines()}")
+
+    def test_cached_no_side_effects_in_process(self):
+        self.write_lines({
+            "ts": "2026-11-15T01:00:00+00:00",
+            "pools": self.all_pools(used=10.0, observed="2026-11-15T01:00:00+00:00"),
+        })
+        before_bytes = self.log.read_bytes()
+        cache_root = Path(os.environ["XDG_CACHE_HOME"])
+        config_root = Path(os.environ["XDG_CONFIG_HOME"])
+
+        def tree_files(root):
+            if not root.exists():
+                return set()
+            return {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()}
+
+        before_cache, before_config = tree_files(cache_root), tree_files(config_root)
+        boom = AssertionError("cached path must not call this")
+        patches = [
+            mock.patch.object(subprocess, "Popen", side_effect=boom),
+            mock.patch.object(subprocess, "run", side_effect=boom),
+            mock.patch.object(quota, "fetch", side_effect=boom),
+            mock.patch.object(quota, "_hybrid_snapshot", side_effect=boom),
+            mock.patch.object(quota, "_codex_snapshot", side_effect=boom),
+            mock.patch.object(quota, "_claude_snapshot", side_effect=boom),
+            mock.patch.object(quota, "_cursor_snapshot", side_effect=boom),
+            mock.patch.object(quota, "check_dispatch", side_effect=boom),
+            mock.patch.object(quota, "spawn_snapshot", side_effect=boom),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        with self.assertRaises(AssertionError):
+            quota.fetch()
+
+        result = quota.cached_pools(log=self.log, now=self.now)
+        self.assertEqual(result["codex-5h"]["left_pct"], 90.0)
+
+        loader = importlib.machinery.SourceFileLoader("quota_delegate_cli_side", str(CLI))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        cli = importlib.util.module_from_spec(spec)
+        loader.exec_module(cli)
+        for argv in ([str(CLI), "quota", "--cached", "--json", "--log", str(self.log),
+                      "--now", self.now.isoformat()],
+                     [str(CLI), "quota", "--cached", "--log", str(self.log),
+                      "--now", self.now.isoformat()]):
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), redirect_stdout(out):
+                cli.main()
+            self.assertTrue(out.getvalue())
+
+        self.assertEqual(self.log.read_bytes(), before_bytes)
+        self.assertEqual(tree_files(cache_root), before_cache)
+        self.assertEqual(tree_files(config_root), before_config)
 
 
 if __name__ == "__main__":

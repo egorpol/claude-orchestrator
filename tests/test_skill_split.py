@@ -80,7 +80,7 @@ class SkillSplitTests(unittest.TestCase):
 
     def test_command_tables_keep_full_and_quick_forms(self):
         full = (REFERENCE / "commands.md").read_text(encoding="utf-8")
-        self.assertEqual(len(re.findall(r"^\| `delegate ", full, re.M)), 24)
+        self.assertEqual(len(re.findall(r"^\| `delegate ", full, re.M)), 25)
         quick = [line for line in CORE.read_text(encoding="utf-8").splitlines()
                  if line.startswith("| `delegate ")]
         self.assertEqual(len(quick), 14)

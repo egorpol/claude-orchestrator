@@ -8,6 +8,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Added
 
+- `delegate quota --cached [--json] [--log PATH] [--now ISO]` shows the newest saved reading of each pool from the quota log with no live reader; DATA AGE uses each pool's `observed_at`, or the row `ts` when that is missing.
 - `install.sh --uninstall` removes this product's registered hooks, rules imports, recorded skill/command symlinks, `delegate` PATH link and quota/rate timer units; recorded skill/command copies, including user edits, move to `~/.claude/skill-backups/`. It keeps unrelated settings, hooks, imports and files, plus local logs, caches and configuration, and backs up changed `settings.json` and user-level `CLAUDE.md`. Add `--git-hook=DIR` to remove this product's pre-commit/pre-push links there; plain `--uninstall` keeps them, and a second uninstall changes nothing.
 
 ### Changed

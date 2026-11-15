@@ -1320,6 +1320,104 @@ def log_path(log=None):
                 or cache / "claude-delegate/quota.jsonl").expanduser()
 
 
+def _usable_used_pct(value):
+    """Finite float used_pct, or None if unusable (bool, non-numeric, NaN, overflow)."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        used = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(used):
+        return None
+    return used
+
+
+def _cached_pool_from_entry(pid, entry, row_ts, now):
+    """Shape a stored pool entry like pools() for render(); None if unusable."""
+    if not isinstance(entry, dict) or "error" in entry:
+        return None
+    used = _usable_used_pct(entry.get("used_pct"))
+    if used is None:
+        return None
+    spec = POOLS[pid]
+    out = {"label": spec["label"], "provider": spec["provider"],
+           "left_pct": max(0.0, min(100.0, 100.0 - used)),
+           "row_ts": row_ts}
+    observed = entry.get("observed_at")
+    out["observed_at"] = observed if observed is not None else None
+    seen = _safe_ts(observed)
+    if seen is None:
+        seen = _safe_ts(row_ts)
+    out["age_min"] = round((now - seen).total_seconds() / 60) if seen else None
+    reset = _safe_ts(entry.get("resets_at"))
+    out["resets_at"] = reset.isoformat() if reset else None
+    if reset is not None and reset <= now:
+        out["stale_reset"] = True
+        out["time_left_frac"] = None
+        out["pace"] = None
+    else:
+        tlf = None
+        if reset is not None:
+            if spec.get("cycle"):
+                start = cycle_window_start(reset)
+                window = (reset - start).total_seconds()
+                if window > 0:
+                    tlf = max(0.0, min(1.0, (reset - now).total_seconds() / window))
+            elif spec.get("window_h"):
+                tlf = max(0.0, min(1.0, (reset - now).total_seconds() / 3600 / spec["window_h"]))
+        out["time_left_frac"] = tlf
+        out["pace"] = ((out["left_pct"] / 100) / max(tlf, 0.05)
+                       if tlf is not None else None)
+    if "carried" in entry:
+        out["carried"] = entry["carried"]
+    if "whole_percent" in entry:
+        out["whole_percent"] = entry["whole_percent"]
+    return out
+
+
+def cached_pools(log=None, now=None):
+    """Newest usable saved reading per pool from the quota log; no live read."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    path = log_path(log)
+    newest = {pid: None for pid in POOLS}
+    read_error = None
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or "error" in row:
+                    continue
+                entries = row.get("pools")
+                if not isinstance(entries, dict):
+                    continue
+                row_ts = row.get("ts")
+                if _safe_ts(row_ts) is None:
+                    continue
+                for pid in POOLS:
+                    shaped = _cached_pool_from_entry(pid, entries.get(pid), row_ts, now)
+                    if shaped is not None:
+                        newest[pid] = shaped
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        read_error = f"cannot read {path}: {exc.strerror or type(exc).__name__}"
+    result = {}
+    missing = read_error or f"no saved reading in {path}"
+    for pid, spec in POOLS.items():
+        if newest[pid] is None:
+            result[pid] = {"label": spec["label"], "provider": spec["provider"],
+                           "error": missing}
+        else:
+            result[pid] = newest[pid]
+    return result
+
+
 def _reuse_pools(entries, ts):
     """Copy pools; recompute stale for carried Claude gauges against the new row time."""
     result = {}
