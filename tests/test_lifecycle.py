@@ -804,11 +804,77 @@ class LifecycleTests(unittest.TestCase):
     def test_review_dry_run_writes_no_job_patch(self):
         self.launch("codex", "rv-dry")
         root = self.root("rv-dry")
+        wt = root / "wt"
+        with (wt / "tracked.txt").open("a") as stream:
+            stream.write("edited after finalize\n")
+        (wt / "extra-new.txt").write_text("untracked after finalize\n")
+        index = Path(self.git("rev-parse", "--git-path", "index", cwd=wt))
+        before = self.snapshot(root)
+        index_before = index.read_bytes()
+        patch_before = (root / "changes.patch").read_bytes()
         self.cli("review", "rv-dry", "--dry-run")
+        self.assertEqual(self.snapshot(root), before)
+        self.assertEqual(index.read_bytes(), index_before)
         self.assertEqual(list(root.glob("review-*")), [])
-        delegate = root / "wt/.delegate"
+        delegate = wt / ".delegate"
         if delegate.exists():
             self.assertEqual(list(delegate.glob("review-*.patch")), [])
+        # Positive control: a real patch refresh changes both artifacts.
+        self.cli("diff", "rv-dry")
+        self.assertNotEqual(index.read_bytes(), index_before)
+        self.assertNotEqual((root / "changes.patch").read_bytes(), patch_before)
+
+    def test_review_dry_run_sees_untracked_only_changes(self):
+        self.launch("codex", "rv-untracked")
+        root = self.root("rv-untracked")
+        wt = root / "wt"
+        base = runs.load_meta(root)["base"]
+        self.git("restore", "--source", base, "--", "tracked.txt", cwd=wt)
+        self.git("rm", "--cached", "--", "new-codex.txt", cwd=wt)
+        (wt / "new-codex.txt").unlink()
+        (wt / "large-untracked.txt").write_text("untracked line\n" * 200)
+        index = Path(self.git("rev-parse", "--git-path", "index", cwd=wt))
+        index_before = index.read_bytes()
+        output = self.cli("review", "rv-untracked", "--dry-run", "--patch-max-kb", "1")
+        self.assertIn("review patch: omitted 1 large file diff(s): large-untracked.txt", output)
+        self.assertEqual(index.read_bytes(), index_before)
+
+    def test_make_patch_read_only_matches_write(self):
+        for mode in ("plain", "missing-index", "split-index"):
+            with self.subTest(mode=mode):
+                name = "patch-" + mode
+                self.launch("codex", name)
+                root = self.root(name)
+                wt = root / "wt"
+                with (wt / "tracked.txt").open("a") as stream:
+                    stream.write("edited after finalize\n")
+                (wt / "untracked-text.txt").write_bytes(b"one\r\ntwo \xff\r\n")
+                (wt / "untracked-binary.bin").write_bytes(b"\x00one\r\ntwo \xff\r\n")
+                meta = runs.load_meta(root)
+                index = Path(self.git("rev-parse", "--git-path", "index", cwd=wt))
+                if mode == "missing-index":
+                    index.unlink()
+                elif mode == "split-index":
+                    self.git("update-index", "--split-index", cwd=wt)
+                    config = self.tmp / "conditional.gitconfig"
+                    config.write_text("[diff]\n    noprefix = true\n")
+                    git_dir = self.git("rev-parse", "--absolute-git-dir", cwd=wt)
+                    self.git("config", f"includeIf.gitdir:{git_dir}.path", str(config))
+                    self.assertEqual(self.git("config", "--get", "diff.noprefix", cwd=wt), "true")
+                before = self.snapshot(root)
+                git_before = self.snapshot(self.repo / ".git")
+                with patch.dict(os.environ, self.env, clear=True):
+                    preview = runs.make_patch(root, meta, write=False)
+                    self.assertEqual(self.snapshot(root), before)
+                    # Includes the index, shared indexes and the empty blob's mtime.
+                    self.assertEqual(self.snapshot(self.repo / ".git"), git_before)
+                    written = runs.make_patch(root, meta, write=True)
+                self.assertEqual(preview, written)
+                self.assertIn("untracked-text.txt", preview[0])
+                self.assertIn("untracked-binary.bin", preview[0])
+                self.assertIn("GIT binary patch", preview[1])
+                self.assertEqual((root / "changes.patch").read_bytes(),
+                                 preview[1].encode("utf-8", "surrogateescape"))
 
     def test_full_status_of_review_job(self):
         self.launch("codex", "rv")

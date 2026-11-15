@@ -5,6 +5,7 @@ the run root; `followup` archives them to round-<k>/ first, with that round's
 cumulative changes.patch. Reviews are jobs in review-<n>/ that read the
 worktree without changing it, and keep the reviewer's patch as review.patch.
 """
+import contextlib
 import hashlib
 import json
 import os
@@ -176,9 +177,9 @@ _REVIEW_CHECKS_MARK = "## The brief(s) the other agent was given"
 REVIEW_PROMPT_CHECKS = REVIEW_PROMPT[REVIEW_PROMPT.index(_REVIEW_CHECKS_MARK):]
 
 
-def git(*args, cwd=None, check=True):
+def git(*args, cwd=None, check=True, env=None):
     r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                       env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+                       env={**os.environ, **(env or {}), "GIT_OPTIONAL_LOCKS": "0"})
     if check and r.returncode != 0:
         sys.exit(f"git {' '.join(args)} failed: {r.stderr.strip()}")
     return r.stdout if "-z" in args else r.stdout.strip()
@@ -1399,7 +1400,7 @@ def review(a):
     agent = a.agent or ("cursor" if meta["agent"] == "codex" else "codex")
     model = a.model or DEFAULTS[agent][0]
     effort = a.effort if a.effort is not None else (None if a.model else DEFAULTS[agent][1])
-    _, patch = make_patch(root, meta)
+    _, patch = make_patch(root, meta, write=not a.dry_run)
     if not patch.strip():
         sys.exit("no changes to review")
     warnings = []
@@ -2265,39 +2266,77 @@ def _link_pathspecs(meta):
     return [f":(exclude,literal){l}" for l in meta.get("links", [])]
 
 
-def make_patch(root, meta):
+def make_patch(root, meta, write=True):
+    """Build the cumulative diff; write=False confines git writes to temporary state."""
     wt = Path(meta["worktree"])
     pathspecs = _link_pathspecs(meta)
-    # intent-to-add: new files show up in the diff; nothing is committed. Literal excludes keep
-    # --link paths out even when the info/exclude line was removed (and avoid glob false matches).
-    # LC_ALL=C: the ignored-path phrase below is matched in English (same reason as apply).
-    git_env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
-    if pathspecs:
-        r = subprocess.run(["git", "add", "-A", "-N", "--", ".", *pathspecs], cwd=wt,
-                           capture_output=True, env=git_env)
-        if r.returncode != 0:
-            err = r.stderr.decode("utf-8", "replace")
-            # An ignored link under info/exclude makes git add exit 1 even with :(exclude,literal);
-            # other paths are still staged.
-            if "ignored by one of your .gitignore files" not in err:
-                sys.exit(f"git add -A -N failed: {err.strip()}")
-    else:
-        git("add", "-A", "-N", cwd=wt)
-    head = git("rev-parse", "HEAD", cwd=wt)
-    # Bytes, not text=True: universal newlines would turn \r\n into \n and break CRLF files.
-    diff_cmd = ["git", "diff", "--binary", meta["base"]]
-    if pathspecs:
-        diff_cmd += ["--", ".", *pathspecs]
-    patch = subprocess.run(diff_cmd, cwd=wt, capture_output=True, check=True, env=git_env).stdout.decode(
-        "utf-8", "surrogateescape")
-    # After the diff: a base that does not resolve raised above, and is not a delegate commit.
-    # working-tree reviews check out meta["snapshot"]; base is only the diff base
-    if head != meta["base"] and head != meta.get("snapshot"):
-        print(f"WARNING: worktree HEAD {head[:9]} != base {meta['base'][:9]}: the delegate made commits "
-              f"(contract breach). The patch below covers them too.", file=sys.stderr)
-    write_patch(root / "changes.patch", patch)
-    stat_args = (meta["base"], "--", ".", *pathspecs) if pathspecs else (meta["base"],)
-    return git("diff", "--stat", *stat_args, cwd=wt), patch
+    with (contextlib.nullcontext() if write else tempfile.TemporaryDirectory()) as tmp:
+        patch_env = {}
+        if not write:
+            tmp = Path(tmp)
+            index = Path(git("rev-parse", "--git-path", "index", cwd=wt))
+            if not index.is_absolute():
+                index = wt / index
+            temp_index = tmp / "index"
+            if index.exists():
+                shutil.copyfile(index, temp_index)
+            patch_env["GIT_INDEX_FILE"] = str(temp_index)
+            # add -N also freshens the empty blob's mtime, even in an alternate object store.
+            # Seed a private copy before exposing the real objects for diff to read.
+            objects = (wt / git("rev-parse", "--git-path", "objects", cwd=wt)).resolve()
+            (tmp / "objects").mkdir()
+            patch_env.update(GIT_OBJECT_DIRECTORY=str(tmp / "objects"),
+                             GIT_ALTERNATE_OBJECT_DIRECTORIES="")
+            subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=wt, input=b"",
+                           capture_output=True, check=True, env={**os.environ, **patch_env})
+            patch_env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = os.pathsep.join(filter(None, (
+                json.dumps(str(objects), ensure_ascii=False),
+                os.environ.get("GIT_ALTERNATE_OBJECT_DIRECTORIES"))))
+            # Reading a split index freshens its shared index. Flatten a private copy
+            # using temporary admin files, then use the original gitdir for path-based config.
+            git_dir = Path(git("rev-parse", "--absolute-git-dir", cwd=wt))
+            if any(git_dir.glob("sharedindex.*")):
+                temp_git_dir = tmp / "git"
+                shutil.copytree(git_dir, temp_git_dir,
+                                ignore=shutil.ignore_patterns("objects", "worktrees", "logs"))
+                common = (wt / git("rev-parse", "--git-common-dir", cwd=wt)).resolve()
+                (temp_git_dir / "commondir").write_text(str(common) + "\n")
+                git("update-index", "--no-split-index", cwd=wt,
+                    env={**patch_env, "GIT_DIR": str(temp_git_dir), "GIT_COMMON_DIR": str(common),
+                         "GIT_WORK_TREE": str(wt.resolve())})
+        # Keep temporary indexes whole, even when the real repository enables split indexes.
+        git_config = [] if write else ["-c", "core.splitIndex=false"]
+        # intent-to-add: new files show up in the diff; nothing is committed. Literal excludes keep
+        # --link paths out even when the info/exclude line was removed (and avoid glob false matches).
+        # LC_ALL=C: the ignored-path phrase below is matched in English (same reason as apply).
+        git_env = {**os.environ, **patch_env, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
+        if pathspecs:
+            r = subprocess.run(["git", *git_config, "add", "-A", "-N", "--", ".", *pathspecs], cwd=wt,
+                               capture_output=True, env=git_env)
+            if r.returncode != 0:
+                err = r.stderr.decode("utf-8", "replace")
+                # An ignored link under info/exclude makes git add exit 1 even with :(exclude,literal);
+                # other paths are still staged.
+                if "ignored by one of your .gitignore files" not in err:
+                    sys.exit(f"git add -A -N failed: {err.strip()}")
+        else:
+            git(*git_config, "add", "-A", "-N", cwd=wt, env=patch_env)
+        head = git("rev-parse", "HEAD", cwd=wt)
+        # Bytes, not text=True: universal newlines would turn \r\n into \n and break CRLF files.
+        diff_cmd = ["git", "diff", "--binary", meta["base"]]
+        if pathspecs:
+            diff_cmd += ["--", ".", *pathspecs]
+        patch = subprocess.run(diff_cmd, cwd=wt, capture_output=True, check=True, env=git_env).stdout.decode(
+            "utf-8", "surrogateescape")
+        # After the diff: a base that does not resolve raised above, and is not a delegate commit.
+        # working-tree reviews check out meta["snapshot"]; base is only the diff base
+        if head != meta["base"] and head != meta.get("snapshot"):
+            print(f"WARNING: worktree HEAD {head[:9]} != base {meta['base'][:9]}: the delegate made commits "
+                  f"(contract breach). The patch below covers them too.", file=sys.stderr)
+        if write:
+            write_patch(root / "changes.patch", patch)
+        stat_args = (meta["base"], "--", ".", *pathspecs) if pathspecs else (meta["base"],)
+        return git("diff", "--stat", *stat_args, cwd=wt, env=patch_env), patch
 
 
 def write_patch(path, patch):
