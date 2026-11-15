@@ -2731,6 +2731,61 @@ def _branch_unapplied(root, meta):
     return (not _applied_matches(root, patch)), None
 
 
+def _remove_orphaned_run_worktree(root, meta, wt, force):
+    """If force and wt is this run's orphaned worktree, rmtree + prune; return True.
+
+    Git's worktree metadata can vanish while the folder remains (admin dir deleted, or
+    prune while the folder was moved). Only then may --force delete files git cannot see.
+    Returns False when any safety condition fails; the caller exits with git's error.
+    A listed worktree path is matched via `git worktree list --porcelain -z` so a
+    newline in the path cannot hide it from the "still listed" guard.
+    """
+    if not force:
+        return False
+    if wt.is_symlink():
+        return False
+    try:
+        if Path(meta["worktree"]).resolve() != (root / "wt").resolve():
+            return False
+    except OSError:
+        return False
+    dot_git = wt / ".git"
+    # A directory .git is a separate repo; only a gitfile (regular file) is a linked worktree.
+    if not dot_git.is_file() or dot_git.is_symlink() or dot_git.is_dir():
+        return False
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+    probe = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "--git-dir"],
+        capture_output=True, env=env, check=False)
+    if probe.returncode == 0:
+        return False
+    # -z: paths may contain newlines; plain --porcelain splits them across lines. Bytes, not
+    # text=True: text mode turns \r and \r\n into \n and fails on undecodable names.
+    listed = subprocess.run(
+        ["git", "worktree", "list", "--porcelain", "-z"],
+        cwd=meta["repo"], capture_output=True, env=env, check=False)
+    if listed.returncode != 0:
+        return False
+    try:
+        wt_resolved = wt.resolve()
+    except OSError:
+        return False
+    for record in map(os.fsdecode, listed.stdout.split(b"\0")):
+        if record.startswith("worktree "):
+            try:
+                if Path(record[len("worktree "):]).resolve() == wt_resolved:
+                    return False
+            except OSError:
+                continue
+    try:
+        shutil.rmtree(wt)
+    except OSError as e:
+        sys.exit(f"cannot remove orphaned worktree {wt}: {e}")
+    git("worktree", "prune", cwd=meta["repo"])
+    print(f"worktree metadata was missing; removed {wt} directly")
+    return True
+
+
 def cleanup(a):
     root = find_run(a.run)
     if state(root) in BUSY or _finalizing(root) or any(
@@ -2779,7 +2834,14 @@ def cleanup(a):
             if (wt / l).is_symlink():
                 (wt / l).unlink()
         # safe by now: changes were applied, absent, explicitly discarded, or a working-tree snapshot
-        git("worktree", "remove", "--force", str(wt), cwd=meta["repo"])
+        remove = subprocess.run(
+            ["git", "worktree", "remove", "--force", str(wt)],
+            cwd=meta["repo"], capture_output=True, text=True,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        if remove.returncode != 0:
+            if not _remove_orphaned_run_worktree(root, meta, wt, a.force):
+                err = (remove.stderr or remove.stdout or "").strip() or "git worktree remove failed"
+                sys.exit(f"git worktree remove --force {wt} failed: {err}; left folder in place")
     # Transfer or remove owned exclude lines, then clear meta before any --purge.
     _release_excluded(Path(meta["repo"]), root, meta)
     if meta.get("branch") and not a.keep_branch:

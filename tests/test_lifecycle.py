@@ -1910,6 +1910,205 @@ class LifecycleTests(unittest.TestCase):
         record = json.loads((self.storage / "runs.jsonl").read_text())
         self.assertEqual(record["outcome"], "discarded")
 
+    def _delete_worktree_admin_dir(self, wt):
+        """Remove the linked worktree's admin dir; leave the folder and its gitfile."""
+        gitfile = (wt / ".git").read_text()
+        self.assertTrue(gitfile.startswith("gitdir:"), gitfile)
+        admin = Path(gitfile.split(":", 1)[1].strip())
+        self.assertTrue(admin.is_dir(), admin)
+        shutil.rmtree(admin)
+
+    def _assert_pruned_force_cleanup(self, name, wt, branch, link_src=None, exclude_pattern=None):
+        """Shared postconditions for cleanup --force on an orphaned worktree."""
+        out = self.cli("cleanup", name, "--force")
+        self.assertIn("worktree metadata was missing", out)
+        self.assertFalse(wt.exists())
+        self.assertNotEqual(
+            subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                           cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+        listed = self.git("worktree", "list", "--porcelain")
+        self.assertNotIn(str(wt.resolve()), listed)
+        lines = (self.storage / "runs.jsonl").read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["outcome"], "discarded")
+        if exclude_pattern is not None:
+            self.assertNotIn(exclude_pattern, (self.repo / ".git/info/exclude").read_text())
+        if link_src is not None:
+            self.assertTrue(link_src.is_dir())
+            self.assertTrue((link_src / "sample").is_file())
+
+    def test_cleanup_force_pruned_worktree_admin_dir_deleted(self):
+        """Admin dir deleted while the folder stayed: refuse without --force; --force rmtree+prune."""
+        path = self.repo / "tests/data/mei"
+        path.mkdir(parents=True)
+        (path / "sample").write_text("fixture\n")
+        self.launch("codex", "pruned-admin", "--link", "tests/data/mei")
+        root = self.root("pruned-admin")
+        meta = runs.load_meta(root)
+        wt = Path(meta["worktree"])
+        branch = meta["branch"]
+        self.assertEqual(meta["excluded"], ["/tests/data/mei"])
+        self._delete_worktree_admin_dir(wt)
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "pruned-admin"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        err = rejected.stderr + rejected.stdout
+        self.assertNotIn("Traceback", err)
+        self.assertIn("--force", err)
+        self.assertTrue(wt.exists())
+        self.assertEqual(
+            subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                           cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+        self._assert_pruned_force_cleanup(
+            "pruned-admin", wt, branch, link_src=path, exclude_pattern="/tests/data/mei")
+
+    def test_cleanup_force_pruned_worktree_pruned_while_moved(self):
+        """Folder moved away, git worktree prune, then restored: --force still finishes."""
+        self.launch("codex", "pruned-moved")
+        root = self.root("pruned-moved")
+        meta = runs.load_meta(root)
+        wt = Path(meta["worktree"])
+        branch = meta["branch"]
+        parked = wt.parent / "wt-parked"
+        wt.rename(parked)
+        self.git("worktree", "prune")
+        parked.rename(wt)
+        self.assertTrue((wt / ".git").is_file())
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
+                           cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+        self._assert_pruned_force_cleanup("pruned-moved", wt, branch)
+
+    def test_cleanup_force_pruned_worktree_keeps_folder_outside_run(self):
+        """meta.worktree pointing outside the run record must not be rmtree'd."""
+        self.launch("codex", "pruned-outside")
+        root = self.root("pruned-outside")
+        meta = runs.load_meta(root)
+        outside = self.tmp / "outside-orphan"
+        outside.mkdir()
+        (outside / "keep-me").write_text("survive\n")
+        (outside / ".git").write_text(f"gitdir: {self.tmp / 'missing-admin'}\n")
+        meta["worktree"] = str(outside)
+        (root / "meta.json").write_text(json.dumps(meta) + "\n")
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "pruned-outside", "--force"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        err = rejected.stderr + rejected.stdout
+        self.assertNotIn("Traceback", err)
+        self.assertIn("left folder in place", err)
+        self.assertTrue(outside.is_dir())
+        self.assertEqual((outside / "keep-me").read_text(), "survive\n")
+
+    def test_cleanup_force_pruned_worktree_keeps_dot_git_directory(self):
+        """A .git directory from git init must not be removed as an orphaned worktree."""
+        self.launch("codex", "pruned-dotgit")
+        root = self.root("pruned-dotgit")
+        meta = runs.load_meta(root)
+        wt = Path(meta["worktree"])
+        tracked = (wt / "tracked.txt").read_text()
+        self._delete_worktree_admin_dir(wt)
+        (wt / ".git").unlink()
+        subprocess.run(
+            ["git", "init", "-q"], cwd=wt, env=self.env, check=True, capture_output=True)
+        self.assertTrue((wt / ".git").is_dir())
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "pruned-dotgit", "--force"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        err = rejected.stderr + rejected.stdout
+        self.assertNotIn("Traceback", err)
+        self.assertIn("left folder in place", err)
+        self.assertTrue(wt.is_dir())
+        self.assertEqual((wt / "tracked.txt").read_text(), tracked)
+
+    def test_cleanup_force_pruned_worktree_keeps_empty_dot_git_directory(self):
+        """An empty .git directory (rev-parse fails) must still refuse rmtree without -- matching gitfile."""
+        self.launch("codex", "pruned-emptydot")
+        root = self.root("pruned-emptydot")
+        meta = runs.load_meta(root)
+        wt = Path(meta["worktree"])
+        tracked = (wt / "tracked.txt").read_text()
+        self._delete_worktree_admin_dir(wt)
+        (wt / ".git").unlink()
+        (wt / ".git").mkdir()
+        self.assertTrue((wt / ".git").is_dir())
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
+                           cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "pruned-emptydot", "--force"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        err = rejected.stderr + rejected.stdout
+        self.assertNotIn("Traceback", err)
+        self.assertIn("left folder in place", err)
+        self.assertTrue(wt.is_dir())
+        self.assertEqual((wt / "tracked.txt").read_text(), tracked)
+
+    def test_cleanup_force_pruned_worktree_listed_odd_path_refuses(self):
+        """A run folder git still lists must not be rmtree'd, whatever bytes its path holds.
+
+        The listing comes through a real pipe, so text-mode newline translation (\\r and
+        \\r\\n read as \\n) or a decode error would show here, unlike a stubbed result."""
+        real_run = subprocess.run
+        for i, part in enumerate(["a\nb", "a\rb", "a\r\nb", os.fsdecode(b"a\xffb")]):
+            with self.subTest(part=repr(part)):
+                root = self.tmp / f"odd-{i}" / part / "pruned-odd"
+                wt = root / "wt"
+                wt.mkdir(parents=True)
+                (wt / "keep").write_text("survive\n")
+                (wt / ".git").write_text(f"gitdir: {self.tmp / 'missing-admin'}\n")
+                meta = {"worktree": str(wt), "repo": str(self.repo)}
+                self.assertNotEqual(
+                    real_run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
+                             cwd=self.repo, env=self.env, capture_output=True).returncode, 0)
+                listing = self.tmp / f"listing-{i}"
+                listing.write_bytes(b"worktree " + os.fsencode(str(wt.resolve()))
+                                    + b"\0HEAD " + b"0" * 40 + b"\0\0")
+                emit = ["import sys", "sys.stdout.buffer.write(open(sys.argv[1], 'rb').read())"]
+
+                def fake_run(cmd, *args, listing=listing, **kwargs):
+                    if list(cmd[:4]) == ["git", "worktree", "list", "--porcelain"] and "-z" in cmd:
+                        return real_run([sys.executable, "-c", "; ".join(emit), str(listing)],
+                                        *args, **kwargs)
+                    return real_run(cmd, *args, **kwargs)
+
+                with patch.object(runs.subprocess, "run", side_effect=fake_run):
+                    removed = runs._remove_orphaned_run_worktree(root, meta, wt, force=True)
+                self.assertFalse(removed)
+                self.assertTrue(wt.is_dir())
+                self.assertEqual((wt / "keep").read_text(), "survive\n")
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory mode bits")
+    def test_cleanup_force_pruned_worktree_rmtree_oserror(self):
+        """A read-only subfolder that blocks rmtree exits in one line; no prune, no traceback."""
+        self.launch("codex", "pruned-rmtree")
+        root = self.root("pruned-rmtree")
+        meta = runs.load_meta(root)
+        wt = Path(meta["worktree"])
+        self._delete_worktree_admin_dir(wt)
+        locked = wt / "locked"
+        locked.mkdir()
+        (locked / "held").write_text("block\n")
+        locked.chmod(0o500)
+
+        def _restore_locked():
+            if locked.is_dir():
+                locked.chmod(0o700)
+
+        self.addCleanup(_restore_locked)
+        rejected = subprocess.run(
+            [sys.executable, str(CLI), "cleanup", "pruned-rmtree", "--force"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        err = rejected.stderr + rejected.stdout
+        self.assertNotIn("Traceback", err)
+        self.assertIn("cannot remove orphaned worktree", err)
+        self.assertIn(str(wt), err)
+        self.assertTrue(wt.exists())
+
     def test_cleanup_branch_named_like_tracked_file(self):
         # A branch whose name matches a tracked path must still compare as a ref, not a path.
         (self.repo / "tracked.txt").write_text("base\nextra\n")
