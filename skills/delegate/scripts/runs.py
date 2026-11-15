@@ -1,8 +1,9 @@
 """Delegate runs: git worktree + brief + background agent + log + last message.
 
 A run lives in RUNS_ROOT/<repo>/<name>/. The current round's job files sit in
-the run root; `followup` archives them to round-<k>/ first. Reviews are jobs in
-review-<n>/ that read the worktree without changing it.
+the run root; `followup` archives them to round-<k>/ first, with that round's
+cumulative changes.patch. Reviews are jobs in review-<n>/ that read the
+worktree without changing it, and keep the reviewer's patch as review.patch.
 """
 import hashlib
 import json
@@ -932,6 +933,12 @@ def followup(a):
     for f in ROUND_FILES:
         if (root / f).exists():
             shutil.move(str(root / f), str(archive / f))
+    # Cumulative worktree diff at archive time (record only; failure must not block the next round).
+    try:
+        _, patch = make_patch(root, meta)
+        write_patch(archive / "changes.patch", patch)
+    except (Exception, SystemExit) as e:
+        print(f"WARNING: round-{k}/changes.patch not written: {e}", file=sys.stderr)
     _write_warnings(root, warnings)
     if a.fresh:
         scope = ("This is a read-only task: do not modify, create or delete any files."
@@ -1348,6 +1355,7 @@ def review_working_tree(a):
         job = root / f"review-{n}"
         job.mkdir()
         write_patch(wt / ".delegate" / f"review-{n}.patch", review_patch)
+        write_patch(job / "review.patch", review_patch)
         # Stub only: working-tree runs have no verify; the prompt omits the verify-log sentence.
         (wt / ".delegate" / f"review-{n}.verify.log").write_text(
             "$ (no verify command stored)\n(no verify output recorded)\n")
@@ -1441,6 +1449,7 @@ def review(a):
     for old in (wt / ".delegate").glob("review-*.patch"):
         old.unlink()  # a stale diff would only confuse the reviewer
     write_patch(wt / ".delegate" / f"review-{n}.patch", review_patch)
+    write_patch(job / "review.patch", review_patch)
     if omit_line:
         print(omit_line)
     verify_log = root / "verify.log"
@@ -1957,6 +1966,8 @@ def packet(job):
     paths = f"artifacts: {job / 'last-message.md'} | {job / 'log'} | {job / 'verify.log'}"
     if review_meta is not None:
         paths += f" | {Path(meta['worktree']) / '.delegate' / (job.name + '.verify.log')}"
+        if (job / "review.patch").exists():
+            paths += f" | {job / 'review.patch'}"
     elif (root / "changes.patch").exists():
         paths += f" | {root / 'changes.patch'}"
     tail.append(paths)

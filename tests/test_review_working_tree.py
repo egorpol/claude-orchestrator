@@ -327,6 +327,22 @@ class WorkingTreeReviewTests(unittest.TestCase):
         self.assertIn("[dry run]", buf.getvalue())
         self.assertFalse(self.root("dry-ip").exists())
 
+    def test_each_reviewer_keeps_job_folder_patch_copy(self):
+        self.dirty_main()
+        self.cli("review", "--working-tree", "--brief", self.brief, "--name", "wt-keep",
+                 "--no-fallback")
+        root = self.root("wt-keep")
+        for n in (1, 2):
+            job = root / f"review-{n}"
+            src = root / "wt/.delegate" / f"review-{n}.patch"
+            kept = job / "review.patch"
+            self.assertTrue(kept.exists(), f"missing {kept}")
+            self.assertEqual(kept.read_bytes(), src.read_bytes())
+            self.assertIn(b"+modified", kept.read_bytes())
+        self.assertEqual(
+            (root / "review-1/review.patch").read_bytes(),
+            (root / "review-2/review.patch").read_bytes())
+
     def test_wait_prints_all_working_tree_reviews_when_idle(self):
         """A failed earlier review is not hidden when none were busy during wait."""
         self.dirty_main()

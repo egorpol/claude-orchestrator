@@ -29,5 +29,5 @@ Read before selecting per-agent flags, handling environment gotchas or inspectin
 
 `~/.cache/claude-delegate/runs/<repo>/<name>/` (`--root` or `$CLAUDE_DELEGATE_ROOT`):
 - current round: `brief.md` · `prompt.md` · `run.sh` · `log` · `last-message.md` · `exit_code` · `verify.log` / `verify_code`
-- `round-<k>/`, `review-<n>/` (plus `pre_digest` / `post_digest`)
-- `meta.json` (`main_dirty`: a HEAD launch's dirty main-tree paths), `wt/`, `changes.patch` (rewritten at the end of each round and by `diff`, `review`, `apply`), `applied` (after `apply`)
+- `round-<k>/` (includes `changes.patch`: the diff against base at followup time, with edits made between rounds, so one round's delta is the interdiff of two archives), `review-<n>/` (includes `review.patch`, the diff that reviewer saw; plus `pre_digest` / `post_digest`)
+- `meta.json` (`main_dirty`: a HEAD launch's dirty main-tree paths), `wt/`, `changes.patch` (rewritten at the end of each round and by `followup`, `diff`, `review`, `apply`), `applied` (after `apply`)

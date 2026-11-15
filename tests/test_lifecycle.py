@@ -698,6 +698,118 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("WARNING: changes.patch not written: git add -A -N failed: boom", err.getvalue())
         self.assertNotIn("changes.patch", out.getvalue().splitlines()[-1])
 
+    def _wt_diff_bytes(self, root, base):
+        wt = root / "wt"
+        subprocess.run(["git", "add", "-A", "-N"], cwd=wt, env=self.env, check=True, capture_output=True)
+        return subprocess.run(["git", "diff", "--binary", base], cwd=wt, env=self.env, check=True,
+                              capture_output=True).stdout
+
+    def test_followup_archives_round_changes_patch(self):
+        self.launch("codex", "arch-round")
+        root = self.root("arch-round")
+        base = runs.load_meta(root)["base"]
+        before = self._wt_diff_bytes(root, base)
+        self.assertIn(b"new-codex.txt", before)
+        self.cli("followup", "arch-round", "--brief", self.follow_brief)
+        archived = root / "round-1/changes.patch"
+        self.assertTrue(archived.exists())
+        self.assertEqual(archived.read_bytes(), before)
+        self.assertEqual(archived.read_bytes().count(b"+codex round"), 1)
+        self.assertIn(b"new-codex.txt", archived.read_bytes())
+        root_patch = (root / "changes.patch").read_bytes()
+        self.assertEqual(root_patch.count(b"+codex round"), 2)
+
+    def test_followup_archive_includes_file_created_between_rounds(self):
+        # finalize already made new-codex.txt intent-to-add; this file is truly untracked,
+        # so a plain `git diff base` at followup would miss it
+        self.launch("codex", "arch-between")
+        root = self.root("arch-between")
+        (root / "wt/between-rounds.txt").write_text("edited between rounds\n")
+        self.cli("followup", "arch-between", "--brief", self.follow_brief)
+        archived = (root / "round-1/changes.patch").read_bytes()
+        self.assertIn(b"between-rounds.txt", archived)
+        self.assertIn(b"+edited between rounds", archived)
+
+    def test_second_followup_leaves_round_1_patch_unchanged(self):
+        self.launch("codex", "arch-keep")
+        root = self.root("arch-keep")
+        self.cli("followup", "arch-keep", "--brief", self.follow_brief)
+        r1 = (root / "round-1/changes.patch").read_bytes()
+        self.cli("followup", "arch-keep", "--brief", self.follow_brief)
+        self.assertEqual((root / "round-1/changes.patch").read_bytes(), r1)
+        self.assertTrue((root / "round-2/changes.patch").exists())
+        self.assertEqual((root / "changes.patch").read_bytes().count(b"+codex round"), 3)
+
+    def test_followup_dry_run_writes_no_archived_patch(self):
+        self.launch("codex", "arch-dry")
+        root = self.root("arch-dry")
+        self.cli("followup", "arch-dry", "--brief", self.follow_brief, "--dry-run")
+        self.assertFalse((root / "round-1").exists())
+        self.assertFalse((root / "round-1/changes.patch").exists())
+
+    def test_followup_fresh_archives_round_changes_patch(self):
+        self.launch("codex", "arch-fresh")
+        root = self.root("arch-fresh")
+        base = runs.load_meta(root)["base"]
+        before = self._wt_diff_bytes(root, base)
+        self.cli("followup", "arch-fresh", "--brief", self.follow_brief, "--fresh")
+        archived = root / "round-1/changes.patch"
+        self.assertTrue(archived.exists())
+        self.assertEqual(archived.read_bytes(), before)
+        self.assertEqual((root / "changes.patch").read_bytes().count(b"+codex round"), 2)
+
+    def test_followup_continues_when_archived_patch_fails(self):
+        self.launch("codex", "arch-fail")
+        root = self.root("arch-fail")
+        args = argparse.Namespace(
+            run="arch-fail", brief=str(self.follow_brief), from_review=None, fresh=False,
+            model=None, effort=None, verify=None, link=[], detach=False, dry_run=False)
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(runs, "make_patch", side_effect=SystemExit("git add -A -N failed: boom")), \
+             patch.object(runs, "start"), \
+             patch.object(runs.quota, "spawn_snapshot"), \
+             patch.dict(os.environ, self.env, clear=True), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            runs.followup(args)
+        self.assertIn("WARNING: round-1/changes.patch not written: git add -A -N failed: boom",
+                      err.getvalue())
+        self.assertFalse((root / "round-1/changes.patch").exists())
+        self.assertEqual(runs.load_meta(root)["rounds"], 2)
+        self.assertTrue((root / "round-1/log").exists())
+        self.assertIn("round 1 archived", out.getvalue())
+
+    def test_review_keeps_job_folder_patch_copy(self):
+        self.launch("codex", "rv-keep")
+        root = self.root("rv-keep")
+        wt = root / "wt"
+        (wt / "crlf.txt").write_bytes(b"one\r\ntwo \xff\xfe\r\n")
+        out1 = self.cli("review", "rv-keep")
+        seen1 = (wt / ".delegate/review-1.patch").read_bytes()
+        self.assertIn(b"two \xff\xfe\r\n", seen1)
+        kept1 = root / "review-1/review.patch"
+        self.assertTrue(kept1.exists())
+        self.assertEqual(kept1.read_bytes(), seen1)
+        self.assertIn(str(kept1), self.last_packet(out1))
+        (wt / "later.txt").write_text("after review 1\n")
+        out2 = self.cli("review", "rv-keep")
+        self.assertEqual(kept1.read_bytes(), seen1)
+        left = sorted(p.name for p in (wt / ".delegate").glob("review-*.patch"))
+        self.assertEqual(left, ["review-2.patch"])
+        kept2 = root / "review-2/review.patch"
+        self.assertEqual(kept2.read_bytes(), (wt / ".delegate/review-2.patch").read_bytes())
+        self.assertIn(b"later.txt", kept2.read_bytes())
+        self.assertNotIn(b"later.txt", seen1)
+        self.assertIn(str(kept2), self.last_packet(out2))
+
+    def test_review_dry_run_writes_no_job_patch(self):
+        self.launch("codex", "rv-dry")
+        root = self.root("rv-dry")
+        self.cli("review", "rv-dry", "--dry-run")
+        self.assertEqual(list(root.glob("review-*")), [])
+        delegate = root / "wt/.delegate"
+        if delegate.exists():
+            self.assertEqual(list(delegate.glob("review-*.patch")), [])
+
     def test_full_status_of_review_job(self):
         self.launch("codex", "rv")
         self.cli("review", "rv")
@@ -2120,6 +2232,9 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("diff --git a/big.bin b/big.bin", review)
         self.assertIn("# delegate: diff omitted from the review patch", review)
         self.assertNotIn("+" + "x" * 100, review)
+        kept = (self.root("bigpatch") / "review-1/review.patch").read_bytes()
+        self.assertEqual(kept, (wt / ".delegate/review-1.patch").read_bytes())
+        self.assertIn(b"# delegate: diff omitted", kept)
         self.assertIn("big.bin", (self.root("bigpatch") / "review-1/prompt.md").read_text())
         self.cli("diff", "bigpatch")
         full = (self.root("bigpatch") / "changes.patch").read_text(errors="replace")
