@@ -13,6 +13,7 @@ from pathlib import Path
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 _EFFORT_SUFFIX = re.compile(
     r"[-_ ](extra[-_ ]high|non[-_ ]reasoning|none|minimal|low|medium|high|xhigh|max)$", re.I)
+_VERSION = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+][0-9A-Za-z.+-]+)?")
 
 
 def normalize_effort(value):
@@ -55,13 +56,43 @@ def aa_index(models):
     return index, warnings
 
 
+def _alias_key(agent, model, effort):
+    return f"{agent}:{model}" + (f"@{effort}" if agent == "codex" else "")
+
+
 def match_aa(agent, model, effort, models, index, aliases):
-    key = f"{agent}:{model}" + (f"@{effort}" if agent == "codex" else "")
+    key = _alias_key(agent, model, effort)
     if key in aliases:
         slug = aliases[key]
         return slug if slug in models else None
     family, suffix = split_effort(model)
     return index.get((family_key(family), effort if agent == "codex" else suffix))
+
+
+def delegate_aa_mismatch(delegate, models, aliases):
+    """Return a warning for a delegate that points to another model or effort."""
+    slug = delegate.get("aa")
+    if not slug or slug not in models or delegate.get("aa_proxy"):
+        return None
+    agent, model = delegate.get("agent"), delegate["model"]
+    family, suffix = split_effort(model)
+    configured_effort = delegate.get("effort")
+    effort = normalize_effort(configured_effort) if isinstance(configured_effort, str) else None
+    effort = effort or suffix
+    if agent in ("cursor", "codex") and aliases.get(_alias_key(agent, model, effort)) == slug:
+        return None
+    rated_family, rated_effort = aa_key(slug, models[slug])
+    family = family_key(family)
+    if agent == "claude-subagent" and re.fullmatch(r"[a-zA-Z]+", model):
+        same_family = family in rated_family
+    else:
+        same_family = family == rated_family
+    if same_family and (not effort or not rated_effort or effort == rated_effort):
+        return None
+    effort_label = f"@{effort}" if effort else " (effort unspecified)"
+    return (f"AA slug {slug!r} mismatches {model}{effort_label}. Correct `aa`, set "
+            "`aa_proxy: true` for a deliberate stand-in, or add an `aa_aliases` entry "
+            "for a spelling difference.")
 
 
 def parse_cursor_models(text):
@@ -93,6 +124,22 @@ def cursor_models():
 def codex_cache():
     path = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "models_cache.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def codex_cli_version():
+    from ask import clean_env
+    result = subprocess.run(["codex", "--version"], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=20, check=True,
+                            env=clean_env())
+    for token in result.stdout.split():
+        if _VERSION.fullmatch(token):
+            return token
+    raise ValueError("no version in output")
+
+
+def _version_core(version):
+    match = _VERSION.match(version) if isinstance(version, str) else None
+    return tuple(int(part) for part in match.groups()) if match else None
 
 
 def auto_family(model):
@@ -167,9 +214,10 @@ def runnable_rows(catalog, models, cursor_ids, cache, default_codex):
     for delegate in catalog.get("delegates", []):
         if delegate["agent"] == "claude-subagent" and not delegate.get("aa_proxy"):
             slug = delegate.get("aa")
-            effort = aa_key(slug, models[slug])[1] if slug in models else delegate.get("effort")
-            rows.append(_row("claude", delegate["model"], effort,
-                             slug if slug in models else None, models))
+            if slug not in models or delegate_aa_mismatch(delegate, models, aliases):
+                slug = None
+            effort = aa_key(slug, models[slug])[1] if slug is not None else delegate.get("effort")
+            rows.append(_row("claude", delegate["model"], effort, slug, models))
     return rows, warnings, skipped
 
 
@@ -192,6 +240,7 @@ def pareto(rows, unit):
 
 def catalog_checks(catalog, models, rows):
     problems = []
+    aliases = catalog.get("aa_aliases", {})
     for delegate in catalog.get("delegates", []):
         slug = delegate.get("aa")
         base = {"id": delegate["id"], "aa": slug, "unit": None, "by": None,
@@ -201,6 +250,9 @@ def catalog_checks(catalog, models, rows):
             last = words[-1].lower() if words else ""
             hints = sorted(s for s in models if last and last in s.lower())[:5]
             problems.append(dict(base, problem="aa-missing", similar=hints))
+            continue
+        if delegate_aa_mismatch(delegate, models, aliases):
+            problems.append(dict(base, problem="aa-mismatch"))
             continue
         rating = models[slug]
         unit = "cost_per_task" if rating.get("cost_per_task") is not None else "price_blended"
@@ -242,8 +294,14 @@ def fallback_description(selection):
             f"${old['cost_per_task']:.3f}/task; bills {row['pool']}")
 
 
-def build_report(catalog, env, cursor_ids, cache, default_codex):
+def build_report(catalog, env, cursor_ids, cache, default_codex, codex_cli_version=None):
     rows, warnings, skipped = runnable_rows(catalog, env["models"], cursor_ids, cache, default_codex)
+    cache_client_version = cache.get("client_version")
+    cache_core, cli_core = _version_core(cache_client_version), _version_core(codex_cli_version)
+    if cache_core is not None and cli_core is not None and cache_core > cli_core:
+        warnings.append(f"Codex models cache client_version {cache_client_version} is newer than "
+                        f"the installed Codex CLI {codex_cli_version}. Models listed from the cache "
+                        "may not run with this CLI. Update the Codex CLI with `codex update`.")
     fallback, reason = pick_fallback(rows, *default_codex)
     not_rated = {"cursor": set(), "codex": set()}
     matched = {"cursor": set(), "codex": set()}
@@ -258,7 +316,7 @@ def build_report(catalog, env, cursor_ids, cache, default_codex):
             "catalog": catalog_checks(catalog, env["models"], rows), "fallback": fallback,
             "fallback_reason": reason, "not_rated": {k: sorted(v - matched[k]) for k, v in not_rated.items()},
             "warnings": warnings, "skipped": skipped,
-            "codex_cache_client_version": cache.get("client_version")}
+            "codex_cache_client_version": cache_client_version, "codex_cli_version": codex_cli_version}
 
 
 def load_report(catalog, refresh=False, default_codex=None):
@@ -277,7 +335,12 @@ def load_report(catalog, refresh=False, default_codex=None):
     except (OSError, ValueError) as exc:
         cache = {}
         warnings.append(f"Codex models cache unavailable: {exc}")
-    report = build_report(catalog, env, ids, cache, default_codex or DEFAULTS["codex"])
+    try:
+        cli_version = codex_cli_version()
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        cli_version = None
+        warnings.append(f"codex --version unavailable: {exc}")
+    report = build_report(catalog, env, ids, cache, default_codex or DEFAULTS["codex"], cli_version)
     report["warnings"].extend(warnings)
     return report
 
@@ -295,7 +358,8 @@ def _table(rows, unit):
 def render(report, catalog):
     fetched = time.strftime("%Y-%m-%d %H:%M", time.localtime(report["fetched_at"]))
     lines = [f"AA source: {report['source']}, fetched {fetched}; "
-             f"Codex cache client_version: {report['codex_cache_client_version'] or 'unknown'}",
+             f"Codex cache client_version: {report['codex_cache_client_version'] or 'unknown'}; "
+             f"Codex CLI version: {report.get('codex_cli_version') or 'unknown'}",
              f"Cursor skipped: {report['skipped']['cursor_auto']} auto, "
              f"{report['skipped']['cursor_fast']} -fast priority tiers", "", "Intelligence vs $/task"]
     if not any(r.get("cost_per_task") is not None for r in report["runnable"]):
@@ -313,6 +377,8 @@ def render(report, catalog):
         elif problem["problem"] == "aa-missing":
             hints = "; similar: " + ", ".join(problem["similar"]) if problem["similar"] else ""
             lines.append(f"  {label}: AA slug {problem['aa']!r} missing{hints}")
+        elif problem["problem"] == "aa-mismatch":
+            lines.append(f"  {label}: AA slug {problem['aa']!r} mismatches the delegate's model or effort")
         else:
             row = problem["by"]
             unit = "$/task" if problem["unit"] == "cost_per_task" else "$/1M"

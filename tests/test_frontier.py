@@ -28,10 +28,11 @@ def row(model, intelligence, task, blended, agent="cursor", creator="OpenAI"):
                 creator=creator, pool=frontier.pool_for(agent, model, creator))
 
 
-def report(models, ids=(), delegates=(), aliases=None, cache=None):
+def report(models, ids=(), delegates=(), aliases=None, cache=None, cli_version=None):
     catalog = {"delegates": list(delegates), "aa_aliases": aliases or {}}
     env = {"models": models, "source": "fixture", "fetched_at": 100}
-    return frontier.build_report(catalog, env, ids, cache or {}, ("gpt-6.1-sol", "medium"))
+    return frontier.build_report(catalog, env, ids, cache or {}, ("gpt-6.1-sol", "medium"),
+                                 codex_cli_version=cli_version)
 
 
 class MatchingTest(unittest.TestCase):
@@ -173,6 +174,43 @@ class FrontierTest(unittest.TestCase):
         self.assertEqual(by_id["token"]["unit"], "price_blended")
         self.assertNotIn("safe", by_id)  # cheaper per token says nothing about per-task dominance
 
+    def test_catalog_mismatches_leave_codex_matches_and_fallback_intact(self):
+        models = {"gpt-6-1-sol-medium": rating("Sol (Medium)", intelligence=20),
+                  "nimbus-two-high": rating("Nimbus Two (High)"),
+                  "wrong-medium": rating("Wrong (Medium)", intelligence=10)}
+        delegates = [{"id": "sol", "agent": "codex", "model": "gpt-6.1-sol", "effort": "medium",
+                      "aa": "wrong-medium"},
+                     {"id": "nimbus", "agent": "cursor", "model": "nimbus-2-high", "aa": "nimbus-two-high"},
+                     {"id": "auto", "agent": "cursor", "model": "auto", "aa": "nimbus-two-high",
+                      "aa_proxy": True}]
+        result = report(models, ["nimbus-2-high"], delegates, {"cursor:nimbus-2-high": "nimbus-two-high"})
+        self.assertEqual(result["catalog"], [{"id": "sol", "aa": "wrong-medium", "unit": None,
+                                             "by": None, "similar": [], "proxy": False, "problem": "aa-mismatch"}])
+        codex_row, = [r for r in result["runnable"] if r["agent"] == "codex"]
+        self.assertEqual(codex_row["aa"], "gpt-6-1-sol-medium")
+        self.assertEqual(result["fallback"]["row"]["model"], "nimbus-2-high")
+        lines = frontier.render(result, {"delegates": delegates}).splitlines()
+        check, = [line for line in lines if line.startswith("  sol:")]
+        self.assertIn("wrong-medium", check)
+        self.assertIn("mismatch", check)
+        self.assertNotIn("dominated", check)
+        self.assertIn("  nimbus: ok", lines)
+        self.assertIn("  auto ~ (proxy): ok", lines)
+
+    def test_mismatched_claude_delegate_is_runnable_without_a_rating(self):
+        models = {"claude-haiku-5-5": rating("Haiku", creator="Anthropic"),
+                  "claude-sonnet-5-5-high": rating("Sonnet (High)", creator="Anthropic")}
+        delegates = [{"id": "sub", "agent": "claude-subagent", "model": "sonnet", "effort": "high",
+                      "aa": "claude-haiku-5-5"}]
+        result = report(models, delegates=delegates)
+        unknown = report(models, delegates=[dict(delegates[0], aa="missing")])
+        self.assertEqual(result["runnable"], unknown["runnable"])
+        sub, = [r for r in result["runnable"] if r["agent"] == "claude"]
+        self.assertEqual((sub["model"], sub["effort"], sub["aa"]), ("sonnet", "high", None))
+        self.assertIsNone(sub["intelligence"])
+        self.assertEqual(result["frontiers"], {"cost_per_task": [], "price_blended": []})
+        self.assertEqual(result["catalog"][0]["problem"], "aa-mismatch")
+
     def test_fallback_cap_exclusions_and_tiebreak(self):
         old = dict(row("gpt-6.1-sol", 46, 0.21, 1, "codex"), effort="medium")
         rows = [old, row("nimbus-max", 44, 0.27, 2), row("same-int", 44, 0.4, 1),
@@ -202,6 +240,25 @@ class FrontierTest(unittest.TestCase):
         self.assertEqual(text.count("Source: Artificial Analysis (https://artificialanalysis.ai/)."), 1)
         self.assertTrue(text.splitlines()[-1].startswith("ask --agent both if Codex empty:"))
 
+    def test_cache_version_comparison_uses_numeric_core(self):
+        cases = (("0.10.0", "0.9.0", True), ("0.10.0-alpha.1", "0.9.0", True),
+                 ("0.9.0", "0.10.0", False), ("0.170.0", "0.170.0", False),
+                 ("0.170.0-alpha.1", "0.170.0", False), ("0.170.0", "0.170.0-alpha.1", False),
+                 ("unparseable", "0.9.0", False), ("0.10.0", "unparseable", False),
+                 (None, "0.9.0", False), ("0.10.0", None, False))
+        for cached, installed, newer in cases:
+            with self.subTest(cached=cached, installed=installed):
+                cache = {"client_version": cached} if cached is not None else {}
+                result = report({}, cache=cache, cli_version=installed)
+                self.assertEqual(result["codex_cache_client_version"], cached)
+                self.assertEqual(result["codex_cli_version"], installed)
+                if newer:
+                    warning, = result["warnings"]
+                    for fragment in ("newer than", cached, installed, "may not run", "codex update"):
+                        self.assertIn(fragment, warning)
+                else:
+                    self.assertEqual(result["warnings"], [])
+
 
 class DiscoveryAndCliTest(unittest.TestCase):
     @classmethod
@@ -213,25 +270,60 @@ class DiscoveryAndCliTest(unittest.TestCase):
 
     def test_codex_home_and_report_discovery_are_local_fakes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "models_cache.json").write_text(json.dumps({"client_version": "fixture", "models": []}))
-            with mock.patch.dict(os.environ, {"CODEX_HOME": tmp}), \
-                 mock.patch.object(frontier.subprocess, "run", return_value=mock.Mock(stdout="Available models\na-high - A\n")) as run, \
+            Path(tmp, "models_cache.json").write_text(json.dumps({"client_version": "0.171.0", "models": []}))
+            replies = [mock.Mock(stdout="Available models\na-high - A\n"),
+                       mock.Mock(stdout="codex-cli 0.170.0-alpha.11.1\n")]
+            path = os.pathsep.join(("/tmp/.mount_cursor/usr/bin", os.environ["PATH"]))
+            with mock.patch.dict(os.environ, {"CODEX_HOME": tmp, "PATH": path, "LD_LIBRARY_PATH": "/tmp/.mount_cursor/usr/lib"}), \
+                 mock.patch.object(frontier.subprocess, "run", side_effect=replies) as run, \
                  mock.patch("ratings.load", return_value={"source": "fixture", "fetched_at": 1,
                             "models": {"a": rating("A (High)")}}):
                 result = frontier.load_report({"delegates": []}, refresh=True)
-            self.assertEqual(result["codex_cache_client_version"], "fixture")
-            self.assertEqual(run.call_args.args[0], ["cursor-agent", "models"])
+            self.assertEqual([call.args[0] for call in run.call_args_list],
+                             [["cursor-agent", "models"], ["codex", "--version"]])
+            for call in run.call_args_list:
+                self.assertGreater(call.kwargs["timeout"], 0)
+                self.assertTrue(call.kwargs["check"])
+                self.assertNotIn("LD_LIBRARY_PATH", call.kwargs["env"])
+                self.assertNotIn("/.mount_", call.kwargs["env"]["PATH"])
+                self.assertEqual(call.kwargs["env"]["CODEX_HOME"], tmp)
+            self.assertEqual(result["codex_cache_client_version"], "0.171.0")
+            self.assertEqual(result["codex_cli_version"], "0.170.0-alpha.11.1")
+            self.assertIn("newer than", result["warnings"][0])
+            header = frontier.render(result, {"delegates": []}).splitlines()[0]
+            self.assertIn("Codex cache client_version: 0.171.0; Codex CLI version: 0.170.0-alpha.11.1", header)
             self.assertEqual(result["runnable"][0]["aa"], "a")
+
+    def test_codex_version_failures_warn_without_losing_the_report(self):
+        command = ["codex", "--version"]
+        probes = ((FileNotFoundError("codex executable missing"), "executable missing"),
+                  (frontier.subprocess.TimeoutExpired(command, 20), "timed out"),
+                  (frontier.subprocess.CalledProcessError(3, command), "exit status 3"),
+                  (mock.Mock(stdout="codex-cli unknown\n"), "no version"))
+        for probe, reason in probes:
+            with self.subTest(reason=reason), \
+                 mock.patch("ratings.load", return_value={"source": "fixture", "fetched_at": 1, "models": {}}), \
+                 mock.patch.object(frontier, "codex_cache", return_value={"client_version": "0.170.0"}), \
+                 mock.patch.object(frontier.subprocess, "run", side_effect=[
+                     mock.Mock(stdout="Available models\nnimbus-high - Nimbus\n"), probe]):
+                result = frontier.load_report({"delegates": []})
+                self.assertIsNone(result["codex_cli_version"])
+                warning, = result["warnings"]
+                self.assertIn("codex --version", warning)
+                self.assertIn(reason, warning)
+                self.assertEqual(result["runnable"][0]["model"], "nimbus-high")
 
     def test_missing_key_exception_carries_same_message_for_fallback_callers(self):
         import ratings
         message = ratings.missing_key_message()
         with mock.patch.object(ratings, "load", side_effect=ratings.MissingAPIKey(message)), \
-             mock.patch.object(frontier, "cursor_models") as discover:
+             mock.patch.object(frontier, "cursor_models") as discover, \
+             mock.patch.object(frontier, "codex_cli_version") as version:
             with self.assertRaisesRegex(ratings.MissingAPIKey, "ARTIFICIAL_ANALYSIS_API_KEY") as exc:
                 frontier.load_report({"delegates": []})
         self.assertEqual(str(exc.exception), message)
         discover.assert_not_called()
+        version.assert_not_called()
 
     def test_route_frontier_json_refresh_and_no_quota_or_rank(self):
         result = report({})
@@ -245,7 +337,8 @@ class DiscoveryAndCliTest(unittest.TestCase):
             self.cli.main()
         self.assertEqual(json.loads(out.getvalue()), result)
         self.assertTrue(load.call_args.kwargs["refresh"])
-        self.assertTrue({"source", "fetched_at", "runnable", "frontiers", "catalog", "fallback", "not_rated", "warnings"} <= result.keys())
+        self.assertTrue({"source", "fetched_at", "runnable", "frontiers", "catalog", "fallback", "not_rated",
+                         "warnings", "codex_cache_client_version", "codex_cli_version"} <= result.keys())
 
     def test_route_requires_exactly_task_or_frontier(self):
         for args in (["route"], ["route", "research", "--frontier"]):

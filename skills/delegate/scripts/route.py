@@ -1,9 +1,11 @@
 """Rank delegates for a task type: AA ratings weighted per task x live quota."""
 import math
 
+from frontier import delegate_aa_mismatch
 from ratings import ATTRIBUTION
 
 METRICS = ("intelligence", "coding", "speed", "price")
+_WITHHELD_SOURCE = "withheld (aa mismatch)"
 
 
 def _positive_price(v):
@@ -19,13 +21,13 @@ def _positive_price(v):
     return v
 
 
-def _ratings(d, aa_models):
+def _ratings(d, aa_models, rating_warning):
     """Return (metrics dict, price_blended, cost_per_task, source tag).
 
     metrics["price"] is filled later, once the ranking's price unit is chosen.
     """
     slug = d.get("aa")
-    if slug and slug in aa_models:
+    if slug and slug in aa_models and not rating_warning:
         m = aa_models[slug]
         return ({"intelligence": m.get("intelligence"), "coding": m.get("coding"),
                  "speed": m.get("tps"), "price": None},
@@ -38,8 +40,11 @@ def _ratings(d, aa_models):
                  "speed": p.get("tps"), "price": None},
                 _positive_price(p.get("price_blended")),
                 _positive_price(p.get("cost_per_task")), "prior")
-    return ({k: None for k in METRICS}, None, None,
-            f"missing AA slug {slug!r}" if slug else "unrated")
+    if rating_warning:
+        source = _WITHHELD_SOURCE
+    else:
+        source = f"missing AA slug {slug!r}" if slug else "unrated"
+    return ({k: None for k in METRICS}, None, None, source)
 
 
 def _quota(d, pools):
@@ -98,17 +103,21 @@ def rank(task_name, catalog, pools, aa_models, min_quota=None, agents=None, pref
     min_quota = catalog.get("min_quota_pct", 10) if min_quota is None else min_quota
     pref = _prefer_list(task_name, catalog, prefer)
     pref_index = {did: i for i, did in enumerate(pref)}
+    aliases = catalog.get("aa_aliases", {})
     rows = []
     for d in catalog["delegates"]:
         if agents and d["agent"] not in agents:
             continue
+        rating_warning = None
         if quota_only:
             metrics, blended, cpt, source = ({k: None for k in METRICS}, None, None,
                                               "unrated (quota only)")
         else:
-            metrics, blended, cpt, source = _ratings(d, aa_models)
+            rating_warning = delegate_aa_mismatch(d, aa_models, aliases)
+            metrics, blended, cpt, source = _ratings(d, aa_models, rating_warning)
         left, pace, problems, unknown = _quota(d, pools)
         rows.append({"delegate": d, "metrics": metrics, "source": source,
+                     "rating_warning": rating_warning,
                      "_blended": blended, "_cpt": cpt,
                      "left": left, "pace": pace, "problems": problems,
                      "unknown_pools": unknown,
@@ -233,8 +242,11 @@ def render(task_name, task, rows):
                "QUOTA ? = unknown pool (neither excluded nor treated as full).")
     out.append("ROUNDS = rounds left in the delegate's tightest pool at its median per-round cost "
                "from the logs (n >= 3).")
-    out.append("SRC: aa = AA API, unrated (quota only) = no ratings available, "
-               "~ = rating of a stand-in model (aa_proxy), prior = hand-set guess in catalog.json.")
+    source_legend = ("SRC: aa = AA API, unrated (quota only) = no ratings available, "
+                     "~ = rating of a stand-in model (aa_proxy), prior = hand-set guess in catalog.json")
+    if any(r["source"] == _WITHHELD_SOURCE for r in rows):
+        source_legend += f", {_WITHHELD_SOURCE} = AA slug rates a different model or effort"
+    out.append(source_legend + ".")
     aa_rows = [r for r in rows if r["source"].startswith("aa")]
     if aa_rows:
         out.append(ATTRIBUTION)
@@ -248,6 +260,9 @@ def render(task_name, task, rows):
         if d.get("notes"):
             out.append(f"note: {d['notes']}")
     for r in rows:
+        rating_warning = r.get("rating_warning")
+        if rating_warning:
+            out.append(f"warning: {r['delegate']['id']}: {rating_warning}")
         for p in r["problems"]:
             out.append(f"warning: {r['delegate']['id']}: {p}")
         for pid in r.get("unknown_pools") or []:

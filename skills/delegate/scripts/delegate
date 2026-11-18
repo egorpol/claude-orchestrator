@@ -199,6 +199,7 @@ def cmd_route(a):
         print(json.dumps([{"id": r["delegate"]["id"], "score": r["score"], "quality": r["quality"],
                            "quota_left": r["left"], "pace": r["pace"], "excluded": r["excluded"],
                            "metrics": r["metrics"], "source": r["source"],
+                           "rating_warning": r["rating_warning"],
                            "price_unit": r["price_unit"],
                            "rounds_left": r.get("rounds_left"),
                            "round_cost": r.get("round_cost"),

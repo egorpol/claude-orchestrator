@@ -16,6 +16,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "delegate" / "scripts
 sys.path.insert(0, str(SCRIPTS))
 os.environ["DELEGATE_CATALOG_LOCAL"] = ""
 
+import catalog  # noqa: E402
+import frontier  # noqa: E402
 import ratings  # noqa: E402
 import route  # noqa: E402
 
@@ -254,6 +256,90 @@ def _half_quota_pools(cat):
             for p in ("codex-5h", "codex-7d", "cursor-auto", "claude-5h", "claude-7d")}
 
 
+class TestRatingConsistency(unittest.TestCase):
+    def test_local_overrides_withhold_other_versions_and_efforts(self):
+        base = _shipped_catalog()
+        base["delegates"] = [d for d in base["delegates"] if d["id"] == "codex-sol"]
+        models = _aa_fixture_models()
+        models["gpt-6-1-sol-high"] = dict(models["gpt-6-2-sol-xhigh"], name="Invented Sol (High)")
+        prior = {"intelligence": 12, "coding": 14, "tps": 16, "cost_per_task": 0.9}
+        cases = (
+            ({"effort": "high", "aa": "gpt-6-1-sol-high"}, "gpt-6-1-sol-high", "withheld (aa mismatch)"),
+            ({"effort": "high", "prior": prior}, "gpt-6-2-sol-xhigh", "prior"),
+        )
+        for fields, slug, source in cases:
+            with self.subTest(fields=fields):
+                cat, _, _ = catalog.merge(base, {"delegates": [dict(fields, id="codex-sol")]})
+                task, rows = route.rank("implement", cat, _half_quota_pools(cat), models)
+                row, = rows
+                self.assertEqual(row["source"], source)
+                self.assertTrue(row["quota_read"])
+                self.assertTrue(row["preferred"])
+                self.assertEqual(row["problems"], [])
+                rendered = route.render("implement", task, rows)
+                warning = row["rating_warning"]
+                self.assertEqual([line for line in rendered.splitlines() if line.startswith("warning:")],
+                                 [f"warning: codex-sol: {warning}"])
+                for fragment in (slug, "gpt-6.2-sol@high", "Correct `aa`", "aa_proxy: true", "aa_aliases"):
+                    self.assertIn(fragment, warning)
+                self.assertIn("codex-sol (pref)", rendered)
+                self.assertNotIn(ratings.ATTRIBUTION, rendered)
+                self.assertNotIn("Coding Index", rendered)
+                if source == "prior":
+                    self.assertEqual(row["metrics"], {"intelligence": 12, "coding": 14, "speed": 16, "price": 0.9})
+                else:
+                    self.assertTrue(all(value is None for value in row["metrics"].values()))
+                    self.assertFalse(row["source"].startswith("aa"))
+                    self.assertIn(f"{source} = AA slug rates a different model or effort", rendered)
+
+    def test_family_and_effort_match_rules(self):
+        cases = (
+            ("codex", "nimbus-2.1", "high", "nimbus-2-1-high", "Nimbus (High)", False),
+            ("codex", "nimbus-2.1", None, "nimbus-2-1-high", "Nimbus (High)", False),
+            ("codex", "nimbus-2.1", "high", "nimbus-2-1", "Nimbus", False),
+            ("codex", "nimbus-2.1", "extra-high", "nimbus-2-1", "Nimbus (Extra High, Preview)", False),
+            ("cursor", "nimbus-2-high", None, "nimbus-2-high", "Nimbus (Low, High)", True),
+            ("cursor", "nimbus-2-high", None, "nimbus-2-low", "Nimbus", True),
+            ("cursor", "nimbus-2-high", "low", "nimbus-2-low", "Nimbus", False),
+            ("claude-subagent", "sonnet", None, "claude-sonnet-5-5-high", "Sonnet (High)", False),
+            ("claude-subagent", "sonnet", None, "claude-haiku-5-5", "Haiku", True),
+            ("claude-subagent", "claude-sonnet-5.5", "high", "claude-sonnet-5-5-high", "Sonnet", False),
+            ("claude-subagent", "claude-sonnet-5.5", "high", "claude-sonnet-5-4-high", "Sonnet", True),
+            ("claude-subagent", "sonnet", "low", "claude-sonnet-5-5-high", "Sonnet (High)", True),
+        )
+        for agent, model, effort, slug, name, mismatch in cases:
+            with self.subTest(agent=agent, model=model, effort=effort, slug=slug, name=name):
+                cat = _catalog()
+                cat["delegates"] = [dict(id="candidate", agent=agent, model=model, effort=effort, aa=slug)]
+                _, (row,) = route.rank("implement", cat, {}, {slug: {"name": name, "intelligence": 15}})
+                self.assertEqual(bool(row["rating_warning"]), mismatch)
+                self.assertEqual(row["metrics"]["intelligence"], None if mismatch else 15)
+
+    def test_exemptions_require_a_proxy_or_the_exact_own_alias(self):
+        for agent, model, key in (("cursor", "nimbus-2-high", "cursor:nimbus-2-high"),
+                                  ("codex", "nimbus-2", "codex:nimbus-2@high")):
+            slug = "nimbus-two-high"
+            for proxy, aliases, source in ((True, {}, "aa~"), (False, {key: slug}, "aa"),
+                                           (False, {key + "er": slug}, "withheld (aa mismatch)"),
+                                           (False, {key: "other-high"}, "withheld (aa mismatch)")):
+                with self.subTest(agent=agent, proxy=proxy, aliases=aliases):
+                    cat = _catalog()
+                    cat["aa_aliases"] = aliases
+                    cat["delegates"] = [dict(id="candidate", agent=agent, model=model, effort="high",
+                                             aa=slug, aa_proxy=proxy)]
+                    _, (row,) = route.rank("implement", cat, {}, {slug: {"name": "Nimbus Two (High)"}})
+                    self.assertEqual(row["source"], source)
+                    self.assertEqual(bool(row["rating_warning"]), source.startswith("withheld"))
+
+    def test_shipped_catalog_has_no_mismatch_in_either_report(self):
+        cat, models = _shipped_catalog(), _aa_fixture_models()
+        self.assertEqual(len(cat["delegates"]), 7)
+        self.assertTrue(all(d["aa"] in models for d in cat["delegates"]))
+        _, rows = route.rank("implement", cat, _half_quota_pools(cat), models)
+        self.assertTrue(all(r["rating_warning"] is None and r["source"].startswith("aa") for r in rows))
+        self.assertEqual(frontier.catalog_checks(cat, models, []), [])
+
+
 class TestQuotaOnly(unittest.TestCase):
     def test_equal_quality_ignores_priors_and_retains_prefer(self):
         cat = _catalog()
@@ -353,13 +439,14 @@ class TestRatingsCli(unittest.TestCase):
                 self.assertTrue(all(r["quality"] == 1.0 and "unrated" in r["source"] for r in rows))
                 self.assertTrue(any(r["score"] > 0 for r in rows))
                 self.assertEqual(set(rows[0]), {"id", "score", "quality", "quota_left", "pace", "excluded",
-                                               "metrics", "source", "price_unit", "rounds_left", "round_cost", "launch"})
+                                               "metrics", "source", "rating_warning", "price_unit",
+                                               "rounds_left", "round_cost", "launch"})
+                self.assertTrue(all(r["rating_warning"] is None for r in rows))
             else:
                 self.assertIn("pick: codex-terra", out)
                 self.assertIn("ranking by quota only", out)
 
     def test_keyless_frontier_and_ratings_exit_cleanly_without_request_or_discovery(self):
-        import frontier
         for args in (["route", "--frontier"], ["ratings"], ["ratings", "--json"]):
             with self.subTest(args=args), \
                  mock.patch.object(ratings, "_get", side_effect=AssertionError("network")) as fetch, \
@@ -371,6 +458,18 @@ class TestRatingsCli(unittest.TestCase):
             self.assertIn(str(ratings.key_file()), err)
             fetch.assert_not_called()
             discover.assert_not_called()
+
+    def test_route_json_exposes_rating_warning_and_withholds_metrics(self):
+        cat, _, _ = catalog.merge(_shipped_catalog(), {"delegates": [{"id": "codex-sol", "effort": "high"}]})
+        models = _aa_fixture_models()
+        with mock.patch.object(self.cli, "load_catalog", return_value=cat), \
+             mock.patch.object(ratings, "load", return_value={"models": models}):
+            code, out, err = self.invoke(["route", "implement", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        rows = {r["id"]: r for r in json.loads(out)}
+        self.assertIn("gpt-6-2-sol-xhigh", rows["codex-sol"]["rating_warning"])
+        self.assertTrue(all(v is None for v in rows["codex-sol"]["metrics"].values()))
+        self.assertIsNone(rows["codex-astra"]["rating_warning"])
 
     def test_keyed_text_attribution_coding_note_and_pure_json(self):
         fixture_dir = Path(__file__).resolve().parent / "fixtures"

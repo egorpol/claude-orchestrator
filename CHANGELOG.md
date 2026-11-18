@@ -8,6 +8,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Added
 
+- `delegate route --frontier` reports the installed Codex CLI version alongside the models cache's `client_version`. It warns when the cache came from a newer client and its listed models may require `codex update`, or when `codex --version` fails to report a version.
 - `delegate quota --cached [--json] [--log PATH] [--now ISO]` shows the newest saved reading of each pool from the quota log with no live reader; DATA AGE uses each pool's `observed_at`, or the row `ts` when that is missing.
 - `install.sh --uninstall` removes this product's registered hooks, rules imports, recorded skill/command symlinks, `delegate` PATH link and quota/rate timer units; recorded skill/command copies, including user edits, move to `~/.claude/skill-backups/`. It keeps unrelated settings, hooks, imports and files, plus local logs, caches and configuration, and backs up changed `settings.json` and user-level `CLAUDE.md`. Add `--git-hook=DIR` to remove this product's pre-commit/pre-push links there; plain `--uninstall` keeps them, and a second uninstall changes nothing.
 
@@ -26,6 +27,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ### Fixed
 
+- `delegate route TASK` warns and withholds ratings when a catalog delegate's AA slug points to another model or effort. It uses the delegate's `prior` if set. `route --frontier` flags the mismatch in its catalog checks, and explicit proxies and matching `aa_aliases` entries are exempt in both views.
 - A followup no longer drops the previous round's diff, and a second review no longer drops the first one's: `followup` archives the cumulative worktree patch as `round-<k>/changes.patch`, and each review keeps a byte-identical copy of the reviewer's patch as `review-<n>/review.patch` (named on the exit packet's artifacts line).
 - `delegate review NAME --dry-run` no longer rewrites the run's `changes.patch` or adds intent-to-add entries to the worktree index: it builds the patch from a temporary copy of the index (with a private object directory, and a flattened copy when the repo uses a split index), so the preview shows the same patch as a real review and leaves the run folder and the repo's `.git` unchanged.
 - A moved, renamed or deleted checkout no longer breaks Claude Code sessions through hooks registered from it: the installer now registers `[ ! -f "<script>" ] || python3 "<script>"`, which exits 0 silently when the script is missing and preserves a present hook's output and exit code. Re-run `--hooks`, `--attention` or `--experiment` to upgrade old commands without duplicate registrations.
