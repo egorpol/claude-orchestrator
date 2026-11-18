@@ -1255,7 +1255,7 @@ def _reviewers_for_working_tree(a):
     reviewers = _default_working_tree_reviewers(a)
     # Lazy: ask imports runs.
     import ask as ask_mod
-    fallback = ask_mod._fallback_for_both(a, prefix="review")
+    fallback = ask_mod._fallback_for_both(a, prefix="review", codex=reviewers[0][1:])
     if fallback:
         return [("cursor", fallback["model"], None), ("cursor", reviewers[1][1], None)]
     return reviewers

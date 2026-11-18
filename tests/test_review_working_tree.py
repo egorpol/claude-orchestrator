@@ -306,6 +306,21 @@ class WorkingTreeReviewTests(unittest.TestCase):
         self.assertTrue(notice.startswith("review:"), notice)
         self.assertNotIn("ask:", notice)
 
+    def test_fallback_cap_prices_the_dispatched_codex_effort(self):
+        """The cap must price the Codex pair the review would run, not ask's default."""
+        pools = {"codex-5h": {"left_pct": 5, "age_min": 0},
+                 "codex-7d": {"left_pct": 50, "age_min": 0}}
+        report = {"fallback": None, "fallback_reason": "no fit", "warnings": []}
+        for effort, expected in ((None, ("gpt-6.2-sol", "xhigh")), ("high", ("gpt-6.2-sol", "high"))):
+            with self.subTest(effort=effort), \
+                 patch("quota._codex_snapshot", return_value={"ok": True}), \
+                 patch("quota.pools", return_value=pools), \
+                 patch("frontier.load_report", return_value=report) as load, \
+                 patch("sys.stdout", io.StringIO()):
+                reviewers = runs._reviewers_for_working_tree(self._wt_args(effort=effort))
+                self.assertEqual(reviewers[0], ("codex",) + expected)
+                load.assert_called_once_with(unittest.mock.ANY, default_codex=expected)
+
     def test_dry_run_writes_nothing(self):
         self.dirty_main()
         before = self.object_files()

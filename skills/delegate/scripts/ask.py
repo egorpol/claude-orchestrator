@@ -467,10 +467,12 @@ def extract_pick(answer):
     return m.group(1).strip() if m else None
 
 
-def _fallback_for_both(a, prefix="ask"):
+def _fallback_for_both(a, prefix="ask", codex=None):
     """Only the cheap quota read runs on a healthy both call.
 
-    `prefix` labels stderr notices (ask vs review --working-tree).
+    `prefix` labels stderr notices (ask vs review --working-tree). `codex` is the
+    (model, effort) the Codex half would run at, so the cap prices that pair;
+    None means ask's own default.
     """
     if getattr(a, "no_fallback", False):
         return None
@@ -493,7 +495,7 @@ def _fallback_for_both(a, prefix="ask"):
     head = f"{prefix}: {trigger} below {threshold:g}% threshold; "
     # The expensive discovery and ratings load are deliberately below the trigger.
     import frontier
-    half = (DEFAULTS["codex"][0], a.effort or DEFAULTS["codex"][1])
+    half = codex or (DEFAULTS["codex"][0], a.effort or DEFAULTS["codex"][1])
     try:
         report = frontier.load_report(catalog, default_codex=half)
     except Exception as exc:
