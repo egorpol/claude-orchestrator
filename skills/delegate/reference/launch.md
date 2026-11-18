@@ -4,7 +4,7 @@ Read before step 3 to launch, preflight or wait for a run; paths such as `templa
 
 3. **Launch** with Bash and `run_in_background: true`. **Do not poll.** When the run ends, the exit packet (≤20 lines: state, verify, top files, Digest risks, usage, artifact paths; each risks line comes from the Digest block alone, which ends at a blank line or heading, and is cut at 240 characters; `digest: missing in last-message.md` when the delegate wrote none) arrives in the task notification — that *is* the status. While it runs, write the independent checker for step 5 (another code path, one planted failure that proves it exits non-zero, no code shared with the patch). Use `--include-uncommitted` when the brief depends on uncommitted edits already in the main tree (otherwise the delegate starts from HEAD, a stderr note names the flag, and the contract and later `review NAME` prompts list up to 20 dirty main-tree paths, `--link`ed ones left out, so neither reports HEAD's copies as wrong).
    ```
-   delegate launch codex  --brief B.md --name feat-x --link data/cache --verify 'pytest -q'   # gpt-6.1-sol @xhigh
+   delegate launch codex  --brief B.md --name feat-x --link data/cache --verify 'pytest -q'   # gpt-6.2-sol @xhigh
    delegate launch cursor --brief B.md --name feat-y --verify 'pytest -q'                     # model auto
    delegate launch codex  --brief B.md --read-only --name research-z                          # review/research
    delegate launch codex  --brief B.md --read-only --web-search --name survey-w               # research with live web search

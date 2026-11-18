@@ -26,7 +26,7 @@ SCRIPTS = Path(__file__).resolve().parent
 RUNS_ROOT = Path(os.environ.get("CLAUDE_DELEGATE_ROOT",
                                 Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
                                 / "claude-delegate" / "runs"))
-DEFAULTS = {"codex": ("gpt-6.1-sol", "xhigh"), "cursor": ("auto", None)}
+DEFAULTS = {"codex": ("gpt-6.2-sol", "xhigh"), "cursor": ("auto", None)}
 ROUND_FILES = ("brief.md", "prompt.md", "run.sh", "log", "last-message.md", "exit_code", "pid",
                "started_at", "finished_at", "finalized_at", "verify.log", "verify_code", "verify-adhoc.log",
                "warnings")

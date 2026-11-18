@@ -20,7 +20,7 @@ if str(SCRIPTS) not in sys.path:
 import runs  # noqa: E402
 import quota  # noqa: E402
 
-DEFAULTS = {"cursor": ("auto", None), "codex": ("gpt-6.1-sol", "medium")}
+DEFAULTS = {"cursor": ("auto", None), "codex": ("gpt-6.2-sol", "medium")}
 
 
 class AskFailed(Exception):
@@ -582,7 +582,7 @@ def _add_args(p):
     p.add_argument("question", help="question text, or - to read stdin")
     p.add_argument("--agent", choices=["cursor", "codex", "both"], default="cursor",
                    help="both: same question to codex and cursor in parallel (second opinions)")
-    p.add_argument("--model", help="cursor default auto; codex default gpt-6.1-sol; not with --agent both")
+    p.add_argument("--model", help="cursor default auto; codex default gpt-6.2-sol; not with --agent both")
     p.add_argument("--effort", help="codex reasoning effort (default medium)")
     p.add_argument("--no-fallback", action="store_true", help="both: keep Codex even when its quota is empty")
     p.add_argument("--dir", help="workspace directory (default: cwd)")

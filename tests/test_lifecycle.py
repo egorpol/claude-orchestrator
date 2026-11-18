@@ -174,7 +174,7 @@ class LifecycleTests(unittest.TestCase):
             "row": {"agent": "cursor", "model": "frontier-selected-model", "intelligence": 44.2,
                     "cost_per_task": 0.27, "pool": "cursor-premium?"},
             "cap": 0.42,
-            "replaces": {"model": "gpt-6.1-sol", "effort": "xhigh", "cost_per_task": 0.21},
+            "replaces": {"model": "gpt-6.2-sol", "effort": "xhigh", "cost_per_task": 0.21},
         }
         for pid in ("codex-5h", "codex-7d"):
             with self.subTest(pool=pid):
@@ -186,7 +186,7 @@ class LifecycleTests(unittest.TestCase):
                 meta = runs.load_meta(job)
                 self.assertEqual((meta["agent"], meta["model"], meta["effort"]),
                                  ("cursor", selection["row"]["model"], None))
-                load.assert_called_once_with(unittest.mock.ANY, default_codex=("gpt-6.1-sol", "xhigh"))
+                load.assert_called_once_with(unittest.mock.ANY, default_codex=("gpt-6.2-sol", "xhigh"))
                 self.assertIn(f"review: {pid} 1% left below 10% threshold; fallback cursor frontier-selected-model", out)
                 self.assertIn("review: Source: Artificial Analysis (https://artificialanalysis.ai/).", out)
                 self.assertEqual(err, "")
@@ -1610,7 +1610,7 @@ class LifecycleTests(unittest.TestCase):
         meta = runs.load_meta(root)
         self.assertEqual(meta["links"], ["data/cache"])
         self.assertEqual([(r["n"], r["model"], r["effort"]) for r in meta["history"]],
-                         [(1, "gpt-6.1-sol", "xhigh"), (2, "another-model", None)])
+                         [(1, "gpt-6.2-sol", "xhigh"), (2, "another-model", None)])
         self.assertTrue((root / "round-1/finalized_at").exists())
 
     def test_legacy_codex_status_read_only(self):

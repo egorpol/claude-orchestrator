@@ -52,7 +52,7 @@ class FreeApiTest(unittest.TestCase):
             self.assertTrue(ratings.UA.startswith("claude-delegate/"))
             self.assertNotIn("Mozilla", ratings.UA)
         self.assertEqual(len(models), 8)
-        sol = models["gpt-6-1-sol-xhigh"]
+        sol = models["gpt-6-2-sol-xhigh"]
         self.assertEqual(sol, {
             "name": "Invented Sol (Xhigh)", "creator": "Synthetic Lab",
             "intelligence": 11, "coding": None, "coding_is_proxy": False,

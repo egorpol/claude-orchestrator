@@ -10,7 +10,7 @@
   },
   "data": [
     {
-      "slug": "gpt-6-1-sol-xhigh",
+      "slug": "gpt-6-2-sol-xhigh",
       "name": "Invented Sol (Xhigh)",
       "model_creator": {
         "name": "Synthetic Lab"
@@ -34,7 +34,7 @@
       }
     },
     {
-      "slug": "gpt-6-astra-xhigh",
+      "slug": "gpt-6-2-astra-xhigh",
       "name": "Invented Astra (Xhigh)",
       "model_creator": {
         "name": "Synthetic Lab"

@@ -133,7 +133,7 @@ class TestAsk(unittest.TestCase):
             ask.cmd_ask(ns)
         out = buf.getvalue()
         self.assertIn("foo.py:3", out)
-        self.assertIn("(codex gpt-6.1-sol ·", out)
+        self.assertIn("(codex gpt-6.2-sol ·", out)
         # input = 17140 - 6912 = 10228
         self.assertIn("in=10228", out)
         self.assertIn("out=42", out)
@@ -168,7 +168,7 @@ class TestAsk(unittest.TestCase):
         self.assertLess(out.index("## codex"), out.index("## cursor"))
         self.assertIn("foo.py:3", out)
         self.assertIn("answer from cursor", out)
-        self.assertIn("(codex gpt-6.1-sol ·", out)
+        self.assertIn("(codex gpt-6.2-sol ·", out)
         self.assertIn("(cursor auto ·", out)
 
     def test_both_keeps_the_other_answer_on_failure(self):
@@ -293,8 +293,8 @@ class TestAsk(unittest.TestCase):
             return {"name": name, "intelligence": intelligence, "cost_per_task": cost,
                     "price_blended": 1, "creator": creator}
         models = {
-            "gpt-6-1-sol-medium": rating("GPT-6.1 Sol (Medium)", 46.6, 0.21),
-            "gpt-6-1-sol-high": rating("GPT-6.1 Sol (High)", 50.6, 0.33),
+            "gpt-6-2-sol-medium": rating("GPT-6.2 Sol (Medium)", 46.6, 0.21),
+            "gpt-6-2-sol-high": rating("GPT-6.2 Sol (High)", 50.6, 0.33),
             "nimbus-v2-1-flash-0917": rating("Nimbus V2.1 Flash 0917 (Max)", 44.2, 0.27, "Nimbus"),
             "better": rating("Better (High)", 49, 0.55),
             "claude": rating("Claude (High)", 90, 0.1, "Anthropic"),
@@ -342,7 +342,7 @@ class TestAsk(unittest.TestCase):
         self.assertEqual(sorted(c.args[1] for c in cursor.call_args_list), ["auto", "nimbus-v21-flash-0917-max"])
         line = out.splitlines()[0]
         for bit in ("codex-5h 3% left", "10% threshold", "nimbus-v21-flash-0917-max", "AA 44.2",
-                    "$0.270/task", "cap $0.420/task", "2x gpt-6.1-sol@medium", "$0.210/task", "bills cursor-premium?"):
+                    "$0.270/task", "cap $0.420/task", "2x gpt-6.2-sol@medium", "$0.210/task", "bills cursor-premium?"):
             self.assertIn(bit, line)
         self.assertIn("ask: Source: Artificial Analysis (https://artificialanalysis.ai/).", out)
         self.assertIn("## fallback (cursor nimbus-v21-flash-0917-max)", out)
@@ -356,9 +356,9 @@ class TestAsk(unittest.TestCase):
         out, cursor, codex, load = self._run_fallback_both(effort="high")
         codex.assert_not_called()
         self.assertIn("codex-7d 9% left", out)
-        self.assertIn("cap $0.660/task = 2x gpt-6.1-sol@high $0.330/task", out)
+        self.assertIn("cap $0.660/task = 2x gpt-6.2-sol@high $0.330/task", out)
         self.assertIn("## fallback (cursor better-high)", out)
-        self.assertEqual(load.call_args.kwargs["default_codex"], ("gpt-6.1-sol", "high"))
+        self.assertEqual(load.call_args.kwargs["default_codex"], ("gpt-6.2-sol", "high"))
 
     def test_empty_with_no_candidate_or_task_cost_keeps_codex(self):
         self.quota_pools.return_value = {"codex-5h": {"left_pct": 0, "age_min": 0}, "codex-7d": {"left_pct": 50, "age_min": 0}}

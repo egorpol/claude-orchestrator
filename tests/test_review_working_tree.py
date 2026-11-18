@@ -315,7 +315,7 @@ class WorkingTreeReviewTests(unittest.TestCase):
         self.assertIn("prompt.md", out)
         self.assertIn("untracked:", out)
         self.assertIn("swapped for a Cursor model", out)
-        self.assertIn("codex gpt-6.1-sol", out)
+        self.assertIn("codex gpt-6.2-sol", out)
         self.assertIn("cursor auto", out)
         self.assertFalse(self.root("dry").exists())
         self.assertEqual(self.object_files(), before)

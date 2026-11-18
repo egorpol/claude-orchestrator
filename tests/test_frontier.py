@@ -187,7 +187,11 @@ class FrontierTest(unittest.TestCase):
         self.assertIsNone(frontier.pick_fallback(rows, "gpt-6.1-sol", "high")[0])
         self.assertIn("no eligible", frontier.pick_fallback([old], "gpt-6.1-sol", "medium")[1])
         old["cost_per_task"] = None
-        self.assertIn("no AA $/task", frontier.pick_fallback(rows, "gpt-6.1-sol", "medium")[1])
+        rated = frontier.pick_fallback(rows, "gpt-6.1-sol", "medium")[1]
+        self.assertIn("no AA $/task", rated)
+        self.assertNotIn("--refresh", rated)  # rated, but AA gives no $/task: a refresh won't help
+        old["aa"] = None
+        self.assertIn("run `delegate ratings --refresh`", frontier.pick_fallback(rows, "gpt-6.1-sol", "medium")[1])
 
     def test_old_cache_text_and_last_fallback_line(self):
         catalog = {"delegates": [{"id": "auto", "agent": "cursor", "model": "auto", "aa": "m", "aa_proxy": True}]}

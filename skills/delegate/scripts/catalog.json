@@ -60,26 +60,26 @@
     {
       "id": "codex-sol",
       "agent": "codex",
-      "model": "gpt-6.1-sol",
+      "model": "gpt-6.2-sol",
       "effort": "xhigh",
-      "aa": "gpt-6-1-sol-xhigh",
+      "aa": "gpt-6-2-sol-xhigh",
       "pools": [
         "codex-5h",
         "codex-7d"
       ],
-      "notes": "Proven 2026-10-09 (eu-pd-composers). Follows brief constraints literally: check its dry-run output against real data."
+      "notes": "Sol proven 2026-10-09 (eu-pd-composers); 6.2 since 2026-11-18. Follows brief constraints literally: check its dry-run output against real data."
     },
     {
       "id": "codex-astra",
       "agent": "codex",
-      "model": "gpt-6-astra",
+      "model": "gpt-6.2-astra",
       "effort": "xhigh",
-      "aa": "gpt-6-astra-xhigh",
+      "aa": "gpt-6-2-astra-xhigh",
       "pools": [
         "codex-5h",
         "codex-7d"
       ],
-      "notes": "Codex config default. Expect it to drain the Codex pool faster than Sol."
+      "notes": "Expect it to drain the Codex pool faster than Sol."
     },
     {
       "id": "codex-terra",

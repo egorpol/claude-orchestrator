@@ -217,7 +217,10 @@ def pick_fallback(rows, model, effort):
     replaced = next((r for r in rows if r["agent"] == "codex" and r["model"] == model
                      and r["effort"] == effort), None)
     if replaced is None or replaced.get("cost_per_task") is None:
-        return None, f"{model}@{effort} has no AA $/task"
+        # No AA slug at all: likely a ratings cache older than the model.
+        hint = "" if replaced and replaced.get("aa") else (
+            "; not in the ratings cache: run `delegate ratings --refresh` if it predates the model")
+        return None, f"{model}@{effort} has no AA $/task{hint}"
     cost = replaced["cost_per_task"]
     cap = 2 * cost
     candidates = [r for r in rows if r["agent"] == "cursor" and not auto_family(r["model"])

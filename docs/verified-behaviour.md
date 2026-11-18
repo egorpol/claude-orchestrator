@@ -2,6 +2,11 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-11-18
+
+- **GPT-6.2 Sol and GPT-6.2 Astra need a newer Codex CLI on a ChatGPT login.** `codex exec -m gpt-6.2-sol` at `low` effort: Codex CLI 0.159.1 exited 1 with HTTP 400 `model_not_found` ("not supported when using Codex with a ChatGPT account"), while the Cursor extension's bundled 0.169.0-alpha.11.1 answered, and 0.159.1 still ran `gpt-6.1-sol` (control). After `codex update` to 0.170.0, the newest stable release that day, `gpt-6.2-sol` and `gpt-6.2-astra` both answered. The standalone install had stopped at 0.159.1, the version in `~/.codex/packages/standalone/auto-update-version` until `codex update` rewrote it. `models_cache.json`, last written by client 0.169.0, listed both models with efforts `low` to `ultra`, so `route --frontier` showed them as runnable on the old CLI.
+- **AA rated both models on release day.** The free API refresh had `gpt-6-2-sol` and `gpt-6-2-astra` at `low` to `max`; `route --frontier` matched them with no alias and flagged the catalog's `codex-sol` (6.1 Sol) and `codex-astra` (6 Astra) as dominated on $/task.
+
 ## 2026-11-15
 
 - **git can't remove a worktree it has forgotten.** In a scratch repo, after deleting `.git/worktrees/<name>`, and separately after `git worktree prune` while the folder was moved away and back, the folder's `.git` stayed a gitfile pointing at a missing admin dir: `git worktree remove --force` and `git -C <wt> rev-parse --git-dir` both exited 128 ("is not a working tree"). Deleting the folder and running `git worktree prune` let `git branch -D` exit 0. With the fake agents, `cleanup --force` used to exit 1 at that removal after logging the run as "discarded", leaving the folder, the branch and the exclude lines; this is the case behind the fix. The fix's "git still lists it" check reads `git worktree list --porcelain -z` as bytes: with git 2.56.1, the plain listing printed a worktree path holding a newline across two lines, and Python's `text=True` read a listed `\r` or `\r\n` as `\n`.

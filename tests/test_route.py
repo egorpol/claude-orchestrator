@@ -394,7 +394,7 @@ class TestRatingsCli(unittest.TestCase):
                         if args == ["ratings", "--json"]:
                             self.assertEqual(set(parsed), {d["id"] for d in _shipped_catalog()["delegates"]})
                         if "--grep" in args:
-                            self.assertEqual(set(parsed), {"gpt-6-1-sol-xhigh"})
+                            self.assertEqual(set(parsed), {"gpt-6-2-sol-xhigh"})
                     else:
                         self.assertEqual(out.count(ratings.ATTRIBUTION), 1)
                         self.assertNotIn("aa*", out)

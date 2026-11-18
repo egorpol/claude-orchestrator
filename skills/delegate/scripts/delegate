@@ -257,7 +257,7 @@ def main():
     s = sub.add_parser("launch", help="start a delegate in its own worktree")
     s.add_argument("agent", choices=["codex", "cursor"])
     s.add_argument("--brief", required=True, help="markdown brief file")
-    s.add_argument("--model", help="codex default gpt-6.1-sol (@xhigh); cursor default auto")
+    s.add_argument("--model", help="codex default gpt-6.2-sol (@xhigh); cursor default auto")
     s.add_argument("--effort", help="codex reasoning effort (low..xhigh, max)")
     s.add_argument("--name", help="run name (default <agent>-<timestamp>); branch is delegate/<name>")
     s.add_argument("--repo", help="repo path (default: cwd)")
@@ -323,7 +323,7 @@ def main():
                    help="with --working-tree both-reviewers: keep Codex even when its quota is empty")
     s.add_argument("--agent", choices=["codex", "cursor"],
                    help="run review: other vendor by default; working-tree: both vendors by default")
-    s.add_argument("--model", help="codex default gpt-6.1-sol (@xhigh); cursor default auto")
+    s.add_argument("--model", help="codex default gpt-6.2-sol (@xhigh); cursor default auto")
     s.add_argument("--effort")
     s.add_argument("--focus", help="extra review focus, e.g. 'race conditions in the cache'")
     s.add_argument("--patch-max-kb", type=int, default=200, metavar="N",
