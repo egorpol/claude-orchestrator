@@ -177,6 +177,8 @@ class TestReport(unittest.TestCase):
                 {"timestamp": "2026-10-10T21:58:01Z", "context": 2055, "guard": "nudge"},
                 {"timestamp": "2026-10-10T22:59:01Z", "context": 7007, "guard": "idle_hold"},
             ],
+            "subagents": {"transcripts": 0, "calls": 0, "input": 0, "cache_read": 0,
+                          "cache_creation": 0, "output": 0, "context_max": 0, "cost_units": 0},
         })
         self.assertEqual(row["api_calls"], 3)
         self.assertEqual(row["cache_read"], 1206000)
@@ -192,6 +194,7 @@ class TestReport(unittest.TestCase):
         self.assertIn(context_line, text)
         paragraphs = text.split("\n\n")
         self.assertTrue(paragraphs[paragraphs.index(context_line) - 1].startswith("Session up to this log: "))
+        self.assertEqual(paragraphs[paragraphs.index(context_line) - 1].splitlines()[1:], ["Subagents: none."])
         self.assertIn("Quota at the end: not measured.", text)
         self.assertIn("Delegate runs: none.", text)
         total = summary["cost_units"]
@@ -977,20 +980,31 @@ class TestReport(unittest.TestCase):
         before = json.loads(out)["row"]
         self.assertEqual(before["usd_list_price"], 0.249)
         agent_dir = self.transcript.with_suffix("") / "subagents"
-        agent_dir.mkdir(parents=True)
         # A later subagent call must not change the main session date/model/context.
-        agent = assistant("agent", "2026-10-12T12:00:00Z", 10, 1000, 100, 2000, "claude-haiku-5-5")
-        (agent_dir / "agent-a.jsonl").write_text(json.dumps(agent) + "\n" +
-                                                json.dumps(self.calls[0]) + "\n", encoding="utf-8")
+        agent = assistant("agent", "2026-10-12T12:00:00Z", 10, 1006, 100, 2000, "claude-haiku-5-5")
+        self.write_log(agent_dir / "agent-a.jsonl", [agent, self.calls[0]])
+        self.write_log(agent_dir / "agent-b.jsonl", [agent])
         self.assertEqual(self.invoke()[0], 0)
         row = self.usage_row()
         for key, value in before.items():
-            if key not in ("usd_list_price", "subagent_calls"):
+            if key not in ("usd_list_price", "subagent_calls", "subagents"):
                 self.assertEqual(row[key], value, key)
         self.assertEqual(row["subagent_calls"], 1)
-        self.assertEqual(row["usd_list_price"], 0.2501)  # round only the final 0.2500635 total
+        self.assertEqual(row["usd_list_price"], 0.2501)  # round only the final total
         self.assertEqual(row["prices_as_of"], "2026-10-06")
         self.assertIsInstance(row["usd_list_price"], float)
+        self.assertEqual(row["subagents"], {
+            "transcripts": 1, "calls": 1, "input": 10, "cache_read": 1006,
+            "cache_creation": 100, "output": 2000, "context_max": 1116, "cost_units": 10311,
+        })
+        self.assertIsInstance(row["subagents"]["cost_units"], int)
+        paragraphs = self.skeleton().read_text(encoding="utf-8").split("\n\n")
+        session = next(p for p in paragraphs if p.startswith("Session up to this log: "))
+        self.assertEqual(session.splitlines()[1:], [
+            "Subagents (not in the numbers above): 1 transcript, 1 call, "
+            "1.0k cache read, 100 cache write, 2.0k output; peak context 1.1k; "
+            "10,311 cost units, 0.1× the main thread (7.3% of the session).",
+        ])
 
     def write_log(self, path, rows):
         path.parent.mkdir(parents=True, exist_ok=True)

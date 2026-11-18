@@ -496,6 +496,18 @@ def render_skeleton(row, summary, runs, asks=()):
         written = _fmt_tokens(sum(r["cache_creation"] for r in rebuilds))
         pct = 100 * summary["idle_rebuild_units"] / total
         idle = f"{len(rebuilds)} ({gaps} min; {written} written, {pct:.1f}% of cost units)"
+    subagents = summary.get("subagents") or {}
+    subagent_line = "Subagents: none."
+    if subagents.get("calls"):
+        ratio, share = cost._subagent_cost_comparison(
+            summary["cost_units"], subagents["cost_units"], "the main thread")
+        subagent_line = (
+            f"Subagents (not in the numbers above): {cost._count(subagents['transcripts'], 'transcript')}, "
+            f"{cost._count(subagents['calls'], 'call')}, {_fmt_tokens(subagents['cache_read'])} cache read, "
+            f"{_fmt_tokens(subagents['cache_creation'])} cache write, {_fmt_tokens(subagents['output'])} output; "
+            f"peak context {cost._fmt_k(subagents['context_max'])}; "
+            f"{cost._fmt_int(round(subagents['cost_units']))} cost units, {ratio} ({share} of the session)."
+        )
     measured = row["quota_end"]
     quota_text = ", ".join(f"{pool} {left:g}%" for pool, left in measured.items()) \
         if measured and "error" not in measured else "not measured"
@@ -539,6 +551,7 @@ Orchestrator: {row['model'] or 'unknown model'} (session `{row['session'][:8]}`)
 | 1 | <!-- step --> | <!-- outcome --> |
 
 Session up to this log: {row['api_calls']} calls, {_fmt_tokens(row['cache_read'])} cache read, {_fmt_tokens(row['cache_write'])} cache write, {_fmt_tokens(row['output'])} output; context {cost._fmt_k(summary['context_first'])} → {cost._fmt_k(summary['context_last'])}; {cost._fmt_int(row['cost_units'])} cost units ({shares}). Idle rebuilds: {idle}.
+{subagent_line}
 
 {render_prompt_contexts(row['prompts'])}
 
@@ -611,6 +624,7 @@ def cmd_report(a):
         runs_path = _output_path(directory, "runs.jsonl")
         weights, prices = cost.load_catalog_cost()
         summary = cost.summarise_session(calls, weights, prices)
+        subagents = summary["subagents"]
         measured = quota_end(a.no_quota)
         row = {
             "date": date, "repo": repo, "item": a.item,
@@ -628,6 +642,7 @@ def cmd_report(a):
             "usd_list_price": round(summary["usd"], 4) if summary["usd"] is not None else None,
             "subagent_calls": summary["subagent_calls"], "prices_as_of": summary["prices_as_of"],
             "prompts": prompt_contexts(path, calls),
+            "subagents": {**subagents, "cost_units": round(subagents["cost_units"])},
         }
         usage, action = upsert_usage(_read_bytes(usage_path), row)
         logged_runs = matching_runs(repo_dir, first)

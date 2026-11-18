@@ -160,12 +160,16 @@ def parse_session_usage(path):
 
     Main order is preserved for historical context/idle measurements. Consumers
     doing interval analysis can filter or sort these records by timestamp.
+    Subagent calls carry the filename of their transcript.
     """
     path = Path(path)
     seen = set()
     calls = parse_assistant_usage(path, seen=seen)
     for agent_path in sorted(path.with_suffix("").glob("subagents/agent-*.jsonl")):
-        calls.extend(parse_assistant_usage(agent_path, source="subagents", seen=seen))
+        agent_calls = parse_assistant_usage(agent_path, source="subagents", seen=seen)
+        for call in agent_calls:
+            call["agent_file"] = agent_path.name
+        calls.extend(agent_calls)
     return calls
 
 
@@ -258,36 +262,43 @@ def idle_rebuilds(calls, cache_write_weight=2.0):
     return rebuilds, units
 
 
+def _usage_cost(calls, weights):
+    tokens = {key: sum(c[key] for c in calls) for key in ("input", "cache_read", "cache_creation", "output")}
+    parts = {
+        "input": tokens["input"] * weights.get("input", 1),
+        "cache_read": tokens["cache_read"] * weights.get("cache_read", 0.1),
+        "cache_write": tokens["cache_creation"] * weights.get("cache_write", 2.0),
+        "output": tokens["output"] * weights.get("output", 5.0),
+    }
+    return tokens, parts
+
+
 def summarise_session(calls, weights, prices=None):
-    """Keep historical fields main-only; add list-price totals for the whole session."""
+    """Keep historical fields main-only and include subagent usage and session list prices."""
     pricing = summarise_list_price(calls, prices)
+    agent_calls = [c for c in calls if c.get("source") == "subagents"]
+    agent_tokens, agent_parts = _usage_cost(agent_calls, weights)
+    subagents = {
+        "transcripts": len({c["agent_file"] for c in agent_calls if c.get("agent_file")}),
+        "calls": len(agent_calls),
+        **agent_tokens,
+        "context_max": max((c["input"] + c["cache_read"] + c["cache_creation"]
+                            for c in agent_calls), default=0),
+        "cost_units": sum(agent_parts.values()),
+    }
     calls = [c for c in calls if c.get("source", "main") == "main"]
-    n = len(calls)
-    inp = sum(c["input"] for c in calls)
-    cr = sum(c["cache_read"] for c in calls)
-    cc = sum(c["cache_creation"] for c in calls)
-    out = sum(c["output"] for c in calls)
+    tokens, parts = _usage_cost(calls, weights)
     ctxs = [c["input"] + c["cache_read"] + c["cache_creation"] for c in calls]
     first = ctxs[0] if ctxs else 0
     last = ctxs[-1] if ctxs else 0
     mx = max(ctxs) if ctxs else 0
-    cw_w = weights.get("cache_write", 2.0)
-    parts = {
-        "input": inp * weights.get("input", 1),
-        "cache_read": cr * weights.get("cache_read", 0.1),
-        "cache_write": cc * cw_w,
-        "output": out * weights.get("output", 5.0),
-    }
     total = sum(parts.values())
     models = sorted({c["model"] for c in calls if c.get("model")})
-    rebuilds, rebuild_units = idle_rebuilds(calls, cw_w)
+    rebuilds, rebuild_units = idle_rebuilds(calls, weights.get("cache_write", 2.0))
     return {
-        "calls": n,
+        "calls": len(calls),
         "models": models,
-        "input": inp,
-        "cache_read": cr,
-        "cache_creation": cc,
-        "output": out,
+        **tokens,
         "context_first": first,
         "context_last": last,
         "context_max": mx,
@@ -296,6 +307,7 @@ def summarise_session(calls, weights, prices=None):
         "idle_rebuilds": rebuilds,
         "idle_rebuild_units": rebuild_units,
         **pricing,
+        "subagents": subagents,
     }
 
 
@@ -307,6 +319,22 @@ def _fmt_k(n):
     if n >= 1000:
         return f"{n / 1000:.0f}k" if n >= 10000 else f"{n / 1000:.1f}k"
     return str(n)
+
+
+def _count(n, word):
+    return f"{_fmt_int(n)} {word}{'' if n == 1 else 's'}"
+
+
+def _subagent_cost_comparison(main_units, agent_units, main_label):
+    total = main_units + agent_units
+    share = agent_units / total if total else 0
+    if main_units:
+        ratio = f"{agent_units / main_units:.1f}× {main_label}"
+    elif agent_units:
+        ratio = f"∞× {main_label}"
+    else:
+        ratio = "ratio unavailable"
+    return ratio, f"{share:.1%}"
 
 
 def _fresh_start_tokens(path, summary):
@@ -345,6 +373,17 @@ def render_session(path, summary, as_json=False):
         for k in ("input", "cache_read", "cache_write", "output")
     )
     lines.append(f"cost units: {_fmt_int(round(summary['cost_units']))}  ({shares})")
+    subagents = summary.get("subagents") or {}
+    if subagents.get("calls"):
+        ratio, share = _subagent_cost_comparison(summary["cost_units"], subagents["cost_units"], "main")
+        lines.append(
+            f"subagents: {_count(subagents['transcripts'], 'transcript')}, {_count(subagents['calls'], 'call')}; "
+            f"tokens: input {_fmt_int(subagents['input'])}  "
+            f"cache_creation {_fmt_int(subagents['cache_creation'])}  "
+            f"cache_read {_fmt_int(subagents['cache_read'])}  output {_fmt_int(subagents['output'])}; "
+            f"context max {_fmt_int(subagents['context_max'])}; "
+            f"{_fmt_int(round(subagents['cost_units']))} cost units, {ratio} ({share} of session)"
+        )
     usd = f"${summary['usd']:.2f}" if summary["usd"] is not None else "unpriced"
     dated = f"prices as of {summary['prices_as_of'] or 'unknown'}"
     lines.append(f"list price: {usd}  (main ${summary['usd_main']:.2f}, "

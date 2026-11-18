@@ -443,6 +443,13 @@ Each has a `/field-report`; folded in on 2026-11-10, the first batch under the w
 - **Reviews and builds.** Two Cursor Auto APPROVEs missed real defects (the 2 regressions above, and a medium bug in another session); a third Cursor Auto review found a real issue. Codex reviews found the retry loop above and 3 real findings in another session. Delegated builds took one round each, two by Codex Sol and one by Cursor Auto.
 - **Not adopted.** Known limits of the fixes, kept by decision: two picks on one line (`Q1 Pick: A. Q2 Pick: B`) come back as one, a capitalised `Failures: 1` gives no failure line, and a lag of 10 min 59 s rounds down to 10 and keeps "at the end". The label-first count also flags a data summary such as `errors 1`: one summary line, in 2 of the 250 verify logs on this machine that exited 0.
 
+## 2026-11-11: one session, one project
+
+Closed with `/field-report`; folded in on 2026-11-18, the only field report since the last fold-in. It started inside the preregistration's confirmatory window, so this section carries its lessons only; its numbers wait for the freeze. Lessons it alone raised wait in the list below.
+
+- **Subagent cost was out of sight.** The session ran Claude subagents for one item, and its report skeleton showed main-thread figures only: `summarise_session` keeps its historical fields main-only, and nothing printed the rest, so the report's author had to sum the subagent transcripts by hand. `delegate cost --session` now prints a `subagents:` line (transcripts, calls, tokens, peak context, cost units, the ratio to the main thread and the share of the session), the skeleton adds a `Subagents` line to its session paragraph, and the `token_usage.jsonl` row gets a `subagents` object. The main-only fields are unchanged. On a session of this repo with 12 subagent transcripts, the main thread held 247,107 of 13,559,192 cost units (1.8%).
+- **Pickers worded in internals.** A picker phrased in the reader's internals came back as "why does it matter?", and the re-ask that led with the consequence was answered at once. With the 2026-10-17 report (a hosting picker came back as a question about how others host) and three pickers in a row in a 2026-11-07 session of this repo, this is now a Decisions tip in `rules/reference.md`: lead with what changes for the user against what runs today.
+
 ## Waiting for a second report
 
 Lessons from a single field report, kept until a second report repeats one (fold-in rules in CLAUDE.md); a repeat moves it into the rules, a topic file or a template.
@@ -465,6 +472,12 @@ From the reports of 2026-11-05 to 11-06 (folded in 2026-11-10):
 - `/next`: a `needs: author input` mark on a handoff step.
 - CLI: `launch --collect DIR`, with cleanup accepting byte-identical copies and a `collected` state; `apply` names the `--link` excludes and says cleanup restores them; `apply --check` lists added files that were untracked or outside the owned list; working-tree reviews remove their own worktree; `delegate report` counts findings per vendor.
 - Experiment: the mode override is hard to find, the control picker has no "needs delegation" option, and the environment variable sticks. Covered until the close by the 2026-11-09 decision (no in-session switch) and the 2026-11-08 crossover amendment.
+
+From the report of 2026-11-11 (folded in 2026-11-18):
+
+- Subagents in place of a delegate: the picker quotes an estimated cost per option; each subagent brief carries the reads rule (outline, `grep -n`, line ranges) and a stop point near ~150k context, and names the model, so a later report can compare accuracy. Three read-only crosswalk subagents each read raw code past 200k context.
+- Subagents: copy check scripts a subagent wrote in its scratchpad into a kept folder before they can vanish (from what worked).
+- Handoffs: ~10 KB is a soft limit, so don't spend calls trimming a few percent over it. A block rewritten by slicing dropped a binding decision unnoticed: print the removed lines first and assert that every binding or decided line survives.
 
 ## Still open
 

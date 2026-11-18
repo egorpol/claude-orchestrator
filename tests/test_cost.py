@@ -1038,6 +1038,7 @@ class TestListPrice(unittest.TestCase):
         calls = cost.parse_session_usage(self.path)
         self.assertEqual([c["id"] for c in calls], ["duplicate", "request-only", "second"])
         self.assertEqual([c["source"] for c in calls], ["main", "subagents", "subagents"])
+        self.assertEqual([c.get("agent_file") for c in calls], [None, "agent-a.jsonl", "agent-b.jsonl"])
         self.assertEqual(calls[0]["timestamp"], main["timestamp"])
         combined = self.summary()
         historical = cost.summarise_session(cost.parse_assistant_usage(self.path), self.weights, None)
@@ -1046,10 +1047,56 @@ class TestListPrice(unittest.TestCase):
                     "idle_rebuilds", "idle_rebuild_units"):
             self.assertEqual(combined[key], historical[key], key)
         self.assertEqual(combined["subagent_calls"], 2)
+        self.assertEqual(combined["subagents"]["transcripts"], 2)
         self.assertEqual([(r["source"], r["model"], r["calls"]) for r in combined["by_model"]],
                          [("main", "claude-opus-5-5", 1), ("subagents", "claude-haiku-5-5", 2)])
         self.assertAlmostEqual(combined["usd"], combined["usd_main"] + combined["usd_subagents"])
         self.assertEqual(combined["usd_unpriced"], [])
+
+    def test_subagent_cost_counts_only_contributing_transcripts(self):
+        self.write(self.path, self.assistant("main"))
+        before = self.summary()
+        before_text = cost.render_session(self.path, before).splitlines()
+        self.assertEqual(before["subagents"], {
+            "transcripts": 0, "calls": 0, "input": 0, "cache_read": 0,
+            "cache_creation": 0, "output": 0, "context_max": 0, "cost_units": 0,
+        })
+        self.assertFalse(any(line.startswith("subagents:") for line in before_text))
+
+        self.write(self.agents / "agent-a.jsonl",
+                   self.assistant("main", read=1000000),
+                   self.assistant("agent-1", inp=20, read=2000, write=500, output=2000),
+                   self.assistant("agent-2", inp=30, read=30000, write=300, output=100))
+        self.write(self.agents / "agent-b.jsonl", self.assistant("agent-1", read=1000000))
+        expected = {
+            "transcripts": 1, "calls": 2, "input": 50, "cache_read": 32000,
+            "cache_creation": 800, "output": 2100, "context_max": 30330, "cost_units": 15350,
+        }
+        summary = self.summary()
+        self.assertEqual(summary["subagents"], expected)
+        self.assertEqual(summary["subagent_calls"], 2)
+        payload, output = io.StringIO(), io.StringIO()
+        args = ["--session", str(self.path)]
+        with redirect_stdout(payload):
+            cost.main([*args, "--json"])
+        self.assertEqual(json.loads(payload.getvalue())["subagents"], expected)
+        with redirect_stdout(output):
+            cost.main(args)
+        lines = output.getvalue().splitlines()
+        cost_index = next(i for i, line in enumerate(lines) if line.startswith("cost units:"))
+        self.assertEqual(lines[:cost_index + 1], before_text[:cost_index + 1])
+        self.assertEqual(lines[cost_index + 1],
+                         "subagents: 1 transcript, 2 calls; tokens: input 50  cache_creation 800  "
+                         "cache_read 32,000  output 2,100; context max 30,330; "
+                         "15,350 cost units, 37.4× main (97.4% of session)")
+
+    def test_subagent_cost_text_with_zero_main_cost(self):
+        self.write(self.path)
+        agent_path = self.agents / "agent-a.jsonl"
+        self.write(agent_path, self.assistant("agent"))
+        self.assertIn("∞× main (100.0% of session)", cost.render_session(self.path, self.summary()))
+        self.write(agent_path, self.assistant("agent", inp=0, read=0, write=0, output=0))
+        self.assertIn("ratio unavailable (0.0% of session)", cost.render_session(self.path, self.summary()))
 
     def test_cache_write_durations_and_unsplit_remainder(self):
         self.write(self.path,
