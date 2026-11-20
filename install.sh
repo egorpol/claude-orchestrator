@@ -40,7 +40,9 @@
 #                           to skill-backups/ (including user edits), never deleted
 #                           add --git-hook=DIR to remove this product's git hook links there
 #   ./install.sh --force    replace an existing non-symlinked skill dir or command file (it is
-#                           moved to ~/.claude/skill-backups/, never deleted)
+#                           moved to skill-backups/ in the Claude config directory)
+#   Links to the current source stay in place. Recorded links can be replaced with a notice.
+#   Other skill/command links and existing foreign --bin targets are moved to skill-backups/.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -424,11 +426,18 @@ PY_TIMER
   ok "quota timer units written to $UNIT_DIR"
   ok "rate timer units written to $UNIT_DIR"
   if command -v systemctl >/dev/null; then
-    systemctl --user daemon-reload
-    systemctl --user enable --now claude-delegate-quota.timer
-    ok "quota timer enabled"
-    systemctl --user enable --now claude-delegate-rate.timer
-    ok "rate timer enabled"
+    if ! systemctl --user daemon-reload; then
+      warn "systemctl daemon-reload failed. Retry with 'systemctl --user daemon-reload' when the user bus is available"
+    fi
+    local kind unit
+    for kind in quota rate; do
+      unit="claude-delegate-$kind.timer"
+      if systemctl --user enable --now "$unit"; then
+        ok "$kind timer enabled"
+      else
+        warn "could not enable the $kind timer. Enable it manually with 'systemctl --user enable --now $unit'"
+      fi
+    done
   else
     warn "systemctl not found; quota timer units written but not enabled"
     warn "systemctl not found; rate timer units written but not enabled"
@@ -475,7 +484,7 @@ def snapshot(path):
     return result
 
 
-def backup(target):
+def backup(target, kind="copy"):
     backups.mkdir(parents=True, exist_ok=True)
     dest = backups / f"{target.name}-{time.strftime('%Y%m%d-%H%M%S')}"
     suffix = 0
@@ -483,14 +492,30 @@ def backup(target):
         suffix += 1
         dest = backups / f"{target.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{suffix}"
     shutil.move(str(target), str(dest))
-    print(f"  warn  {target.name}: previous copy moved to {dest}")
+    print(f"  warn  {target.name}: previous {kind} moved to {dest}")
 
 
 def resolved(target):
     try:
-        return target.resolve()
+        return target.resolve(strict=True)
     except (OSError, RuntimeError):
-        return None  # A foreign symlink loop is not ours.
+        return None  # Broken or looping link.
+
+
+def points_at(target, src):
+    if not target.is_symlink():
+        return False
+    source = resolved(src)
+    return source is not None and resolved(target) == source
+
+
+def replace_link(target):
+    if ownership.owns_link(target):
+        old = os.readlink(target)
+        target.unlink()
+        print(f"  ok    {target}: removed recorded link to {old}")
+    else:
+        backup(target, "link")
 
 
 if action == "uninstall":
@@ -511,18 +536,30 @@ if action == "uninstall":
             elif key in copies and target.exists():
                 backup(target)  # Preserve even edited copies on uninstall.
     copies.clear()
+elif action == "install-bin":
+    src = (skills / "delegate/scripts/delegate").absolute()
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    if not points_at(binary, src):
+        if binary.is_symlink():
+            replace_link(binary)
+        elif binary.exists():
+            backup(binary, "target")
+        binary.symlink_to(src)
+    ownership.remember_link(binary)
+    ownership.save()
+    sys.exit(0)
 else:
     src, parent = map(pathlib.Path, args[:2])
     mode, force = args[2:]
     target = parent / src.name
     key = f"{parent.name}/{src.name}"
     if target.is_symlink():
-        if resolved(target) == src.resolve() and mode == "link":
+        if mode == "link" and points_at(target, src):
             ownership.remember_link(target)
             ownership.save()
             print(f"  ok    {src.name} (already linked)")
             sys.exit(0)
-        target.unlink()
+        replace_link(target)
     elif target.exists():
         current = None
         if mode == "copy" and key in copies:
@@ -876,9 +913,7 @@ for file in "$REPO"/commands/*.md; do
 done
 
 if [ "$bin" = 1 ]; then
-  mkdir -p "$HOME/.local/bin"
-  ln -sfn "$SKILLS_DIR/delegate/scripts/delegate" "$HOME/.local/bin/delegate"
-  record_link "$HOME/.local/bin/delegate"
+  manage_items install-bin
   ok "delegate on PATH via ~/.local/bin/delegate"
 fi
 if [ "$hooks" = 1 ]; then

@@ -712,6 +712,115 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(target.is_symlink())
         self.assertEqual(len(list((self.tmp / "claude/skill-backups").glob("next.md-*"))), 1)
 
+    def assert_backed_up(self, target, output):
+        backups = list((self.settings.parent / "skill-backups").glob(f"{target.name}-*"))
+        self.assertEqual(len(backups), 1, output)
+        self.assertTrue(any("warn" in line and str(backups[0]) in line
+                            for line in output.splitlines()), output)
+        return backups[0]
+
+    def test_install_backs_up_foreign_skill_and_command_links(self):
+        skill = self.settings.parent / "skills/delegate"
+        command = self.settings.parent / "commands/next.md"
+        foreign_skill = self.tmp / "my skill"
+        foreign_skill.mkdir()
+        (foreign_skill / "SKILL.md").write_text("my skill\n")
+        foreign_command = self.tmp / "my command"
+        foreign_command.write_text("my command\n")
+        for target, old in ((skill, foreign_skill), (command, foreign_command)):
+            target.parent.mkdir(parents=True)
+            target.symlink_to(old)
+
+        output = self.install()
+        self.assertEqual((foreign_skill / "SKILL.md").read_text(), "my skill\n")
+        self.assertEqual(foreign_command.read_text(), "my command\n")
+        for target, old in ((skill, foreign_skill), (command, foreign_command)):
+            with self.subTest(target=target):
+                backup = self.assert_backed_up(target, output)
+                self.assertEqual(os.readlink(backup), str(old))
+                self.assertEqual(target.resolve(), REPO / target.relative_to(self.settings.parent))
+
+    def test_install_backs_up_dangling_and_looping_links(self):
+        skill = self.settings.parent / "skills/delegate"
+        command = self.settings.parent / "commands/next.md"
+        for target, old in ((skill, "../missing"), (command, command.name)):
+            target.parent.mkdir(parents=True)
+            target.symlink_to(old)
+
+        output = self.install()
+        for target, old in ((skill, "../missing"), (command, command.name)):
+            with self.subTest(target=target):
+                backup = self.assert_backed_up(target, output)
+                self.assertEqual(os.readlink(backup), old)
+                self.assertEqual(target.resolve(), REPO / target.relative_to(self.settings.parent))
+
+    def test_install_bin_backs_up_regular_file_foreign_link_and_directory(self):
+        foreign = self.tmp / "other-delegate"
+        foreign.write_text("other binary\n")
+        for kind in ("file", "link", "directory"):
+            with self.subTest(kind=kind):
+                home = self.tmp / f"home-{kind}"
+                binary = home / ".local/bin/delegate"
+                binary.parent.mkdir(parents=True)
+                if kind == "file":
+                    binary.write_text("my script\n")
+                elif kind == "link":
+                    binary.symlink_to(foreign)
+                else:
+                    binary.mkdir()
+                    (binary / "my-file").write_text("my file\n")
+
+                output = self.install("--bin", env={"HOME": str(home)})
+                backup = self.assert_backed_up(binary, output)
+                self.assertTrue(binary.is_symlink())
+                self.assertEqual(binary.resolve(), REPO / "skills/delegate/scripts/delegate")
+                if kind == "file":
+                    self.assertEqual(backup.read_text(), "my script\n")
+                    backup.unlink()
+                elif kind == "link":
+                    self.assertEqual(os.readlink(backup), str(foreign))
+                    self.assertEqual(foreign.read_text(), "other binary\n")
+                    backup.unlink()
+                else:
+                    self.assertEqual((backup / "my-file").read_text(), "my file\n")
+
+    def test_install_replaces_recorded_links_with_notice_and_no_backup(self):
+        checkout = self.checkout("older checkout")
+        self.install("--bin", checkout=checkout)
+        config = self.settings.parent
+        output = self.install("--bin")
+        for relative in ("skills/delegate", "skills/field-report", "commands/next.md"):
+            with self.subTest(relative=relative):
+                notices = [line for line in output.splitlines() if str(checkout / relative) in line]
+                self.assertEqual(len(notices), 1, output)
+                self.assertEqual((config / relative).resolve(), REPO / relative)
+        self.assertFalse((config / "skill-backups").exists())
+
+    def test_install_bin_replaces_recorded_link_without_backup(self):
+        config = self.settings.parent
+        self.install("--bin")
+        binary = self.tmp / "home/.local/bin/delegate"
+        old = self.tmp / "older checkout/skills/delegate/scripts/delegate"
+        binary.unlink()
+        binary.symlink_to(old)
+        receipt = config / ".claude-orchestrator-install.json"
+        data = json.loads(receipt.read_text())
+        data["links"][str(binary)] = str(old)
+        receipt.write_text(json.dumps(data, indent=2) + "\n")
+
+        output = self.install("--bin")
+        self.assertEqual(sum(str(old) in line for line in output.splitlines()), 1, output)
+        self.assertEqual(binary.resolve(), REPO / "skills/delegate/scripts/delegate")
+        self.assertFalse((config / "skill-backups").exists())
+
+    def test_install_link_rerun_keeps_links_and_receipt_unchanged(self):
+        self.install("--bin")
+        state = self.tree_state(self.tmp)
+        output = self.install("--bin")
+        self.assertNotIn("warn", output[output.index("skills ("):])
+        self.assertFalse((self.settings.parent / "skill-backups").exists())
+        self.assertEqual(self.tree_state(self.tmp), state)
+
     def test_copy_rerun_changes_nothing_and_keeps_manifest_outside_loaded_text(self):
         self.install("--copy")
         config = self.settings.parent
@@ -986,6 +1095,33 @@ class InstallTests(unittest.TestCase):
         self.assertIn("--uninstall", help_text)
         self.assertIn("copied skills/commands are moved", help_text)
         self.assertIn("add --git-hook=DIR", help_text)
+
+    def test_install_timer_systemctl_failure_warns_and_continues(self):
+        self.exe("systemctl", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$FAKE_SYSTEMCTL_CALLS"\nexit 1\n')
+        project = self.tmp / "project"
+        subprocess.run(["git", "init", str(project)], check=True, capture_output=True)
+        output = self.install("--timer", f"--git-hook={project}")
+        warnings = [line for line in output.splitlines() if "warn" in line]
+        self.assertTrue(any("systemctl --user daemon-reload" in line for line in warnings))
+        for unit in (self.timer, self.rate_timer):
+            self.assertTrue(unit.is_file())
+            command = f"systemctl --user enable --now {unit.name}"
+            self.assertTrue(any(command in line for line in warnings), output)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "--user daemon-reload", f"--user enable --now {self.timer.name}",
+            f"--user enable --now {self.rate_timer.name}"])
+        self.assertEqual((project / ".git/hooks/pre-commit").resolve(),
+                         REPO / "hooks/secret-guard.py")
+        self.assertIn("done. Claude Code", output)
+
+    def test_install_timer_rate_enable_failure_leaves_quota_enabled(self):
+        self.exe("systemctl", '#!/bin/sh\n'
+                 '[ "$2" != enable ] || [ "$4" != claude-delegate-rate.timer ]\n')
+        output = self.install("--timer")
+        self.assertIn("quota timer enabled", output)
+        self.assertNotIn("rate timer enabled", output)
+        self.assertTrue(any("warn" in line and f"systemctl --user enable --now {self.rate_timer.name}" in line
+                            for line in output.splitlines()), output)
 
     def test_timer_units_commands_and_reinstallation_are_idempotent(self):
         output = self.install("--timer")

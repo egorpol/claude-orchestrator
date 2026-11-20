@@ -13,6 +13,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 HOOK = REPO / "hooks" / "secret-guard.py"
 SESSION = REPO / "hooks" / "session-mode.py"
+WORKING_FILES_MARKER = "skills/delegate/scripts/delegate"
 
 
 def _fake_token(prefix, n):
@@ -2121,21 +2122,76 @@ class SecretGuardP2Tests(_SecretGuardHarness, unittest.TestCase):
                 self.assertEqual(self.run_hook(argv=["--pre-commit", str(local)]).returncode, 0)
                 self.assertEqual(self.claude("git commit -m x", cwd=local).stdout, "")
 
+    def test_working_files_marker_exists_in_checkout(self):
+        self.assertTrue((REPO / WORKING_FILES_MARKER).is_file())
+
+    def assert_working_file_findings(self, cwd, handoffs=True, feedback=False, env=None):
+        expected = []
+        if handoffs:
+            expected.extend(("HANDOFF.md", "nested/hAnDoFf.Md"))
+        if feedback:
+            expected.extend(("feedback/x.md", "feedback/x.jsonl"))
+
+        for entry_point in ("pre-commit", "PreToolUse"):
+            with self.subTest(entry_point=entry_point):
+                if entry_point == "pre-commit":
+                    result = self.run_hook(argv=["--pre-commit", str(cwd)], env=env)
+                    self.assertEqual((result.returncode, result.stdout), (bool(expected), ""))
+                    findings = result.stderr
+                else:
+                    result = self.claude("git commit -m x", cwd=cwd, env=env)
+                    findings = self.decision(result) if expected else result.stdout
+                    self.assertEqual((result.returncode, result.stderr), (0, ""))
+                actual = [line.split()[2].removesuffix(":-") for line in findings.splitlines()
+                          if line.lstrip().startswith("working file  ")]
+                self.assertCountEqual(actual, expected, findings)
+                if not expected:
+                    self.assertEqual(findings, "")
+
     def test_working_file_additions_only(self):
         local = self.repo()
         for path in ("HANDOFF.md", "nested/hAnDoFf.Md", "feedback/x.md", "feedback/x.jsonl",
                      "feedback/sub/x.md", "docs/HANDOFF-notes.md"):
             self.stage(local, path)
-        result = self.run_hook(argv=["--pre-commit", str(local)])
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("4 findings", result.stderr)
-        self.assertNotIn("feedback/sub", result.stderr)
-        self.assertNotIn("HANDOFF-notes", result.stderr)
+
+        for state in ("plain", "untracked", "nested", "tracked", "opt-out"):
+            with self.subTest(marker=state):
+                if state == "untracked":
+                    marker = local / WORKING_FILES_MARKER
+                    marker.parent.mkdir(parents=True)
+                    marker.write_text("marker\n")
+                elif state == "nested":
+                    self.stage(local, "vendor/x/" + WORKING_FILES_MARKER)
+                elif state == "tracked":
+                    _git(local, "add", "--", WORKING_FILES_MARKER)
+                elif state == "opt-out":
+                    _git(local, "config", "secretGuard.workingFiles", "false")
+                self.assert_working_file_findings(
+                    local, handoffs=state != "opt-out", feedback=state == "tracked")
+                if state == "tracked":
+                    self.assert_working_file_findings(local / "nested", feedback=True)
+
+        _git(local, "config", "--unset", "secretGuard.workingFiles")
         _git(local, "commit", "-m", "base")
         self.stage(local, "HANDOFF.md", "changed\n")
         _git(local, "rm", "feedback/x.md")
-        result = self.run_hook(argv=["--pre-commit", str(local)])
-        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assert_working_file_findings(local, handoffs=False)
+
+    def test_working_files_marker_lookup_fails_closed(self):
+        import shlex
+        import shutil
+        local = self.repo()
+        for path in ("HANDOFF.md", "nested/hAnDoFf.Md", "feedback/x.md", "feedback/x.jsonl"):
+            self.stage(local, path)
+        bin_dir = self.tmp / "fake-bin"
+        bin_dir.mkdir()
+        fake_git = bin_dir / "git"
+        fake_git.write_text(
+            '#!/bin/sh\ncase " $* " in *" ls-files "*) exit 128 ;; esac\n'
+            f'exec {shlex.quote(shutil.which("git"))} "$@"\n')
+        fake_git.chmod(0o755)
+        self.assert_working_file_findings(
+            local, feedback=True, env={"PATH": f"{bin_dir}:{self.env['PATH']}"})
 
     def test_renamed_destinations_and_untracked_paths(self):
         self.deny_list()
@@ -2164,6 +2220,7 @@ class SecretGuardP2Tests(_SecretGuardHarness, unittest.TestCase):
 
     def test_pretool_full_scan_from_subdirectory_uses_root_relative_paths(self):
         local = self.repo()
+        self.stage(local, WORKING_FILES_MARKER)
         (local / "feedback").mkdir()
         (local / "feedback/x.md").write_text("local notes\n")
         sub = local / "sub"
@@ -2228,6 +2285,48 @@ class SecretGuardP2Tests(_SecretGuardHarness, unittest.TestCase):
                 self.assertIn("GitHub token", self.decision(self.claude(command, cwd=other)))
         self.assertEqual(self.claude(f"(cd {q}); git commit -m x", cwd=other).stdout, "")
 
+    def test_pretool_wrapped_commits_scan_staged_tokens(self):
+        local = self.repo()
+        self.repo("clean")
+        self.stage(local, "f.txt", _fake_token("ghp_", 36))
+        for command in (
+            "git commit", "sudo git commit", "doas git commit", "stdbuf -oL git commit",
+            "ionice -c3 git commit", "noglob git commit", "builtin command git commit",
+            "echo x | xargs git commit -m", "rtk git commit",
+            "sudo -u root git commit", "sudo --user=root git commit", "sudo -- git commit",
+            "doas -u root git commit", "stdbuf -o L git commit", "stdbuf --output=L git commit",
+            "ionice -c 2 -n 7 git commit", "ionice -tc 2 --classdata 7 git commit",
+            "xargs -n 1 git commit", "xargs -n1 git commit", "xargs -I {} git commit -m {}",
+            "xargs --replace git commit -m {}", "rtk -v git commit",
+            "sudo cd ../clean && git commit",
+        ):
+            with self.subTest(command=command):
+                result = self.claude(command, cwd=local)
+                self.assertTrue(result.stdout, result.stderr)
+                self.assertIn("GitHub token", self.decision(result))
+
+    def test_pretool_wrappers_without_commits_stay_silent(self):
+        local = self.repo()
+        self.stage(local, "f.txt", _fake_token("ghp_", 36))
+        for command in (
+            "sudo ls", "xargs grep x", "ionice -c3 make", "stdbuf -oL tail f",
+            "sudo -u root git status", "sudo -i", "ionice -p 123", "xargs", "sudo -h",
+            "sudo -i; git status", "GIT=git; $GIT commit",
+        ):
+            with self.subTest(command=command):
+                result = self.claude(command, cwd=local)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_pretool_wrapped_push_scans_committed_tokens(self):
+        local = self.repo()
+        self.stage(local, "f.txt", _fake_token("ghp_", 36))
+        _git(local, "commit", "-m", "base")
+        plain = self.decision(self.claude("git push origin HEAD", cwd=local))
+        self.assertIn("GitHub token", plain)
+        wrapped = self.claude("sudo git push origin HEAD", cwd=local)
+        self.assertTrue(wrapped.stdout, wrapped.stderr)
+        self.assertEqual(self.decision(wrapped), plain)
+
     def test_non_commit_verbs_and_plain_commands_stay_silent(self):
         local = self.repo()
         self.stage(local, "f.txt", _fake_token("ghp_", 36))
@@ -2290,6 +2389,15 @@ class CwdGuardTests(_SecretGuardHarness, unittest.TestCase):
         self._deny("cd sub || exit 1")
         self._deny("builtin cd sub")
         self._deny("command cd sub")
+
+    def test_cd_wrappers_keep_child_directory_changes_isolated(self):
+        for command in ("cd sub", "builtin cd sub", "noglob cd sub", "noglob builtin cd sub"):
+            with self.subTest(command=command):
+                self._deny(command)
+        for wrapper in ("sudo", "doas", "stdbuf -oL", "ionice -c3", "xargs", "rtk"):
+            with self.subTest(wrapper=wrapper):
+                self._silent(f"{wrapper} cd sub")
+                self._silent(f"{wrapper} eval 'cd sub'")
 
     def test_deny_mkdir_cd_build_missing(self):
         reason = self._deny("mkdir -p build && cd build && cmake ..")

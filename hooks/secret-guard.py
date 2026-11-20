@@ -21,6 +21,9 @@ Four entry points, one file:
 
 Private literals: ${XDG_CONFIG_HOME:-~/.config}/claude-orchestrator/private-names.txt,
 one per line, ignoring blanks and # comments. Output masks names even inside words.
+Added HANDOFF.md files are flagged in every repo. Added direct feedback/*.md and
+feedback/*.jsonl files are flagged where the index tracks skills/delegate/scripts/delegate
+at the repo root, or when the marker lookup fails.
 Repo opt-outs: secretGuard.homePaths, secretGuard.privateNames, secretGuard.workingFiles.
 Approving Claude's ask still hits an installed git hook; --no-verify is scanned again.
 
@@ -406,6 +409,7 @@ COMMIT_VALUE_OPTIONS = frozenset({
 })
 REPO_RULE_CONFIG = (("home_paths", "homePaths"), ("private_names", "privateNames"),
                     ("working_files", "workingFiles"))
+WORKING_FILES_MARKER = "skills/delegate/scripts/delegate"
 SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!", "{"})
 # Distinct from None (which means "use default 20 s"). Only an explicit env bounds --check.
 _UNLIMITED = object()
@@ -602,6 +606,7 @@ class Guard:
         self.home_paths = True  # per repo, see load_repo_config
         self.private_names = True
         self.working_files = True
+        self.feedback_working_files = True
         self._private_entries = []
         self._private_error = None
         self._load_private_names()
@@ -626,6 +631,21 @@ class Guard:
             proc = self.git(["config", "--type=bool", "--get", f"secretGuard.{key}"], cwd,
                             check=False, git_opts=opts)
             setattr(self, attr, proc.stdout.strip() != "false")
+        self.feedback_working_files = self.working_files and self._tracks_working_files_marker(cwd, opts)
+
+    def _tracks_working_files_marker(self, cwd, git_opts):
+        """Check the inherited index, with a pathspec anchored at the repo root."""
+        try:
+            proc = self.git(
+                ["--no-literal-pathspecs", "ls-files", "--cached", "--full-name", "-z",
+                 "--", f":(top,literal){WORKING_FILES_MARKER}"],
+                cwd, check=False, git_opts=git_opts,
+            )
+        except GitError:
+            return True
+        # A failing lookup leaves the rule on. Match the exact entry since a
+        # pathspec can also return entries under a directory of the same name.
+        return proc.returncode != 0 or WORKING_FILES_MARKER in proc.stdout.split("\0")
 
     def _load_private_names(self):
         root = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
@@ -970,7 +990,8 @@ class Guard:
         name = Path(relpath).name
         lower = name.lower()
         if self.working_files and (lower == "handoff.md" or (
-                added_path.startswith("feedback/") and added_path.count("/") == 1
+                self.feedback_working_files and added_path.startswith("feedback/")
+                and added_path.count("/") == 1
                 and name.endswith((".md", ".jsonl")))):
             self.add("working file", added_path, "-", commit, added_path, mask=False)
         if name in SENSITIVE_NAMES or lower in SENSITIVE_NAMES:
@@ -1528,20 +1549,60 @@ def _skip_keywords(words):
     return words
 
 
-def _skip_wrappers(words, depth=0):
-    """Strip leading env assignments and env/command/nohup/time/timeout wrappers.
+CHILD_WRAPPER_OPERANDS = {
+    # Keep sudo and doas in sync with hooks/session-mode.py.
+    "sudo": ("-u", "--user", "-g", "--group", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U"),
+    "doas": ("-u", "-C"),
+    "stdbuf": ("-i", "--input", "-o", "--output", "-e", "--error"),
+    "ionice": ("-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"),
+    "xargs": ("-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "-L", "--max-lines",
+              "-n", "--max-args", "-P", "--max-procs", "--process-slot-var", "-s", "--max-chars"),
+    "rtk": (),
+}
 
-    Returns (remaining_words, depth, split_string_or_None, chdir_or_None).
+
+def _skip_child_wrapper_options(words, i, name):
+    operands = CHILD_WRAPPER_OPERANDS[name]
+    while i < len(words) and words[i].startswith("-") and words[i] != "-":
+        opt = words[i]
+        i += 1
+        if opt == "--":
+            break
+        if opt.startswith("--"):
+            if opt in operands:
+                i += 1
+            continue
+        for position, char in enumerate(opt[1:], 1):
+            # The optional operands for these short xargs flags must be attached.
+            if name == "xargs" and char in "eil":
+                break
+            if "-" + char in operands:
+                if position == len(opt) - 1:
+                    i += 1
+                break
+    return i
+
+
+def _skip_wrappers(words):
+    """Strip leading env assignments and common command wrappers.
+
+    Returns (remaining_words, child_process, split_string_or_None, chdir_or_None).
     ``env -C DIR`` / ``--chdir`` applies DIR only to the child command.
     """
-    if depth > 32:
-        return words, depth, None, None
+    child_process = False
     i = 0
     while i < len(words):
         if ASSIGNMENT.match(words[i]):
             i += 1
             continue
         name = Path(words[i]).name
+        if name in ("builtin", "noglob"):
+            i += 1
+            continue
+        if name in CHILD_WRAPPER_OPERANDS:
+            i = _skip_child_wrapper_options(words, i + 1, name)
+            child_process = True
+            continue
         if name == "env":
             i += 1
             split_string = None
@@ -1573,7 +1634,7 @@ def _skip_wrappers(words, depth=0):
                 if opt in ("-u", "--unset", "-a", "--argv0"):
                     i += 1
             if split_string is not None or chdir is not None:
-                return words[i:], depth, split_string, chdir
+                return words[i:], child_process, split_string, chdir
             continue
         if name in ("command", "nohup", "time", "nice", "setsid", "exec"):
             i += 1
@@ -1602,7 +1663,7 @@ def _skip_wrappers(words, depth=0):
                 i += 1
             continue
         break
-    return words[i:], depth, None, None
+    return words[i:], child_process, None, None
 
 
 def _nested_shell(words):
@@ -1612,7 +1673,7 @@ def _nested_shell(words):
     chdir is set when ``env -C`` / ``--chdir`` wrapped the child.
     """
     words = _skip_keywords(words)
-    words, _, env_s, chdir = _skip_wrappers(words)
+    words, child_process, env_s, chdir = _skip_wrappers(words)
     if env_s is not None or chdir is not None:
         # env -C alone (no -S): remaining words are the child command.
         if env_s is None and chdir is not None:
@@ -1622,7 +1683,7 @@ def _nested_shell(words):
         return None
     name = Path(words[0]).name
     if name == "eval":
-        return "eval", " ".join(words[1:]), [], None
+        return ("shell" if child_process else "eval"), " ".join(words[1:]), [], None
     if name in ("bash", "sh", "zsh"):
         i = 1
         while i < len(words) and words[i].startswith(("-", "+")):
@@ -2116,7 +2177,7 @@ def analyze_command(command, cwd, guard, commits=None):
                 return nested_work
             return work
         words = _skip_keywords(raw)
-        words, _, env_s, chdir = _skip_wrappers(words)
+        words, child_process, env_s, chdir = _skip_wrappers(words)
         if env_s is not None or chdir is not None:
             child = resolve_cwd(chdir, work) if chdir else work
             if env_s is not None:
@@ -2128,7 +2189,7 @@ def analyze_command(command, cwd, guard, commits=None):
             return work
         if not words:
             return work
-        if Path(words[0]).name == "cd":
+        if Path(words[0]).name == "cd" and not child_process:
             if len(words) >= 2:
                 return resolve_cwd(words[1], work)
             return work
@@ -2195,11 +2256,7 @@ def predict_shell_cwd(command, cwd):
                 return nested_work
             return work
         words = _skip_keywords(raw)
-        # Cd check only: ``builtin cd`` is a real directory change (``command cd``
-        # is already stripped by _skip_wrappers).
-        if words and Path(words[0]).name == "builtin":
-            words = words[1:]
-        words, _, env_s, chdir = _skip_wrappers(words)
+        words, child_process, env_s, chdir = _skip_wrappers(words)
         if env_s is not None or chdir is not None:
             child = resolve_cd_target(chdir, work) if chdir else work
             if env_s is not None:
@@ -2210,7 +2267,7 @@ def predict_shell_cwd(command, cwd):
             _walk_shell(text, child, handle_one, depth + 1,
                         skip_heredocs=True, cwd_control=True)
             return work
-        if not words:
+        if not words or child_process:
             return work
         name = Path(words[0]).name
         if name in ("cd", "pushd"):
@@ -2381,9 +2438,9 @@ def sandbox_guard_reason(command, cwd):
                 text = " ".join(shlex.quote(w) for w in _tokens(text) + list(rest))
             final = walk(text, child, depth + 1)
             return final if kind == "eval" else work
-        words, _, _, _ = _skip_wrappers(_skip_keywords(raw))
+        words, child_process, _, _ = _skip_wrappers(_skip_keywords(raw))
         if words and Path(words[0]).name in ("cd", "pushd"):
-            return resolve_cd_target(_cd_arg(words), work)
+            return work if child_process else resolve_cd_target(_cd_arg(words), work)
         args = _delegate_args(words)
         if "--dry-run" in args:
             return work
