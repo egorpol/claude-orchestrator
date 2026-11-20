@@ -41,8 +41,6 @@ The CLI entry point is `skills/delegate/scripts/delegate`, with the subcommands 
 
 ## Install
 
-The repository is private for now, so cloning it needs access.
-
 ```bash
 gh repo clone egorpol/claude-orchestrator
 cd claude-orchestrator

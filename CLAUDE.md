@@ -70,7 +70,7 @@ bash -n install.sh
 
 - **Shell:** the Bash tool runs zsh, although the user's terminal is fish. In zsh, `$args` doesn't word-split and a bare `====` is expanded as `=cmd`.
 - **Nextcloud:** the maintainer's checkout lives in Nextcloud, so `.git` syncs too. On each other machine, use either the synced folder or a `gh repo clone`, never both.
-- **Git:** remote `egorpol/claude-orchestrator` was public from 2026-10-13 and is private since 2026-11-07, with its full history. Commit messages are imperative, e.g. "Add review, followup and verify rounds; …". Commit and push only when asked.
+- **Git:** remote `egorpol/claude-orchestrator` was public from 2026-10-13 and private from 2026-11-07; on 2026-11-20 it was deleted and recreated from the rewritten history (old commits no longer served) and made public again. Commit messages are imperative, e.g. "Add review, followup and verify rounds; …". Commit and push only when asked.
 
 ## Field reports, releases, open items
 
