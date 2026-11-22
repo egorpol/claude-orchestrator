@@ -6,6 +6,7 @@ import select
 import signal
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -28,7 +29,16 @@ if "-p" not in args:
                            b'\x1b[1mCheck for updates\x1b[22m')
     ROW_CONTEXT = b'     /context                  Show context usage breakdown'
     LOADING = b'\r\n\r\n  \x1b[36mLoading usage data...\x1b[39m\r\n\x1b[2K\x1b[1A\x1b[2K'
-    RESETS = b'  Usage  \xe2\x80\xa2  Pro                         \x1b[2mResets 18 Nov\x1b[22m\r\n'
+    # The reader accepts a reset from 3 days back to 35 ahead of its clock, so a fixed
+    # date broke every real-clock test once it fell behind (2026-11-22). Default: today
+    # + 10 days in English, like the no-pty stub in test_quota; clock-pinned tests pass
+    # FAKE_CURSOR_RESETS (e.g. "18 Nov") to match theirs.
+    _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    _due = datetime.now(timezone.utc) + timedelta(days=10)
+    RESET_TEXT = os.environ.get("FAKE_CURSOR_RESETS") or f"{_due.day} {_MONTHS[_due.month - 1]}"
+    RESETS = (b'  Usage  \xe2\x80\xa2  Pro                         \x1b[2mResets '
+              + RESET_TEXT.encode() + b'\x1b[22m\r\n')
     TABLE = (
         b'Monthly plan and on-demand usage\r\n'
         b'Category  Current  Usage\r\n'

@@ -19,6 +19,7 @@ import monitor
 import quota
 
 FAKES = Path(__file__).resolve().parent / "fake_agents"
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
 def _pty_available():
@@ -97,9 +98,21 @@ class CursorUsageTests(unittest.TestCase):
 
     def snapshot_at(self, when=None, timeout=5):
         when = when or self.now
-        with mock.patch.object(quota, "datetime", wraps=datetime) as clock:
+        # The fake's screen date follows the real clock; give it one 11 days after the
+        # pinned clock instead (self.now: the fixture's "18 Nov").
+        due = when + timedelta(days=11)
+        with mock.patch.dict(os.environ, {"FAKE_CURSOR_RESETS": f"{due.day} {MONTHS[due.month - 1]}"}), \
+                mock.patch.object(quota, "datetime", wraps=datetime) as clock:
             clock.now.return_value = when
             return quota._cursor_snapshot(timeout=timeout, log=self.log)
+
+    @requires_pty
+    def test_pinned_read_far_from_fixture_date(self):
+        # A fixed "Resets 18 Nov" in the fake failed every real-clock test from 2026-11-22.
+        when = datetime(2027, 12, 28, 10, 0, tzinfo=timezone.utc)
+        snap, reason, error = self.snapshot_at(when=when)
+        self.assertEqual((reason, error), (None, None))
+        self.assertEqual(snap["resets"]["billing_cycle_end"], "2028-01-08T00:00:00+00:00")
 
     @requires_pty
     def test_normal_read_gauges_argv_and_locale(self):
