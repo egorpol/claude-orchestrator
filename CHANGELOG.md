@@ -22,6 +22,7 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 - A Decisions tip from two field reports (2026-10-17, 2026-11-11): a technical picker leads each option with what changes for the user against what runs today, and the comparison the user will ask about goes before the picker (`rules/reference.md`).
 - README's note on the Cursor `/usage` reader now cites a Cursor staff answer on the forum (2026-11-17): personal workflow automation on your own account, at a plausible volume and through the app, is outside the Acceptable Use Policy's automated-access line. The reader still ships off.
 - `hooks/secret-guard.py` flags added direct `feedback/*.md` and `feedback/*.jsonl` files only in repos whose index tracks `skills/delegate/scripts/delegate` at the root, or when that lookup fails; added `HANDOFF.md` files are still flagged in every repo. README now names the switches `SECRET_GUARD_DISABLE=1`, `CWD_GUARD_DISABLE=1` and `SANDBOX_GUARD_DISABLE=1`.
+- Field results: the 24 field-report sessions that started inside the preregistration's confirmatory window join the overview table after the freeze, with a table in each of their sections (93 sessions, 6,292 calls, 165.7M cost units). The two run-in rows show their drawn mode instead of `period 2`. A 2026-11-04 report that every fold-in missed gets its row; its lessons wait for the next fold-in.
 
 ### Removed
 

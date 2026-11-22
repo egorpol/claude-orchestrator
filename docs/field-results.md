@@ -1,6 +1,6 @@
 # Field results
 
-Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. `mode` is the session's drawn mode in the control-session experiment (hook registered 2026-10-13 10:29); — means the session started before it, and none that no draw was logged; excluded means sessions in this repo (claude-orchestrator), which the session-mode hook leaves out of the draw; they run with orchestrator rules. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in. Sessions that started inside the preregistration's confirmatory window (first start after 2026-10-31 00:29:58 UTC) join the table at the freeze; until then their sections carry lessons only.
+Numbers come from `delegate cost --session` on each session's transcript and include the calls that wrote the report. Cost units weigh input 1, cache read 0.1, 1h cache write 2, output 5. Compare sessions per call, because the work differs. `mode` is the session's drawn mode in the control-session experiment (hook registered 2026-10-13 10:29); — means the session started before it, and none that no draw was logged; excluded means sessions in this repo (claude-orchestrator), which the session-mode hook leaves out of the draw; they run with orchestrator rules. Field reports are kept locally in `feedback/` (gitignored since 0.1.0) and written with `delegate report` / `/field-report`; new sections are added here when reports are folded in. Sessions that started inside the preregistration's confirmatory window (first start after 2026-10-31 00:29:58 UTC) joined the table on 2026-11-22, after the freeze; the table compares no arms. Calls and cost units count the main thread only: `cost --session` prints subagent transcripts on a separate line, and two sessions here ran any (ea48f2bb: 1 transcript, 1.25M units; 2585024c: 3, 5.59M).
 
 | date | session | mode | calls | context at end | cost units | units per call | idle rebuild share |
 |---|---|---|---:|---:|---:|---:|---:|
@@ -71,10 +71,34 @@ Numbers come from `delegate cost --session` on each session's transcript and inc
 | 2026-10-28 | 942b7366 | excluded | 47 | 111k | 0.69M | 14.7k | 0 |
 | 2026-10-30 | 5b7b3108 | orchestrator | 59 | 158k | 1.15M | 19.5k | 0 |
 | 2026-10-30 | 1b3948cb | orchestrator | 25 | 111k | 0.49M | 19.7k | 0 |
-| 2026-10-30 | 11468922 | period 2 | 50 | 111k | 0.76M | 15.3k | 0 |
-| 2026-10-31 | dfb8b0e1 | period 2 | 41 | 156k | 1.20M | 29.2k | 20.6% |
+| 2026-10-30 | 11468922 | orchestrator | 50 | 111k | 0.76M | 15.3k | 0 |
+| 2026-10-31 | dfb8b0e1 | orchestrator | 41 | 156k | 1.20M | 29.2k | 20.6% |
+| 2026-10-31 | f148e743 | orchestrator | 47 | 130k | 0.85M | 18.0k | 0 |
+| 2026-10-31 | 7d2e0a08 | orchestrator | 52 | 127k | 0.90M | 17.2k | 0 |
+| 2026-11-01 | 41cb808b | orchestrator | 92 | 160k | 1.58M | 17.2k | 0 |
+| 2026-11-01 | 6fa4ed37 | orchestrator | 47 | 149k | 0.98M | 20.8k | 0 |
+| 2026-11-01 | 46e58955 | claude-only | 42 | 178k | 1.22M | 29.0k | 0 |
+| 2026-11-02 | 66a30404 | orchestrator | 68 | 162k | 1.47M | 21.6k | 11.2% |
+| 2026-11-02 | c44c322b | orchestrator | 56 | 138k | 1.00M | 17.9k | 0 |
+| 2026-11-02 | 0b810fdc | orchestrator | 53 | 146k | 1.04M | 19.6k | 0 |
+| 2026-11-03 | 8623b792 | orchestrator | 38 | 151k | 0.87M | 23.0k | 0 |
+| 2026-11-03 | b8b7f262 | orchestrator | 57 | 189k | 1.39M | 24.3k | 0 |
+| 2026-11-04 | cdd75624 | claude-only | 39 | 143k | 1.03M | 26.4k | 20.9% |
+| 2026-11-04 | e485aa04 | orchestrator | 62 | 156k | 1.16M | 18.8k | 0 |
+| 2026-11-04 | f15622ef | orchestrator | 74 | 159k | 1.34M | 18.2k | 0 |
+| 2026-11-04 | 72a7c485 | claude-only | 26 | 256k | 1.40M | 53.8k | 0 |
+| 2026-11-04 | a3f58c58 | orchestrator | 19 | 168k | 0.83M | 43.5k | 0 |
+| 2026-11-05 | 802739f7 | orchestrator | 40 | 267k | 1.79M | 44.8k | 0 |
+| 2026-11-05 | e7397fff | orchestrator | 50 | 243k | 1.83M | 36.6k | 0 |
+| 2026-11-05 | 64d45ffe | orchestrator | 23 | 98k | 0.56M | 24.3k | 13.5% |
+| 2026-11-05 | e01561dd | orchestrator | 46 | 196k | 1.37M | 29.9k | 0 |
+| 2026-11-06 | c7aec424 | orchestrator | 50 | 176k | 1.27M | 25.5k | 0 |
+| 2026-11-06 | b7c92b79 | orchestrator | 64 | 221k | 1.85M | 29.0k | 0 |
+| 2026-11-06 | 809928b4 | claude-only | 36 | 129k | 0.77M | 21.3k | 0 |
+| 2026-11-06 | ab7c82cd | orchestrator | 42 | 189k | 1.31M | 31.2k | 0 |
+| 2026-11-11 | 2585024c | claude-only | 40 | 147k | 0.93M | 23.2k | 0 |
 
-69 sessions, 5,129 calls, 136.9M cost units; idle rebuilds 10.1M (7.4%). The 68 sessions after the marathon averaged 23.4k units per call.
+93 sessions, 6,292 calls, 165.7M cost units; idle rebuilds 10.6M (6.4%). The 92 sessions after the marathon averaged 23.6k units per call; the 24 added after the freeze, 24.7k.
 
 ## 2026-10-10
 
@@ -354,12 +378,14 @@ Each closed with `/field-report`; folded in on 2026-10-30 (`14732b6`). Numbers f
 
 ## 2026-10-30 to 10-31: four sessions, three projects
 
-Each closed with `/field-report`; folded in on 2026-10-31. All four ran in period 2. Two started before the preregistration's T0 (2026-10-31 00:29:58 UTC) and get numbers here, with mode `period 2`. The other two started inside the confirmatory window: this section carries their lessons only, and their numbers wait for the freeze. Numbers from `delegate cost --session <id>`; both sessions ran on after their reports (46 and 36 calls then).
+Each closed with `/field-report`; folded in on 2026-10-31. All four ran in period 2 and drew orchestrator. Two started before the preregistration's T0 (2026-10-31 00:29:58 UTC); the other two started inside the confirmatory window, and their rows were added on 2026-11-22, after the freeze. Numbers from `delegate cost --session <id>`; the first two ran on after their reports (46 and 36 calls then).
 
 | session | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
 |---|---|---:|---:|---:|---:|---|---:|
 | 11468922, eu-pd-composers: award review round | 2 × `ask --agent both` | 50 | 111k | 0.76M | 15.3k | none | 62 |
 | dfb8b0e1, egorpol.github.io: Notes post drafted and claim-checked | `review --working-tree` (both vendors) | 41 | 156k | 1.20M | 29.2k | 494 min (20.6%) | 58 |
+| f148e743, egorpol.github.io: Notes post picks committed locally, comparison section handed off | 2 × `ask --agent both` | 47 | 130k | 0.85M | 18.0k | none | 56 |
+| 7d2e0a08, camat_v2: a viewer comparison checked, an evidence question re-asked with corrected facts | `ask --agent both` | 52 | 127k | 0.90M | 17.2k | none | 55 |
 
 - **Handoff gates and numbers went stale.** A handoff's figures gate (`--dump r020`) failed because that dump had left `data/` one session earlier. Viewer overlap figures in another handoff reproduced only with difflib `autojunk=False`, which the handoff didn't name. Re-measured, two facts were wrong: a path in a handoff and a comparison base in an earlier question. `rules/reference.md` now says to run each gate once before writing it in and to name non-default parameters.
 - **A numbered source dump made a prose review checkable.** `review --working-tree` with a 204 KB numbered dump `--link`ed from a gitignored folder: both vendors cited source lines and answered each of five named doubts, and found no wrong number. SKILL.md now has the recipe. The report skeleton printed that review as `claude None, 0 round(s)`; `delegate report` now prints `review (working-tree):` with each reviewer's verdict.
@@ -371,7 +397,17 @@ Each closed with `/field-report`; folded in on 2026-10-31. All four ran in perio
 
 ## 2026-11-01 to 11-03: seven sessions, three projects
 
-Each closed with `/field-report`; folded in on 2026-11-03. All seven started inside the preregistration's confirmatory window, so this section carries their lessons only; their numbers wait for the freeze.
+Each closed with `/field-report`; folded in on 2026-11-03. All seven started inside the preregistration's confirmatory window, so the section first carried lessons only. Modes: 6 orchestrator, 1 claude-only. Numbers from `delegate cost --session <id>`, added on 2026-11-22, after the freeze; Claude 7d is the share left at report time, on Max.
+
+| session | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---:|---:|---:|---:|---|---:|
+| 41cb808b, audiospylt: option-gap round, apply and commit | Codex review and Cursor follow-up of an earlier Cursor run | 92 | 160k | 1.58M | 17.2k | none | 49 |
+| 6fa4ed37, audiospylt: f0 reading of an analysis file measured and decided, no build | 4 × `ask --agent both` | 47 | 149k | 0.98M | 20.8k | none | 48 |
+| 46e58955, audiospylt: curved morph glides built inline with tests and checker (claude-only) | none | 42 | 178k | 1.22M | 29.0k | none | 46 |
+| 66a30404, camat_v2: paper figures built, a scan-rights decision | `ask --agent both` | 68 | 162k | 1.47M | 21.6k | 297 min (11.2%) | 39 |
+| c44c322b, ddt_1_vol_11: instrument choice reviewed, fixed and applied | Cursor review of an earlier Codex run | 56 | 138k | 1.00M | 17.9k | none | 37 |
+| 0b810fdc, camat_v2: figure and caption fact-check, 3 fixes | `ask --agent both` | 53 | 146k | 1.04M | 19.6k | none | 37 |
+| 8623b792, ddt_1_vol_11: clash checker and apply brief, build launched | Codex build; an earlier Codex run collected | 38 | 151k | 0.87M | 23.0k | none | 97 |
 
 - **Skill and memory reads at resume were the largest avoidable context costs.** Loading the `delegate` SKILL.md (41 KB) added about 16k tokens, in one session for a single `ask` whose command the rules already give. Three resumes read 9–10 KB of project memory, one file a single running paragraph of history. `rules/reference.md` now says ask-only steps need no skill load and memory files hold the resume pointer and binding facts; `/next` reads only the memory files the handoff names, sizes first.
 - **Brief facts went unmeasured in four sessions.** A checker threshold came from a facts file measured on another grid; a fix brief prescribed prose quoting a value the fix changed; "both agents agreed" travelled from a brief into a public plan though only two of three picks had been asked; a staff layout stated for all 17 works did not hold for one, and was probed 41 s after launch. The implement template now asks for the brief's factual claims with the probe behind each, outliers first, and provenance cited by file; SKILL.md's fix rounds read a prescribed helper's docstring first.
@@ -383,7 +419,14 @@ Each closed with `/field-report`; folded in on 2026-11-03. All seven started ins
 
 ## 2026-11-03 to 11-04: four sessions, three projects
 
-Each closed with `/field-report`; folded in on 2026-11-04. All four started inside the preregistration's confirmatory window, so this section carries their lessons only; their numbers wait for the freeze.
+Each closed with `/field-report`; folded in on 2026-11-04. All four started inside the preregistration's confirmatory window, so the section first carried lessons only. Modes: 3 orchestrator, 1 claude-only. Numbers from `delegate cost --session <id>`, added on 2026-11-22, after the freeze; Claude 7d is the share left at report time, on Max.
+
+| session | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---:|---:|---:|---:|---|---:|
+| b8b7f262, ddt_1_vol_11: figure review page for three emendations | Codex print reads (no changes) | 57 | 189k | 1.39M | 24.3k | none | 95 |
+| cdd75624, audiospylt: tracking benchmark verified, reviewed and applied (claude-only) | applied an earlier Codex run after its own review | 39 | 143k | 1.03M | 26.4k | 331 min (20.9%) | 90 |
+| e485aa04, ddt_1_vol_11: silent samples dropped from an instrument, live browser probe, commit | Codex build, Cursor review | 62 | 156k | 1.16M | 18.8k | none | 89 |
+| f15622ef, camat_v2: paper section on AI-assisted editing, fact-check | 2 × `ask --agent both` | 74 | 159k | 1.34M | 18.2k | none | 89 |
 
 - **A hook read heredoc prose as commands, and missed real ones.** One session's report write was denied because `hooks/session-mode.py` split heredoc bodies into shell segments. Checking that showed the opposite error too: an apostrophe in a body flipped the quote state and hid the command after it, and one real `delegate ask` in this repo's own transcripts had passed that way. The hook now reads heredocs as a shell does and blocks when in doubt. The check ran 4,127 generated commands in real bash with stub agents and compared what ran with what the hook said: 315 misses and 545 false blocks before, 0 misses and 210 false blocks after, all 210 on lines that feed a shell or run a substitution's output, the deliberate direction. It caught an escaped-backtick class after the delegate's suite passed, and a reviewer's note filed under known limits (a substitution in command position) proved a regression when measured against the old hook. Over this repo's 5,508 unique real commands, 192 stopped being blocked, none of them a real call by a separate regex strip, and 2 started.
 - **Cursor's ask mode is selective about shell.** One session's `git show` was refused, and the docs disagreed with each other. Two live runs settled it: `ls -1` ran, `git show` and a compound command were rejected. SKILL.md, CLAUDE.md and `docs/verified-behaviour.md` now say so, and `rules/reference.md` says to paste evidence at a commit.
@@ -421,7 +464,12 @@ The delegate topic files and brief templates now carry rules and reasons. These 
 
 ## 2026-11-04: one session, one project
 
-Closed with `/field-report`; folded in on 2026-11-04. It started inside the preregistration's confirmatory window, so this section carries its lessons only; its numbers wait for the freeze.
+Closed with `/field-report`; folded in on 2026-11-04. It started inside the preregistration's confirmatory window, so the section first carried lessons only. Mode: claude-only. Numbers from `delegate cost --session <id>`, added on 2026-11-22, after the freeze; Claude 7d is the share left at report time, on Max. A second 11-04 report (a3f58c58, orchestrator) was written 29 minutes before this fold-in and missed by it and by the later ones, which list only reports newer than the last fold-in commit; its row is below, and its lessons wait for the next fold-in.
+
+| session | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---:|---:|---:|---:|---|---:|
+| 72a7c485, camat_v2: referee-style review of a paper draft by Claude alone (claude-only) | none | 26 | 256k | 1.40M | 53.8k | none | 79 |
+| a3f58c58, a paper project: revision plan drafted, stopped before its reassessment | none | 19 | 168k | 0.83M | 43.5k | none | 74 |
 
 - **A control session's notice never reached the user.** The hook asked for one line saying delegation was off, and that line stayed in a thinking block, so a user who had asked for a review by outside models learned it had not run only when the findings arrived. `CONTROL_LINE` now asks for a text message before the first tool call that names what won't run, a picker between working alone and Claude subagents on any Claude model, and the reason again at the close. Neither agent picked a notice alone. Codex also wanted a "stop and run it in another session" option and Cursor didn't; the user left it out, since `/clear` redraws at 70/15/15 and so can't promise delegation, and the option would draw work out of the control arm selectively. `DENY_REASON` stays as it was, because vanilla sessions read it too. The session rules now say a status line is a text message.
 - **A truncated line became a finding.** `cut -c` dropped the end of a long line, which held the qualifier, and the finding built on it stood until a memory file contradicted it. The session rules now say a claim needs its whole line, and `rules/reference.md` has the tip.
@@ -431,7 +479,18 @@ Closed with `/field-report`; folded in on 2026-11-04. It started inside the prer
 
 ## 2026-11-05 to 11-06: eight sessions, five projects
 
-Each has a `/field-report`; folded in on 2026-11-10, the first batch under the weekly fold-in rules in CLAUDE.md. All eight started inside the preregistration's confirmatory window, so this section carries their lessons only; their numbers wait for the freeze. Lessons from a single report wait in the list below.
+Each has a `/field-report`; folded in on 2026-11-10, the first batch under the weekly fold-in rules in CLAUDE.md. All eight started inside the preregistration's confirmatory window, so the section first carried lessons only. Modes: 7 orchestrator, 1 claude-only. Numbers from `delegate cost --session <id>`, added on 2026-11-22, after the freeze; Claude 7d is the share left at report time, on Max. 809928b4 ran on after its report (19 calls then). Lessons from a single report wait in the list below.
+
+| session | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---:|---:|---:|---:|---|---:|
+| 802739f7, a paper project: a plan check adjudicated, final revision plan | Codex build (the plan), Cursor review | 40 | 267k | 1.79M | 44.8k | none | 71 |
+| e7397fff, camat_v2: sounding-pitch resolver built, two regressions fixed, PR | Codex build, Cursor review | 50 | 243k | 1.83M | 36.6k | none | 61 |
+| 64d45ffe, audiospylt: a held-frame sound added after an author review, commit | none | 23 | 98k | 0.56M | 24.3k | 624 min (13.5%) | 61 |
+| e01561dd, camat_v2: PR merged, a sharp-facsimile fix ported | Cursor build, Codex review | 46 | 196k | 1.37M | 29.9k | none | 60 |
+| c7aec424, a paper project: two-vendor review of a stream fix, repairs, reruns | 2 × `review --working-tree` (both vendors) | 50 | 176k | 1.27M | 25.5k | none | 59 |
+| b7c92b79, ddt_1_vol_11: bracketed signs counted over 181 pages | Codex triage and Cursor blind read (both discarded), `ask` (Cursor) | 64 | 221k | 1.85M | 29.0k | none | 57 |
+| 809928b4, eu-pd-composers: the mode draw traced, handed over to a forced session (claude-only) | none | 36 | 129k | 0.77M | 21.3k | none | 57 |
+| ab7c82cd, a paper project: two design questions settled | 2 × `review --working-tree` (Codex; Cursor on the first), 2 × `ask --agent both` | 42 | 189k | 1.31M | 31.2k | none | 57 |
 
 - **A launch or a background wait above ~120k is a handoff point.** Four sessions reached a delegate launch or a wait on background jobs above ~120k, and a fifth waited the same way on the author's input. The rules marked only waits over an hour, and the turn after any wait rewrites the whole context. `rules/hygiene.md` now makes either one a handoff point, however short. Two inline sentences that `rules/reference.md` already holds were cut to keep the inline budget.
 - **Picker numbers that nobody measured.** Five sessions put an unmeasured figure into a picker: a context size not taken from the tool, a fresh-session start (the context guard's constant "~35k", against 47.5k–48.3k measured in that project), a cost ceiling from the session's own estimate, a scope copied from a candidate text, and a gross rather than net saving from `/clear`. The rule already existed, so the one figure the tooling supplied is now measured: `fresh_start.py` takes the median first-call context of the 5 newest other sessions in the transcript folder, the context guard quotes it, and `delegate cost --session` prints it (52,442 in this repo on 2026-11-10).
@@ -445,7 +504,11 @@ Each has a `/field-report`; folded in on 2026-11-10, the first batch under the w
 
 ## 2026-11-11: one session, one project
 
-Closed with `/field-report`; folded in on 2026-11-18, the only field report since the last fold-in. It started inside the preregistration's confirmatory window, so this section carries its lessons only; its numbers wait for the freeze. Lessons it alone raised wait in the list below.
+Closed with `/field-report`; folded in on 2026-11-18, the only field report since the last fold-in. It started inside the preregistration's confirmatory window, so the section first carried lessons only. Mode: claude-only. Numbers from `delegate cost --session <id>`, added on 2026-11-22, after the freeze; Claude 7d is the share left at report time, on Max. Its 3 Claude subagents sit outside the main-thread columns: 206 calls and 5.59M cost units, 86% of the session. The report's hand sum of ~11.2M counted every subagent transcript line (10.29M); `cost --session` counts each `message.id` once. Lessons it alone raised wait in the list below.
+
+| session | delegates | calls | context at end | cost units | units per call | idle rebuild | Claude 7d |
+|---|---|---:|---:|---:|---:|---|---:|
+| 2585024c, a paper project: protocol-to-code crosswalk by 3 Claude subagents (claude-only) | none | 40 | 147k | 0.93M | 23.2k | none | 67 |
 
 - **Subagent cost was out of sight.** The session ran Claude subagents for one item, and its report skeleton showed main-thread figures only: `summarise_session` keeps its historical fields main-only, and nothing printed the rest, so the report's author had to sum the subagent transcripts by hand. `delegate cost --session` now prints a `subagents:` line (transcripts, calls, tokens, peak context, cost units, the ratio to the main thread and the share of the session), the skeleton adds a `Subagents` line to its session paragraph, and the `token_usage.jsonl` row gets a `subagents` object. The main-only fields are unchanged. On a session of this repo with 12 subagent transcripts, the main thread held 247,107 of 13,559,192 cost units (1.8%).
 - **Pickers worded in internals.** A picker phrased in the reader's internals came back as "why does it matter?", and the re-ask that led with the consequence was answered at once. With the 2026-10-17 report (a hosting picker came back as a question about how others host) and three pickers in a row in a 2026-11-07 session of this repo, this is now a Decisions tip in `rules/reference.md`: lead with what changes for the user against what runs today.
