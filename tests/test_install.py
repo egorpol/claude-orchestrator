@@ -3,6 +3,7 @@ import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
 import configparser
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -1068,7 +1069,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.tree_state(self.tmp), state)
 
     def test_uninstall_timer_failure_warns_and_still_removes_all_units(self):
-        self.install("--timer")
+        self.install("--timer", "--experiment")
         self.exe("systemctl", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$FAKE_SYSTEMCTL_CALLS"\nexit 17\n')
         output = self.install("--uninstall")
         self.assertIn("warn", output)
@@ -1080,7 +1081,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.tree_state(self.tmp), state)
 
     def test_uninstall_without_systemctl_removes_units_with_warning(self):
-        self.install("--timer")
+        self.install("--timer", "--experiment")
         env = self.private_path_without("systemctl", "cursor-agent", "codex", "claude")
         (self.bin / "rm").symlink_to(shutil.which("rm"))
         output = self.install("--uninstall", env=env)
@@ -1100,7 +1101,7 @@ class InstallTests(unittest.TestCase):
         self.exe("systemctl", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$FAKE_SYSTEMCTL_CALLS"\nexit 1\n')
         project = self.tmp / "project"
         subprocess.run(["git", "init", str(project)], check=True, capture_output=True)
-        output = self.install("--timer", f"--git-hook={project}")
+        output = self.install("--timer", "--experiment", f"--git-hook={project}")
         warnings = [line for line in output.splitlines() if "warn" in line]
         self.assertTrue(any("systemctl --user daemon-reload" in line for line in warnings))
         for unit in (self.timer, self.rate_timer):
@@ -1114,17 +1115,75 @@ class InstallTests(unittest.TestCase):
                          REPO / "hooks/secret-guard.py")
         self.assertIn("done. Claude Code", output)
 
+    def test_install_experiment_systemctl_failure_warns_and_keeps_rate_units(self):
+        self.exe("systemctl", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$FAKE_SYSTEMCTL_CALLS"\nexit 1\n')
+        output = self.install("--experiment")
+        self.assertTrue(self.rate_service.is_file())
+        self.assertTrue(self.rate_timer.is_file())
+        self.assertFalse(self.service.exists())
+        self.assertTrue(any("warn" in line and f"systemctl --user enable --now {self.rate_timer.name}" in line
+                            for line in output.splitlines()), output)
+        self.assertIn("done. Claude Code", output)
+
     def test_install_timer_rate_enable_failure_leaves_quota_enabled(self):
         self.exe("systemctl", '#!/bin/sh\n'
                  '[ "$2" != enable ] || [ "$4" != claude-delegate-rate.timer ]\n')
-        output = self.install("--timer")
+        output = self.install("--timer", "--experiment")
         self.assertIn("quota timer enabled", output)
         self.assertNotIn("rate timer enabled", output)
         self.assertTrue(any("warn" in line and f"systemctl --user enable --now {self.rate_timer.name}" in line
                             for line in output.splitlines()), output)
 
-    def test_timer_units_commands_and_reinstallation_are_idempotent(self):
+    def test_timer_alone_writes_only_quota_units_and_makes_no_rate_systemctl_call(self):
         output = self.install("--timer")
+        self.assertEqual({p.name for p in self.units.iterdir()}, {
+            "claude-delegate-quota.service", "claude-delegate-quota.timer"})
+        self.assertFalse(self.rate_service.exists())
+        self.assertFalse(self.rate_timer.exists())
+        self.assertIn("quota timer units written", output)
+        self.assertIn("quota timer enabled", output)
+        self.assertNotIn("rate timer", output)
+        self.assertNotIn("claude-delegate-rate", output)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "--user daemon-reload", "--user enable --now claude-delegate-quota.timer"])
+
+    def test_timer_leaves_planted_rate_units_byte_identical(self):
+        self.units.mkdir(parents=True)
+        planted = b"# planted rate unit\n"
+        self.rate_service.write_bytes(planted)
+        self.rate_timer.write_bytes(planted)
+        self.install("--timer")
+        self.assertEqual(self.rate_service.read_bytes(), planted)
+        self.assertEqual(self.rate_timer.read_bytes(), planted)
+        self.assertTrue(self.service.is_file())
+        self.assertNotIn("claude-delegate-rate", self.calls.read_text())
+
+    def test_experiment_leaves_planted_quota_units_byte_identical(self):
+        self.units.mkdir(parents=True)
+        planted = b"# planted quota unit\n"
+        self.service.write_bytes(planted)
+        self.timer.write_bytes(planted)
+        self.install("--experiment")
+        self.assertEqual(self.service.read_bytes(), planted)
+        self.assertEqual(self.timer.read_bytes(), planted)
+        self.assertTrue(self.rate_service.is_file())
+        self.assertNotIn("claude-delegate-quota", self.calls.read_text())
+
+    def test_experiment_alone_writes_only_rate_units(self):
+        output = self.install("--experiment")
+        self.assertEqual({p.name for p in self.units.iterdir()}, {
+            "claude-delegate-rate.service", "claude-delegate-rate.timer"})
+        self.assertFalse(self.service.exists())
+        self.assertFalse(self.timer.exists())
+        self.assertIn("rate timer units written", output)
+        self.assertIn("rate timer enabled", output)
+        self.assertNotIn("quota timer", output)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "--user daemon-reload", "--user enable --now claude-delegate-rate.timer"])
+        self.assertIn("session-mode.py", self.settings.read_text())
+
+    def test_timer_units_commands_and_reinstallation_are_idempotent(self):
+        output = self.install("--timer", "--experiment")
         service, timer = self.service.read_text(), self.timer.read_text()
         rate_service, rate_timer = self.rate_service.read_bytes(), self.rate_timer.read_bytes()
         self.assertEqual({p.name for p in self.units.iterdir()}, {
@@ -1169,17 +1228,28 @@ class InstallTests(unittest.TestCase):
         calls = ["--user daemon-reload", "--user enable --now claude-delegate-quota.timer",
                  "--user enable --now claude-delegate-rate.timer"]
         self.assertEqual(self.calls.read_text().splitlines(), calls)
-        self.install("--timer")
+        self.install("--timer", "--experiment")
         self.assertEqual(self.service.read_text(), service)
         self.assertEqual(self.timer.read_text(), timer)
         self.assertEqual(self.rate_service.read_bytes(), rate_service)
         self.assertEqual(self.rate_timer.read_bytes(), rate_timer)
         self.assertEqual(self.calls.read_text().splitlines(), calls * 2)
 
+    def test_experiment_rate_units_reinstallation_is_idempotent(self):
+        self.install("--experiment")
+        rate_service, rate_timer = self.rate_service.read_bytes(), self.rate_timer.read_bytes()
+        calls = ["--user daemon-reload", "--user enable --now claude-delegate-rate.timer"]
+        self.assertEqual(self.calls.read_text().splitlines(), calls)
+        self.install("--experiment")
+        self.assertEqual(self.rate_service.read_bytes(), rate_service)
+        self.assertEqual(self.rate_timer.read_bytes(), rate_timer)
+        self.assertEqual(self.calls.read_text().splitlines(), calls * 2)
+        self.assertFalse(self.service.exists())
+
     def test_rate_timer_allows_seven_hour_catchup_without_overlap_timeout_or_wake_backlog(self):
         # A first run over 462 sessions can take 4–7 hours. A oneshot stays activating
         # until it exits; defer overdue calendar fires so completion doesn't replay one.
-        self.install("--timer")
+        self.install("--experiment")
         service = self.unit(self.rate_service)
         self.assertEqual(service["Service"]["Type"], "oneshot")
         self.assertEqual(service["Service"]["TimeoutStartSec"], "infinity")
@@ -1201,7 +1271,7 @@ class InstallTests(unittest.TestCase):
         agent_dir = self.tmp / "cursor bin"
         agent_dir.mkdir()
         (self.bin / "cursor-agent").rename(agent_dir / "cursor-agent")
-        self.install("--timer", env={"PATH": f"{agent_dir}:{self.env['PATH']}"})
+        self.install("--timer", "--experiment", env={"PATH": f"{agent_dir}:{self.env['PATH']}"})
         for service in (self.service, self.rate_service):
             environment = dict(value.split("=", 1) for value in
                                shlex.split(self.unit(service)["Service"]["Environment"]))
@@ -1254,13 +1324,23 @@ class InstallTests(unittest.TestCase):
         self.assertIn("--user enable --now claude-delegate-quota.timer", self.calls.read_text())
 
     def test_missing_cursor_agent_warns_but_still_installs_and_enables_both_timers(self):
-        output = self.install("--timer", env=self.private_path_without("cursor-agent"))
+        output = self.install("--timer", "--experiment", env=self.private_path_without("cursor-agent"))
         self.assertIn("cursor-agent not found; quota and rate timers", output)
         self.assertTrue(self.rate_service.exists())
         self.assertTrue(self.rate_timer.exists())
         self.assertEqual(self.calls.read_text().splitlines(), [
             "--user daemon-reload", "--user enable --now claude-delegate-quota.timer",
             "--user enable --now claude-delegate-rate.timer"])
+
+    def test_missing_cursor_agent_warns_per_timer_kind(self):
+        missing = self.private_path_without("cursor-agent")
+        quota = self.install("--timer", env=missing)
+        self.assertIn("cursor-agent not found; quota timer needs it installed on its PATH", quota)
+        self.assertNotIn("rate timer", quota)
+        self.calls.unlink(missing_ok=True)
+        rate = self.install("--experiment", env=missing)
+        self.assertIn("cursor-agent not found; rate timer needs it installed on its PATH", rate)
+        self.assertNotIn("quota and rate", rate)
 
     def test_agents_in_separate_directories_dedupe_timer_paths(self):
         codex_dir = self.tmp / "codex-only"
@@ -1271,7 +1351,7 @@ class InstallTests(unittest.TestCase):
             directory.mkdir()
             (self.bin / name).rename(directory / name)
         path = f"{codex_dir}:{claude_dir}:{cursor_dir}:{self.env['PATH']}"
-        self.install("--timer", env={"PATH": path})
+        self.install("--timer", "--experiment", env={"PATH": path})
         quota_dirs = dict(value.split("=", 1) for value in
                           shlex.split(self.unit(self.service)["Service"]["Environment"]))["PATH"].split(":")
         rate_dirs = dict(value.split("=", 1) for value in
@@ -1288,7 +1368,8 @@ class InstallTests(unittest.TestCase):
                 {"event": "summary", "session": "not-drawn", "last_call": "2026-10-01T00:00:00Z"}]
         log.write_text("".join(json.dumps(row) + "\n" for row in rows))
         original = log.read_bytes()
-        self.install("--timer", env={"CLAUDE_SESSION_LOG": str(log)})
+        # Rate units come from --experiment; planting settings is enough for the rate ExecStart.
+        self.install("--experiment", env={"CLAUDE_SESSION_LOG": str(log)})
         service = self.unit(self.rate_service)["Service"]
         environment = dict(value.split("=", 1) for value in shlex.split(service["Environment"]))
         # The fake cursor-agent rejects every call except prerequisite checks.
@@ -1298,7 +1379,7 @@ class InstallTests(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertEqual(log.read_bytes(), original)
-        self.assertFalse(self.settings.exists())  # --experiment was never installed
+        self.assertIn("session-mode.py", self.settings.read_text())
 
     def test_install_without_timer_creates_no_units_or_systemctl_calls(self):
         self.install()
@@ -1306,19 +1387,59 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(self.calls.exists())
         self.assertTrue((self.tmp / "claude/skills/delegate").is_symlink())
 
-    def test_check_reports_enabled_and_disabled_timer_without_installing(self):
+    def test_check_reports_quota_timer_without_installing(self):
         disabled = self.install("--check", "--timer")
         enabled = self.install("--check", env={"FAKE_TIMER_ENABLED": "0"})
-        for kind in ("quota", "rate"):
-            self.assertIn(f"{kind} timer not enabled", disabled)
-            self.assertIn(f"{kind} timer enabled", enabled)
-        self.assertEqual(self.calls.read_text().splitlines(),
-                         ["--user is-enabled claude-delegate-quota.timer",
-                          "--user is-enabled claude-delegate-rate.timer"] * 2)
+        self.assertIn("quota timer not enabled", disabled)
+        self.assertIn("./install.sh --timer", disabled)
+        self.assertIn("quota timer enabled", enabled)
+        self.assertNotIn("rate timer not enabled", disabled)
+        # Without the hook, an enabled rate timer is leftover dead weight.
+        self.assertIn("rate timer is installed but the session-mode hook is not registered", enabled)
+        self.assertIn("systemctl --user disable --now claude-delegate-rate.timer", enabled)
         self.assertFalse(self.units.exists())
         self.assertFalse((self.tmp / "claude/skills").exists())
 
+    def test_check_without_hook_prints_no_rate_line_when_nothing_installed(self):
+        output = self.install("--check")
+        self.assertIn("quota timer not enabled", output)
+        self.assertNotIn("rate timer", output)
+        self.assertNotIn("claude-delegate-rate", output)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "--user is-enabled claude-delegate-quota.timer",
+            "--user is-enabled claude-delegate-rate.timer"])
+
+    def test_check_without_hook_warns_when_rate_unit_file_exists(self):
+        self.units.mkdir(parents=True)
+        self.rate_timer.write_text("# leftover\n")
+        output = self.install("--check")
+        self.assertIn("rate timer is installed but the session-mode hook is not registered", output)
+        self.assertIn("systemctl --user disable --now claude-delegate-rate.timer", output)
+        self.assertIn(str(self.units), output)
+        self.assertEqual([line for line in output.splitlines()
+                          if re.search(r"\bok\b", line) and "rate timer" in line], [])
+
+    def test_check_without_hook_warns_when_rate_timer_is_enabled_without_file(self):
+        output = self.install("--check", env={"FAKE_RATE_TIMER_ENABLED": "0"})
+        self.assertIn("rate timer is installed but the session-mode hook is not registered", output)
+        self.assertIn("systemctl --user disable --now claude-delegate-rate.timer", output)
+        self.assertFalse(self.units.exists())
+
+    def test_check_with_hook_reports_rate_timer_enabled_and_not_enabled(self):
+        self.install("--experiment")
+        self.calls.write_text("")
+        enabled = self.install("--check", env={"FAKE_RATE_TIMER_ENABLED": "0"})
+        disabled = self.install("--check", env={"FAKE_RATE_TIMER_ENABLED": "1"})
+        self.assertIn("rate timer enabled", enabled)
+        self.assertNotIn("not enabled", [line for line in enabled.splitlines()
+                                         if "rate timer" in line][0])
+        self.assertIn("rate timer not enabled", disabled)
+        self.assertIn("./install.sh --experiment", disabled)
+        self.assertIn("only needed while the experiment draws sessions", disabled)
+
     def test_check_reports_each_timer_status_independently(self):
+        self.install("--experiment")
+        self.calls.write_text("")
         output = self.install("--check", env={"FAKE_RATE_TIMER_ENABLED": "0"})
         self.assertIn("quota timer not enabled", output)
         self.assertIn("rate timer enabled", output)
@@ -1326,20 +1447,18 @@ class InstallTests(unittest.TestCase):
                                                "FAKE_RATE_TIMER_ENABLED": "1"})
         self.assertIn("quota timer enabled", output)
         self.assertIn("rate timer not enabled", output)
-        self.assertFalse(self.units.exists())
-        self.assertFalse(self.settings.parent.exists())
 
     def test_without_systemctl_writes_units_warns_and_check_uses_unit_file(self):
         env = self.private_path_without("systemctl", "cursor-agent", "codex", "claude")
         before = self.install("--check", env=env)
-        for kind in ("quota", "rate"):
-            self.assertIn(f"{kind} timer unit not installed", before)
+        self.assertIn("quota timer unit not installed", before)
+        self.assertNotIn("rate timer", before)
         self.assertFalse(self.units.exists())
         self.assertFalse(self.settings.parent.exists())
-        output = self.install("--timer", env=env)
+        output = self.install("--timer", "--experiment", env=env)
         self.assertIn("systemctl not found", output)
         self.assertIn("claude not found", output)
-        self.assertIn("cursor-agent not found", output)
+        self.assertIn("cursor-agent not found; quota and rate timers", output)
         self.assertTrue(self.service.exists())
         self.assertTrue(self.timer.exists())
         for service in (self.service, self.rate_service):
@@ -1354,15 +1473,17 @@ class InstallTests(unittest.TestCase):
         self.assertEqual({p.relative_to(self.tmp): p.read_bytes()
                           for p in self.tmp.rglob("*") if p.is_file()}, files)
         self.rate_timer.unlink()
+        self.rate_service.unlink()
         mixed = self.install("--check", env=env)
         self.assertIn("quota timer unit exists", mixed)
         self.assertIn("rate timer unit not installed", mixed)
         self.assertFalse(self.rate_timer.exists())
 
     def test_timer_carries_custom_cache_and_log_paths(self):
-        self.install("--timer", env={"XDG_CACHE_HOME": str(self.tmp / "cache"),
-                                    "CLAUDE_DELEGATE_QUOTA_LOG": str(self.tmp / "q.jsonl"),
-                                    "CLAUDE_SESSION_LOG": str(self.tmp / "sessions.jsonl")})
+        self.install("--timer", "--experiment",
+                     env={"XDG_CACHE_HOME": str(self.tmp / "cache"),
+                          "CLAUDE_DELEGATE_QUOTA_LOG": str(self.tmp / "q.jsonl"),
+                          "CLAUDE_SESSION_LOG": str(self.tmp / "sessions.jsonl")})
         environment = next(line for line in self.service.read_text().splitlines()
                            if line.startswith("Environment="))
         self.assertEqual(shlex.split(environment.split("=", 1)[1])[1:],
@@ -1374,25 +1495,35 @@ class InstallTests(unittest.TestCase):
                                    f"CLAUDE_SESSION_LOG={self.tmp / 'sessions.jsonl'}"])
 
     def test_rate_timer_omits_unset_environment_and_quotes_custom_session_log(self):
-        self.install("--timer", env={"CLAUDE_CONFIG_DIR": "", "XDG_CACHE_HOME": "",
-                                    "CLAUDE_SESSION_LOG": ""})
+        self.install("--experiment", env={"CLAUDE_CONFIG_DIR": "", "XDG_CACHE_HOME": "",
+                                          "CLAUDE_SESSION_LOG": ""})
         rate = self.unit(self.rate_service)["Service"]
         self.assertEqual(shlex.split(rate["Environment"]),
                          [f"PATH={self.bin}:/usr/local/bin:/usr/bin:/bin"])
         log = self.tmp / 'session logs %s "quoted".jsonl'
-        self.install("--timer", env={"CLAUDE_SESSION_LOG": str(log)})
+        self.install("--experiment", env={"CLAUDE_SESSION_LOG": str(log)})
         rate = self.unit(self.rate_service)["Service"]
         self.assertIn(f"CLAUDE_SESSION_LOG={str(log).replace('%', '%%')}",
                       shlex.split(rate["Environment"]))
 
     def test_help_documents_timer_and_removal(self):
         output = self.install("--help")
-        self.assertIn("--timer", output)
-        self.assertIn("systemctl --user disable --now claude-delegate-quota.timer", output)
-        self.assertIn("delete claude-delegate-quota.{service,timer}", output)
-        self.assertIn("systemctl --user disable --now claude-delegate-rate.timer", output)
-        self.assertIn("delete claude-delegate-rate.{service,timer}", output)
-        self.assertIn("hourly timer for default delegate rate", output)
+        blocks, current = {}, None
+        for line in output.splitlines():
+            match = re.match(r"#\s+\./install\.sh (--[a-z-]+)", line)
+            if match:
+                current = match.group(1)
+                blocks[current] = []
+            if current:
+                blocks[current].append(line)
+        timer_block = "\n".join(blocks["--timer"])
+        experiment_block = "\n".join(blocks["--experiment"])
+        self.assertIn("systemctl --user disable --now claude-delegate-quota.timer", timer_block)
+        self.assertIn("delete claude-delegate-quota.{service,timer}", timer_block)
+        self.assertNotRegex(timer_block, r"\brate\b")
+        self.assertIn("hourly timer for default delegate rate", experiment_block)
+        self.assertIn("systemctl --user disable --now claude-delegate-rate.timer", experiment_block)
+        self.assertIn("delete claude-delegate-rate.{service,timer}", experiment_block)
         self.assertIn("--force", output)
         self.assertIn("session-mode.json", output)
         self.assertIn("--experiment  opt in to control sessions", output)

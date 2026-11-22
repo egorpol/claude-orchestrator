@@ -52,11 +52,9 @@ cd claude-orchestrator
 ./install.sh --attention    # optional: mark the waiting Cursor window on KDE Plasma (hooks/attention.py)
 ./install.sh --git-hook=.   # optional: link secret-guard.py as this repo's pre-commit and pre-push hooks
 ./install.sh --rules        # optional: import rules/orchestrator.md into ~/.claude/CLAUDE.md (every session)
-./install.sh --experiment   # opt-in: randomised control sessions via hooks/session-mode.py (see below)
-./install.sh --timer        # optional: systemd user timers log pool readings every 10 min while Claude Code is active; hourly, send only finished experiment sessions drawn by --experiment to Cursor Auto for rating (typed prompts, start/end HANDOFF.md copies and commit summaries, with only the experiment's mode words removed)
+./install.sh --experiment   # opt-in: run your own control window (see Running your own control window below)
+./install.sh --timer        # optional: a systemd user timer logs pool readings every 10 min while Claude Code is active
 ```
-
-`--experiment` is for measuring whether delegation pays off. Each new session draws `orchestrator` (50% by default), `claude-only` or `vanilla` (25% each; delegation blocked), gets that mode's rules from the hook and logs one summary row to `~/.cache/claude-delegate/sessions.jsonl` (local only). The hook replaces the `--rules` import, so `--experiment` removes it. `delegate rate` has Cursor Auto split each finished session into items from your prompts, HANDOFF.md and commits, without seeing the mode, and `delegate cost --by-mode` compares the arms: cost per finished item, by size and type. Weights go in `~/.config/claude-orchestrator/session-mode.json`; to stop, delete the `session-mode.py` entries from `~/.claude/settings.json` and run `--rules` again.
 
 `install.sh` is idempotent. Links to the current source stay in place on a link install, and an unedited `--copy` install refreshes after a `git pull` without a backup. The installer prints a notice when it replaces a recorded link. It moves other skill or command links and other existing `--bin` targets to `~/.claude/skill-backups/` (or `skill-backups/` under `CLAUDE_CONFIG_DIR`) before replacing them. User-edited or unrecorded skill directories and command files need `--force`, which moves the old copy to the same backup folder. A `--copy` install from before the copy manifest needs `--force` once. Use `--copy` where a symlink into the repo is not wanted. A copied install doesn't know where the checkout is, so `/field-report` then needs `CLAUDE_ORCHESTRATOR_FEEDBACK` set to a folder.
 
@@ -70,6 +68,12 @@ Prerequisites (`--check` prints install hints):
 - `cursor-agent`: `curl https://cursor.com/install -fsS | bash`, then `cursor-agent login`. The login needs a browser approval.
 - optional: the [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) (needs Node 18.18+), which adds `/codex:review` and `/codex:adversarial-review` for the current checkout. Install it with `claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex`.
 - Ratings need a free AA key in `ARTIFICIAL_ANALYSIS_API_KEY`, else `~/.config/claude-orchestrator/aa-api-key` (`XDG_CONFIG_HOME` respected; mode `0600` is not enforced). Without a key or usable ratings cache, `route TASK` ranks by quota only and prints one stderr line naming both key locations; `ratings` and `route --frontier` stop with that line and exit 1. See [ratings and tuning](skills/delegate/reference/quota.md#tuning) for cache, API limits and output notes.
+
+### Running your own control window
+
+This repo's [preregistered](docs/preregistration.md) window ran from 2026-10-31 to 2026-11-14 and was read after the freeze, on 2026-11-22 (result above). `./install.sh --experiment` sets up the same kind of window on your machine, to measure whether delegation pays off for your work. It registers `hooks/session-mode.py`: each new session outside excluded repos draws `orchestrator` (50% by default), `claude-only` or `vanilla` (25% each; delegation blocked), gets that mode's rules from the hook and logs a start row and one summary row to `~/.cache/claude-delegate/sessions.jsonl` (local only). The hook replaces the `--rules` import, so `--experiment` removes it. It also installs an hourly systemd user timer for `delegate rate`: Cursor Auto, not told the mode, splits each finished session into items from your typed prompts, start/end `HANDOFF.md` copies and commit summaries, with only the experiment's mode words removed. The timer discards the per-session counts it prints, so they stay out of the journal during the window, and writes a daily backup of the session and quota logs to `~/.local/state/claude-orchestrator/backup/`. `delegate cost --by-mode` then compares the arms: cost per finished item, by size and type. Weights and excluded repos go in `~/.config/claude-orchestrator/session-mode.json`. Freeze your analysis rules before the window opens, as [docs/preregistration.md](docs/preregistration.md) did.
+
+After the window closes, set `"weights": {"orchestrator": 1, "claude-only": 0, "vanilla": 0}`, `"quota_snapshot": false` and `"summary": false` in that file. The hook then only injects the orchestrator rules, writes a start row and prints the spare-quota line, and no new sessions reach the rate timer; `systemctl --user disable --now claude-delegate-rate.timer` stops it. To remove the hook, delete the `session-mode.py` entries from `~/.claude/settings.json` and run `./install.sh --rules`. That also turns off the session-start spare-quota line, which the hook prints, and context-guard's delegate nudge, which reads the hook's start rows, until both move elsewhere (see Roadmap).
 
 ### Cursor quota (opt-in)
 
@@ -94,7 +98,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota. E
 ## Roadmap
 
 - Automatic field reports, shelved 2026-10-27: Cursor Auto was to write lessons for the sessions that get no `/field-report` (about 89%), but two trials against sessions that have one recalled about 40% of the hand reports' lessons, under the 50% bar. The design and results are in [docs/auto-field-reports.md](docs/auto-field-reports.md).
-- The [preregistered](docs/preregistration.md) control-session experiment closed on 2026-11-14 and was read after the freeze, on 2026-11-22: inconclusive (above). Retiring its session-mode hook and timers is next; a follow-up would be a new registered window.
+- The [preregistered](docs/preregistration.md) control-session experiment closed on 2026-11-14 and was read after the freeze, on 2026-11-22: inconclusive (above). On my machine its session-mode hook now runs in light mode (weights 1/0/0, summaries and quota snapshots off, as in [Running your own control window](#running-your-own-control-window)) and the rate timer is off. Next: move context-guard's delegate nudge off the hook's log and the session-start spare-quota line out of the hook, then remove the hook. A follow-up would be a new registered window.
 
 ## Docs
 
