@@ -544,8 +544,6 @@ From the report of 2026-11-11 (folded in 2026-11-18):
 
 ## Still open
 
-- Control sessions: per-arm outcomes are read once, at the freeze, with `delegate prereg --outcomes` ([preregistration](preregistration.md)); no by-arm view before it.
-
 - Re-measure on the next long session with `delegate cost --session latest`.
 - Picker replies still bypass the context guard's idle hold. Attention notices may shorten the wait; re-measure picker idle rebuilds as sessions accumulate.
 - Orchestrator effort: measured above ([lever 4](cost-analysis.md#4-keep-heavy-reading-and-scripting-out-of-the-main-context-about-4-measured-more-possible)), keep xhigh. For proof, run one routine work item at `high` and compare its thinking tokens and rounds against an xhigh item.

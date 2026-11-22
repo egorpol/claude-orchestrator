@@ -98,3 +98,20 @@ Resampling period 1's 46 rated sessions pooled across arms (USD 5.37 per finishe
 
   Two data-handling changes made with it change no rule. Before it rates, `delegate rate` keeps a daily compressed copy of the session log, the quota log and the handoff copies, in a local folder and in a synced one, keeping the newest seven and the first one made after the close. And before the freeze, `delegate prereg --outcomes` and `--prepare` and `cost --by-mode` treat any file whose first row equals the experiment log's first row as the experiment's log. Until the freeze this supersedes the Early-look guard's rule that a copy or a hard link counts as another log; after the freeze that rule holds again.
 - **2026-11-15, rewritten history.** This changes no rule, no data and no analysis code; it records new commit hashes. Before the repository opens again, its whole history was rewritten to remove figures copied from Artificial Analysis (test rows and price notes) and the field reports and handoff file tracked before 0.1.0, so every commit has a new SHA, with its author, dates and order kept. The registration commit `04ff5aa` (`04ff5aaf2f63f0abf79e2e7c6d5e7b40afdd35a4`) is now `9497bc0` (`9497bc00a90036c1d0358cc43dcf106be565884d`), and the analysis-code commit `6c18ad0` (`6c18ad0acafec0b195e8c8a8217a85aba882feb2`) is now `4f5859b` (`4f5859b88b8aeac49192a31652ef8b9b12c43441`); the two amendments above cite the new SHAs. Nothing that this file says or that `delegate prereg` reads from git changed: every version of this file has the same blob in both histories (at registration `673b2f91f8fa`), `prereg.py` at the analysis-code commit is blob `73a804d664a8` in both, and every first-parent commit keeps its timestamp and its `rules/` and `hooks/` diff, so T0 stays 2026-10-31 00:29:58 UTC. The 2026-11-07 amendment's "those commits are unchanged" now holds for their dates and contents, not their SHAs; copies made before the rewrite keep the old ones.
+
+## Results
+
+Read once, on 2026-11-22, with `delegate prereg --outcomes`, after the freeze (2026-11-21 06:01:12 UTC). The window ran from T0 (2026-10-31 00:29:58 UTC) to the close (2026-11-14 06:01:12 UTC). USD is Claude usage at API list price; the plan was Max, so none of it was billed.
+
+| arm | drawn | analysed | USD | finished items | USD per finished item |
+|---|---:|---:|---:|---:|---:|
+| orchestrator | 326 | 282 | 940.95 | 155 | 6.07 |
+| claude-only | 71 | 55 | 228.10 | 34 | 6.71 |
+| vanilla | 83 | 70 | 485.95 | 67 | 7.25 |
+
+- **H1:** R = 0.905, 95% interval 0.661–1.242: inconclusive. Under the 2026-11-08 amendment, no rule changes for it and no saving is claimed.
+- **H2** (vanilla against claude-only): 1.081, 0.719–1.622: inconclusive.
+- **Sensitivities:** every H1 variant is inconclusive, with point estimates from 0.72 to 1.59. The only reading that is not inconclusive is H2 before the split commit (2026-11-04): 1.758, 1.024–3.120, "above 1".
+- **Left out:** ghosts (a summary row with no transcript and no calls) 39 / 11 / 6 and sessions with unpriced calls 5 / 5 / 7 (orchestrator / claude-only / vanilla).
+- **Allocation:** 326 / 71 / 83 drawn against 336 / 72 / 72 expected; χ² p = 0.37.
+- **Blinding check:** the rater, not told the mode, guessed it right for 266 of the 407 analysed sessions (65.4%), below the 69.3% of always guessing orchestrator; κ = 0.31. It named claude-only for 40 of the 55 claude-only sessions and for 48 of the 282 orchestrator sessions, so the packets partly reveal the arm. For 26 sessions the guess was made on a packet that differs from the one rated; the cause is not checked.
