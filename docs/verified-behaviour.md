@@ -2,6 +2,11 @@
 
 Facts tested live, dated, so a reader can tell what may have changed since.
 
+## 2026-11-23
+
+- **Without the session-mode hook, context-guard gives the first-prompt spare-quota line and the `--rules` import carries the rules.** On the maintainer's machine the three `session-mode.py` entries came out of `~/.claude/settings.json` and `./install.sh --rules` added the `rules/orchestrator.md` import to the user-level `CLAUDE.md`. A fresh session opened afterwards got no row in `sessions.jsonl`. Its first typed prompt got `Delegate pools ahead of pace (reading 0m ago): Codex 7d 98% left (pace 1.0x; …)` as UserPromptSubmit context; Codex 7d was just ahead of pace (1.01 unrounded, which prints as 1.0x). The request carried the user-level `CLAUDE.md` with its `# Session rules` section, and the session answered yes to seeing both.
+- **The transcript file does not exist yet when UserPromptSubmit runs on a session's first prompt.** In that session the `.spare` marker was written at 06:31:16.906 local and the transcript file was created at 06:31:16.990 (its birth time), so context-guard read no transcript and still printed the line.
+
 ## 2026-11-18
 
 - **GPT-6.2 Sol and GPT-6.2 Astra need a newer Codex CLI on a ChatGPT login.** `codex exec -m gpt-6.2-sol` at `low` effort: Codex CLI 0.159.1 exited 1 with HTTP 400 `model_not_found` ("not supported when using Codex with a ChatGPT account"), while the Cursor extension's bundled 0.169.0-alpha.11.1 answered, and 0.159.1 still ran `gpt-6.1-sol` (control). After `codex update` to 0.170.0, the newest stable release that day, `gpt-6.2-sol` and `gpt-6.2-astra` both answered. The standalone install had stopped at 0.159.1, the version in `~/.codex/packages/standalone/auto-update-version` until `codex update` rewrote it. `models_cache.json`, last written by client 0.169.0, listed both models with efforts `low` to `ultra`, so `route --frontier` showed them as runnable on the old CLI.
