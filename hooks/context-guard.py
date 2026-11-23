@@ -13,9 +13,13 @@ cache expired; a resend of the same prompt is allowed through). Prompts that sta
 with < or / (task notifications, /loop turns) always pass. On any error it
 stays silent and exits 0 so a broken guard never gets in the way of a prompt.
 
-In orchestrator sessions (not excluded) it also nudges once toward `delegate` when
-main-thread tool calls reach CONTEXT_GUARD_NUDGE_CALLS and a delegate pool is ahead
-of pace, if the session has no `delegate` log rows yet.
+If the session has no `start` log row, its first prompt through the idle guard gets
+the spare-pool line in Claude's context when a delegate pool is ahead of pace. A
+missing `start` row also qualifies the session as orchestrator in any repo. In
+eligible orchestrator sessions, the hook nudges once toward `delegate` when
+main-thread tool calls reach CONTEXT_GUARD_NUDGE_CALLS, a pool is ahead of pace,
+and the session has no `delegate` log rows yet. Excluded start rows suppress the
+nudge, and all start rows leave the first-prompt line to the session-mode hook.
 
 It runs on every prompt, which is where work items start. At 250k it fired too
 late: in four 2026-10-10 sessions new items started at 87-219k, and none of them
@@ -24,7 +28,7 @@ got a reminder in time. When it did fire, each session wrote a handoff.
 Env: CONTEXT_GUARD_FIRST (default 120000), CONTEXT_GUARD_STEP (60000),
 CONTEXT_GUARD_IDLE_MIN (60), CONTEXT_GUARD_IDLE_CONTEXT (100000),
 CONTEXT_GUARD_DISABLE=1, CONTEXT_GUARD_STATE (state dir),
-CONTEXT_GUARD_NUDGE=0 (disable mid-session delegate nudge),
+CONTEXT_GUARD_NUDGE=0 (disable the first-prompt spare line and mid-session delegate nudge),
 CONTEXT_GUARD_NUDGE_CALLS (default 30).
 """
 import importlib.util
@@ -149,40 +153,29 @@ def session_log_path():
     return Path(os.environ.get("CLAUDE_SESSION_LOG", cache / "claude-delegate/sessions.jsonl"))
 
 
-def _latest_start(path, session):
-    latest = None
+def _session_log_status(path, session):
+    """Latest start row and whether the session has delegated, in one pass."""
+    start, delegated = None, False
+    escaped = json.dumps(session)[1:-1]
     try:
         with path.open(encoding="utf-8") as stream:
             for line in stream:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if (isinstance(row, dict) and row.get("event") == "start"
-                        and row.get("session") == session):
-                    latest = row
-    except (OSError, ValueError):
-        pass
-    return latest
-
-
-def _has_delegate_row(path, session):
-    try:
-        with path.open(encoding="utf-8") as stream:
-            for line in stream:
-                # Cheap prefilter before json.loads on every session-log line.
-                if '"delegate"' not in line or '"event"' not in line:
+                # The log writers escape IDs as JSON. Real session UUIDs match verbatim.
+                if escaped not in line and (escaped == session or session not in line):
                     continue
                 try:
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if (isinstance(row, dict) and row.get("event") == "delegate"
-                        and row.get("session") == session):
-                    return True
-    except (OSError, ValueError):
+                if not isinstance(row, dict) or row.get("session") != session:
+                    continue
+                if row.get("event") == "start":
+                    start = row
+                elif row.get("event") == "delegate":
+                    delegated = True
+    except FileNotFoundError:
         pass
-    return False
+    return start, delegated
 
 
 def _load_quota():
@@ -193,12 +186,23 @@ def _load_quota():
     return module
 
 
-def _spare_info(log):
+def _spare_quota(log):
     try:
         quota = _load_quota()
-        return quota.spare_pools(log.parent / "quota.jsonl"), quota
+        info = quota.spare_pools(log.parent / "quota.jsonl")
+        return info, quota.format_spare_line(info)
     except Exception:
         return None, None
+
+
+def _claim_marker(marker):
+    """Record a one-time decision, even if two prompts check at the same time."""
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        marker.touch(exist_ok=False)
+    except OSError:
+        return False
+    return True
 
 
 def _tool_call_count(transcript, session):
@@ -259,38 +263,10 @@ def _tool_call_count(transcript, session):
     return len(ids)
 
 
-def _delegate_nudge(session, transcript):
-    """One-shot mid-session nudge, or None. Cheap checks before the transcript scan."""
-    if os.environ.get("CONTEXT_GUARD_NUDGE") == "0":
-        return None
-    marker = STATE / f"{session}.nudge"
-    if marker.exists():
-        return None
-    log = session_log_path()
-    start = _latest_start(log, session)
-    if (not isinstance(start, dict) or start.get("mode") != "orchestrator"
-            or start.get("excluded")):
-        return None
-    if _has_delegate_row(log, session):
-        return None
-    info, quota = _spare_info(log)
-    if not info or quota is None:
-        return None
-    line = quota.format_spare_line(info)
-    if not line:
-        return None
-    # Qualifying pool names for the nudge text (before the expensive scan).
-    labels = []
-    for pid, _, _ in info["pools"]:
-        labels.append("Codex 7d" if pid == "codex-7d" else "Cursor Auto")
-    if not labels:
-        return None
-    if _tool_call_count(Path(transcript), session) < NUDGE_CALLS:
-        return None
-    STATE.mkdir(parents=True, exist_ok=True)
-    try:
-        marker.write_text("1", encoding="utf-8")
-    except OSError:
+def _delegate_nudge(marker, info, line):
+    """One-shot mid-session nudge using the already checked quota reading."""
+    labels = ["Codex 7d" if pid == "codex-7d" else "Cursor Auto" for pid, _, _ in info["pools"]]
+    if not labels or not _claim_marker(marker):
         return None
     named = " and ".join(labels) if len(labels) <= 2 else ", ".join(labels[:-1]) + ", and " + labels[-1]
     additional = (
@@ -300,6 +276,36 @@ def _delegate_nudge(session, transcript):
     )
     system = f"context guard: {named} spare — consider `delegate` for the next build/test/doc step."
     return system, additional
+
+
+def _delegation_pushes(session, transcript):
+    """Return the first-prompt spare line and mid-session nudge, if due."""
+    if os.environ.get("CONTEXT_GUARD_NUDGE") == "0":
+        return None, None
+    spare_marker = STATE / f"{session}.spare"
+    nudge_marker = STATE / f"{session}.nudge"
+    first_prompt = not spare_marker.exists() and _claim_marker(spare_marker)
+    nudge_due = (not nudge_marker.exists() and transcript is not None
+                 and _tool_call_count(transcript, session) >= NUDGE_CALLS)
+    if not first_prompt and not nudge_due:
+        return None, None
+
+    log = session_log_path()
+    try:
+        start, delegated = _session_log_status(log, session)
+    except (OSError, ValueError):
+        return None, None
+    show_spare = first_prompt and start is None
+    orchestrator = start is None or (start.get("mode") == "orchestrator" and not start.get("excluded"))
+    nudge_due = nudge_due and orchestrator and not delegated
+    if not show_spare and not nudge_due:
+        return None, None
+
+    info, line = _spare_quota(log)
+    if not line:
+        return None, None
+    nudge = _delegate_nudge(nudge_marker, info, line) if nudge_due else None
+    return (line if show_spare and nudge is None else None), nudge
 
 
 def _size_reminder(session, ctx, transcript_path=None):
@@ -337,10 +343,12 @@ def main():
     # cursor-agent runs ~/.claude/settings.json hooks under its own event names (beforeSubmitPrompt).
     if data.get("hook_event_name", "UserPromptSubmit") != "UserPromptSubmit":
         return
-    transcript, session = data.get("transcript_path"), data.get("session_id") or "unknown"
-    if not transcript or not Path(transcript).is_file():
-        return
-    found = last_context(Path(transcript))
+    transcript_path, session_id = data.get("transcript_path"), data.get("session_id")
+    session = session_id or "unknown"
+    transcript = Path(transcript_path) if transcript_path else None
+    if transcript is not None and not transcript.is_file():
+        transcript = None
+    found = last_context(transcript) if transcript is not None else None
     ctx, ts_str = (found if found else (None, None))
     # UserPromptSubmit also fires for task notifications, /loop turns and subagent reports, and a
     # held prompt never reaches Claude: hold only what looks typed (2026-10-12, hooks docs).
@@ -349,23 +357,29 @@ def main():
     if ctx and typed and _idle_block(session, ctx, ts_str, transcript):
         return
     size = _size_reminder(session, ctx, transcript) if ctx and ctx >= FIRST else None
-    nudge = _delegate_nudge(session, transcript)
-    if not size and not nudge:
-        return
+    spare, nudge = (None, None)
+    if isinstance(session_id, str) and session_id:
+        spare, nudge = _delegation_pushes(session, transcript)
     system_parts, context_parts = [], []
     if size:
         system_parts.append(size[0])
         context_parts.append(size[1])
+    if spare:
+        context_parts.append(spare)
     if nudge:
         system_parts.append(nudge[0])
         context_parts.append(nudge[1])
-    print(json.dumps({
-        "systemMessage": " | ".join(system_parts),
+    if not context_parts:
+        return
+    output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": "\n\n".join(context_parts),
         },
-    }))
+    }
+    if system_parts:
+        output["systemMessage"] = " | ".join(system_parts)
+    print(json.dumps(output))
 
 
 if __name__ == "__main__":

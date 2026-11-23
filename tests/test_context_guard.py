@@ -1,16 +1,21 @@
-"""Tests for hooks/context-guard.py thresholds, idle block, and per-session dedupe."""
+"""Tests for hooks/context-guard.py thresholds, idle block, and delegation prompts."""
 import _env  # noqa: F401  — isolate HOME/XDG/PATH before scripts/hooks
+import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "context-guard.py"
+SPARE_LINE_PREFIX = "Delegate pools ahead of pace"
 
 
 def _ago(minutes=0, hours=0):
@@ -59,6 +64,7 @@ class ContextGuardTests(unittest.TestCase):
                               "prompt": text, **({"hook_event_name": event} if event else {})}),
             env=self.env, capture_output=True, text=True, check=True,
         )
+        self.assertEqual(r.stderr, "")
         return json.loads(r.stdout) if r.stdout.strip() else None
 
     def write_start(self, session="s1", mode="orchestrator", excluded=False):
@@ -72,7 +78,7 @@ class ContextGuardTests(unittest.TestCase):
             stream.write(json.dumps({"event": "delegate", "session": session,
                                      "command": "launch"}) + "\n")
 
-    def write_spare_quota(self):
+    def write_spare_quota(self, *, cursor_used_pct=1.0):
         now = datetime.now(timezone.utc)
         row = {"ts": (now - timedelta(minutes=30)).isoformat(), "pools": {
             "claude-5h": {"used_pct": 1.0, "resets_at": (now + timedelta(hours=4)).isoformat(),
@@ -83,7 +89,8 @@ class ContextGuardTests(unittest.TestCase):
                          "stale": False},
             "codex-7d": {"used_pct": 90.0, "resets_at": (now + timedelta(days=6)).isoformat(),
                          "stale": False},
-            "cursor-auto": {"used_pct": 1.0, "resets_at": (now + timedelta(days=20)).isoformat(),
+            "cursor-auto": {"used_pct": cursor_used_pct,
+                            "resets_at": (now + timedelta(days=20)).isoformat(),
                             "stale": False},
         }}
         self.quota_log.write_text(json.dumps(row) + "\n", encoding="utf-8")
@@ -203,27 +210,113 @@ class ContextGuardTests(unittest.TestCase):
         self.assertTrue(blocked["reason"].startswith("context guard:"))
         self.assertIn("~150k", self.prompt(150_000, append=False)["systemMessage"])
 
-    def _nudge_ready(self, session="s1", tools=30):
-        self.write_start(session)
+    def assert_spare_only(self, output):
+        self.assertEqual(set(output or {}), {"hookSpecificOutput"})
+        specific = output["hookSpecificOutput"]
+        self.assertEqual(specific["hookEventName"], "UserPromptSubmit")
+        self.assertTrue(specific["additionalContext"].startswith(SPARE_LINE_PREFIX))
+        self.assertIn("Cursor Auto", specific["additionalContext"])
+
+    def test_spare_line_on_first_prompt_only(self):
         self.write_spare_quota()
-        self.write_tool_calls(tools)
-        # Usage row so last_context finds something; stay under FIRST so size reminder is quiet.
-        return self.prompt(50_000, session_id=session)
+        self.assert_spare_only(self.prompt(50_000))
+        self.assertIsNone(self.prompt(50_000))
+        # A transcript change with the same session ID also keeps the decision.
+        self.transcript = self.tmp / "resumed.jsonl"
+        self.assertIsNone(self.prompt(50_000))
+        self.assert_spare_only(self.prompt(50_000, session_id="s2"))
+
+    def test_spare_line_does_not_need_a_transcript(self):
+        self.write_spare_quota()
+        self.assert_spare_only(self.prompt(0, append=False))
+        self.assertIsNone(self.prompt(50_000))
+
+    def test_spare_line_silent_with_any_start_row(self):
+        self.write_spare_quota()
+        for mode, excluded in (("orchestrator", False), ("claude-only", False),
+                               ("vanilla", False), ("orchestrator", True)):
+            with self.subTest(mode=mode, excluded=excluded):
+                session = f"{mode}-{excluded}"
+                self.write_start(session, mode=mode, excluded=excluded)
+                self.assertIsNone(self.prompt(50_000, session_id=session))
+        self.session_log.unlink()
+        self.assertIsNone(self.prompt(50_000, session_id="orchestrator-False"))
+
+    def test_spare_line_does_not_wait_for_a_spare_reading(self):
+        self.write_spare_quota(cursor_used_pct=100.0)
+        self.assertIsNone(self.prompt(50_000))
+        self.write_spare_quota()
+        self.assertIsNone(self.prompt(50_000))
+
+    def test_spare_line_disabled_with_nudge(self):
+        self.env["CONTEXT_GUARD_NUDGE"] = "0"
+        self.write_spare_quota()
+        self.write_tool_calls(30)
+        self.assertIsNone(self.prompt(50_000))
+
+    def test_spare_line_waits_for_resend_after_idle_block(self):
+        self.write_spare_quota()
+        blocked = self.prompt(110_000, timestamp=_ago(hours=2))
+        self.assertEqual(blocked["decision"], "block")
+        self.assertNotIn("hookSpecificOutput", blocked)
+        self.assert_spare_only(self.prompt(110_000, append=False))
+        self.assertIsNone(self.prompt(110_000, append=False))
+
+    def test_spare_line_on_command_or_notification(self):
+        self.write_spare_quota()
+        for i, prompt in enumerate(("/next", "<task-notification>")):
+            with self.subTest(prompt=prompt):
+                self.assert_spare_only(self.prompt(110_000, timestamp=_ago(hours=2),
+                                                  session_id=f"s{i}", text=prompt))
+
+    def test_spare_line_appears_once_when_nudge_fires_on_first_prompt(self):
+        self.write_spare_quota()
+        self.write_tool_calls(30)
+        out = self.prompt(50_000)
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Delegation nudge", context)
+        self.assertEqual(context.count(SPARE_LINE_PREFIX), 1)
+        self.assertIsNone(self.prompt(50_000, append=False))
 
     def test_delegate_nudge_fires_once_at_threshold(self):
-        first = self._nudge_ready(tools=30)
+        self.write_start()
+        self.write_spare_quota()
+        self.write_tool_calls(30)
+        first = self.prompt(50_000)
         self.assertIsNotNone(first)
         self.assertIn("Delegation nudge", first["hookSpecificOutput"]["additionalContext"])
         self.assertIn("Cursor Auto", first["hookSpecificOutput"]["additionalContext"])
         self.assertIn("delegate", first["systemMessage"])
         self.assertIsNone(self.prompt(50_000, append=False))  # once per session
 
+    def test_delegate_nudge_fires_at_threshold_without_start(self):
+        self.write_spare_quota()
+        self.write_tool_calls(29)
+        self.assert_spare_only(self.prompt(50_000))
+        self.write_tool_calls(1, start_id=29)
+        out = self.prompt(50_000)
+        self.assertIn("Delegation nudge", out["hookSpecificOutput"]["additionalContext"])
+        self.assertIsNone(self.prompt(50_000, append=False))
+
+    def test_delegate_row_suppresses_nudge_without_start(self):
+        self.write_delegate()
+        self.write_spare_quota()
+        self.write_tool_calls(30)
+        self.assert_spare_only(self.prompt(50_000))
+        self.assertIsNone(self.prompt(50_000, append=False))
+
+    def test_delegate_row_with_overlapping_session_id_does_not_suppress_nudge(self):
+        self.write_delegate(session="before-s1-after")
+        self.write_spare_quota()
+        self.write_tool_calls(30)
+        out = self.prompt(50_000)
+        self.assertIn("Delegation nudge", out["hookSpecificOutput"]["additionalContext"])
+
     def test_delegate_nudge_silent_when_blocked_or_ineligible(self):
         cases = [
             ("claude-only", dict(mode="claude-only")),
             ("vanilla", dict(mode="vanilla")),
             ("excluded", dict(excluded=True)),
-            ("no-start", None),
             ("has-delegate", "delegate"),
             ("sidechain", "sidechain"),
             ("below-threshold", "below"),
@@ -247,10 +340,6 @@ class ContextGuardTests(unittest.TestCase):
                     blocked = self.prompt(150_000, timestamp=_ago(hours=2))
                     self.assertEqual(blocked["decision"], "block")
                     self.assertNotIn("Delegation nudge", json.dumps(blocked))
-                elif setup is None:
-                    self.write_spare_quota()
-                    self.write_tool_calls(30)
-                    self.assertIsNone(self.prompt(50_000))
                 elif setup == "delegate":
                     self.write_start()
                     self.write_delegate()
@@ -277,6 +366,25 @@ class ContextGuardTests(unittest.TestCase):
                     self.write_tool_calls(30)
                     self.assertIsNone(self.prompt(50_000))
 
+    def test_delegate_nudge_uses_latest_start_row(self):
+        self.write_start()
+        self.write_start(mode="vanilla")
+        self.write_spare_quota()
+        self.write_tool_calls(30)
+        self.assertIsNone(self.prompt(50_000))
+        self.write_start()
+        out = self.prompt(50_000)
+        self.assertIn("Delegation nudge", out["hookSpecificOutput"]["additionalContext"])
+
+    def test_missing_and_malformed_session_logs_stay_silent_without_spare(self):
+        self.write_tool_calls(30)
+        self.assertIsNone(self.prompt(50_000))
+        self.session_log.write_text('{"session": "s1",\n', encoding="utf-8")
+        self.assertIsNone(self.prompt(50_000))
+        self.write_delegate()
+        self.write_spare_quota()
+        self.assertIsNone(self.prompt(50_000))
+
     def test_delegate_nudge_merges_with_size_reminder(self):
         self.write_start()
         self.write_spare_quota()
@@ -291,13 +399,48 @@ class ContextGuardTests(unittest.TestCase):
         self.assertIn("delegate", out["systemMessage"])
         self.assertIn(" | ", out["systemMessage"])
 
-    def test_tool_call_count_rereads_partial_last_line(self):
-        import importlib.util
+    def load_guard(self):
         spec = importlib.util.spec_from_file_location("context_guard", HOOK)
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
         guard.STATE = self.tmp / "state"
         guard.NUDGE_CALLS = 30
+        return guard
+
+    def test_session_log_read_once_per_prompt_only_when_needed(self):
+        guard = self.load_guard()
+        self.write_spare_quota()
+        self.write_tool_calls(29)
+
+        def submit(session):
+            data = {"transcript_path": str(self.transcript), "session_id": session}
+            with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(data))), redirect_stdout(io.StringIO()):
+                guard.main()
+
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(
+            guard, "_session_log_status", wraps=guard._session_log_status,
+        ) as read_log:
+            submit("s1")
+            read_log.assert_called_once_with(self.session_log, "s1")
+            read_log.reset_mock()
+
+            submit("s1")  # first-prompt decision recorded, still below threshold
+            read_log.assert_not_called()
+            self.write_tool_calls(1, start_id=29)
+
+            submit("s2")  # both the first-prompt line and the nudge are due
+            read_log.assert_called_once_with(self.session_log, "s2")
+            read_log.reset_mock()
+
+            submit("s1")  # only the nudge is due now
+            read_log.assert_called_once_with(self.session_log, "s1")
+            read_log.reset_mock()
+
+            submit("s1")  # both decisions recorded
+            read_log.assert_not_called()
+
+    def test_tool_call_count_rereads_partial_last_line(self):
+        guard = self.load_guard()
         session = "partial"
         complete = json.dumps({
             "type": "assistant",
