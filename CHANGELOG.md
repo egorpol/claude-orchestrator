@@ -6,6 +6,10 @@ The default install symlinks the skills into `~/.claude/skills/`, so an installe
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
+Everything from 2026-11-10 to 11-23. The larger changes: ratings read only Artificial Analysis's free API with your own key, and the repo ships no AA data (the leaderboard page scrape is gone, and the copied figures were removed from the history, so every commit has a new SHA and the earlier tags moved); `install.sh --uninstall`, with reinstalls and uninstalls that still work after the checkout moves; the Codex delegates on GPT-6.2 Sol and Astra; `hooks/context-guard.py` giving the spare-quota line and the delegation nudge without the session-mode hook; and README reporting the control-session experiment as read after the freeze: inconclusive, so no saving is claimed. Four fixes make `delegate cleanup` safer: it refuses to delete work it can't account for, and `--force` still finishes when git has lost track of the worktree. Each followup round and each review now keeps its own patch.
+
 ### Added
 
 - `delegate route --frontier` reports the installed Codex CLI version alongside the models cache's `client_version`. It warns when the cache came from a newer client and its listed models may require `codex update`, or when `codex --version` fails to report a version.
@@ -275,7 +279,8 @@ The repo was private and unversioned before 0.1.0. Its 12 commits:
 - 2026-10-13 `248b1e5`: decisions in pickers; `ask --agent both`.
 - 2026-10-13 `f5e2511`: MIT licence and README positioning; `launch` rolls back the worktree when `--link` is rejected.
 
-[Unreleased]: https://github.com/egorpol/claude-orchestrator/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/egorpol/claude-orchestrator/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/egorpol/claude-orchestrator/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/egorpol/claude-orchestrator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/egorpol/claude-orchestrator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/egorpol/claude-orchestrator/releases/tag/v0.1.0

@@ -98,7 +98,7 @@ The tests use fake `codex` and `cursor-agent` scripts, so they spend no quota. E
 ## Roadmap
 
 - Automatic field reports, shelved 2026-10-27: Cursor Auto was to write lessons for the sessions that get no `/field-report` (about 89%), but two trials against sessions that have one recalled about 40% of the hand reports' lessons, under the 50% bar. The design and results are in [docs/auto-field-reports.md](docs/auto-field-reports.md).
-- The [preregistered](docs/preregistration.md) control-session experiment closed on 2026-11-14 and was read after the freeze, on 2026-11-22: inconclusive (above). On my machine its session-mode hook now runs in light mode (weights 1/0/0, summaries and quota snapshots off, as in [Running your own control window](#running-your-own-control-window)) and the rate timer is off. Removing the hook here is the next step. A follow-up would be a new registered window.
+- The [preregistered](docs/preregistration.md) control-session experiment closed on 2026-11-14 and was read after the freeze, on 2026-11-22: inconclusive (above). On my machine the session-mode hook and the rate timer were removed on 2026-11-23; `hooks/context-guard.py` now gives the spare-quota line and the delegation nudge, and the rules come from the `--rules` import. A follow-up would be a new registered window.
 
 ## Docs
 
